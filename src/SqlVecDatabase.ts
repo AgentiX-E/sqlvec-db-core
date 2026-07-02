@@ -45,7 +45,7 @@ export class SqlVecDatabase {
     
     const olapSchemaManager = new OLAPSchemaManager(this.duckDBAnalytics);
     this.dataBridge = new DataBridge(this.duckDBAnalytics, olapSchemaManager, this.shardManager, DEFAULT_DATA_BRIDGE_CONFIG);
-    try { this.dataBridge.start() } catch (e) { this.logger.warn("DataBridge unavailable") }.catch((e: any) => this.logger.error({ err: e?.message }, 'DataBridge start failed'));
+    try { this.dataBridge.start() } catch (e) { this.logger.warn("DataBridge unavailable") }
     
     if (this.config.vector?.enabled !== false) {
       this.vectorEngine = new VectorEngine(this.shardManager, this.config.vector || { dimension: 768, mode: 'auto' as any }, dataDir);

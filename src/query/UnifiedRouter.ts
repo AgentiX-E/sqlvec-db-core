@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * UnifiedRouter — Unified OLTP+OLAP query routing pipeline.
  *
@@ -43,7 +42,7 @@ import {
   QueryClassifierContext,
 } from '../analytics/AnalyticQueryClassifier';
 import { ParsedStatement } from './SqlParser';
-
+import { RouteMetrics } from '../monitoring/RouteMetrics';
 import { CostEstimator } from './CostEstimator';
 import { HotQueryCache } from './HotQueryCache';
 

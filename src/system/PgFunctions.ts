@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * PgFunctions — PostgreSQL core SQL function simulation layer
  *
@@ -13,8 +12,8 @@
  */
 
 import * as crypto from 'node:crypto';
-
-
+import { GucSystem } from '../core/GucSystem';
+import type { RowLockManager } from '../consensus/RowLockManager';
 
 /** Global lock manager for pg_blocking_pids */
 let blockingPidsLockMgr: RowLockManager | null = null;

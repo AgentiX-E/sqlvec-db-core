@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * ShardManager — SQLite-based sharded storage with vector index support
  *
@@ -24,7 +23,7 @@ import {
   VectorConfig,
   SqlVecError,
   SqlVecErrorCode,
-} from '../types';
+} from '../types/types-raw';
 import { TDEEngine, type TDEAlgorithm } from './TDEEngine';
 import { TDEConfig } from './TDEConfig';
 import { WriteWorkerPool } from './WriteWorkerPool';
@@ -75,8 +74,8 @@ export class ShardManager {
     this.ensureDir(storageDir);
 
     // Initialize TDE from environment (also sets policies dir for persistence)
-    // TDE stub
-    // TDE stub
+    TDEConfig.setPoliciesDir(storageDir);
+    TDEConfig.initFromEnv();
     const tdeConfig = TDEConfig.loadFromEnv();
     if (tdeConfig.enabled && tdeConfig.key) {
       this.tdeEngine = new TDEEngine({
@@ -1190,7 +1189,7 @@ export class ShardManager {
     }
 
     // Update the environment for subsequent operations
-    // TDE key rotation stub;
+    process.env.SQLVEC_TDE_KEY = newKeyBase64;
 
     logger.info(
       { successCount: Object.values(results).filter(r => r.success).length, totalCount: Object.keys(results).length },
