@@ -11,15 +11,18 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "async-mutex": "^0.5.0",
     "better-sqlite3": "^12.10.0",
+    "buffer-crc32": "^1.0.0",
     "duckdb": "^1.4.4",
+    "flatbush": "^4.5.1",
+    "hash-wasm": "^4.12.0",
+    "node-forge": "^1.4.0",
     "pgsql-ast-parser": "^12.0.2",
     "pino": "^9.14.0",
-    "zod": "^4.4.3",
-    "async-mutex": "^0.5.0",
-    "buffer-crc32": "^1.0.0",
-    "hash-wasm": "^4.12.0",
-    "flatbush": "^4.5.1"
+    "rbush": "^4.0.1",
+    "safe-eval": "^0.4.1",
+    "zod": "^4.4.3"
   },
   "optionalDependencies": {
     "hnswlib-node": "^3.0.0"
@@ -31,13 +34,30 @@
     "typescript": "^5.3.0",
     "vitest": "^4.1.7"
   },
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "license": "MIT",
-  "files": ["dist/", "README.md", "LICENSE"],
-  "publishConfig": { "access": "public" },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/AgentiX-E/sqlvec-db-core.git"
   },
-  "keywords": ["sql", "vector", "database", "htap", "embeddable", "sqlite", "duckdb", "hnsw"]
+  "keywords": [
+    "sql",
+    "vector",
+    "database",
+    "htap",
+    "embeddable",
+    "sqlite",
+    "duckdb",
+    "hnsw"
+  ]
 }

@@ -24,7 +24,7 @@ jobs:
           node-version: '22'
       - run: npm ci
       - run: npx tsc --noEmit
-      - run: npx vitest run --pool=forks 2>&1 || true
+      - run: npx vitest run --pool=forks 
 
   publish-npm:
     needs: quality
