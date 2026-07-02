@@ -1,0 +1,43 @@
+{
+  "name": "@agentix-e/sqlvec-db-core",
+  "version": "0.1.0-alpha",
+  "description": "Embeddable HTAP database engine — SQLite OLTP + DuckDB OLAP with real-time CDC",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "vitest run --pool=forks",
+    "test:coverage": "vitest run --coverage",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "duckdb": "^1.4.4",
+    "pgsql-ast-parser": "^12.0.2",
+    "pino": "^9.14.0",
+    "zod": "^4.4.3",
+    "async-mutex": "^0.5.0",
+    "buffer-crc32": "^1.0.0",
+    "hash-wasm": "^4.12.0",
+    "flatbush": "^4.5.1"
+  },
+  "optionalDependencies": {
+    "hnswlib-node": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^20.0.0",
+    "@vitest/coverage-v8": "^4.1.7",
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.7"
+  },
+  "engines": { "node": ">=20.0.0" },
+  "license": "MIT",
+  "files": ["dist/", "README.md", "LICENSE"],
+  "publishConfig": { "access": "public" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AgentiX-E/sqlvec-db-core.git"
+  },
+  "keywords": ["sql", "vector", "database", "htap", "embeddable", "sqlite", "duckdb", "hnsw"]
+}
