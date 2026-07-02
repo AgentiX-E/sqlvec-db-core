@@ -36,12 +36,16 @@ export class SqlVecDatabase {
     await this.shardManager.initialize(shardCount);
     
     this.duckDBAnalytics = getDuckDBAnalyticsManager(`${dataDir}/duckdb_analytics.db`);
-    await this.duckDBAnalytics.init();
-    if (this.duckDBAnalytics.isAvailable) await this.duckDBAnalytics.setMemoryLimit(2048);
+    try {
+      await this.duckDBAnalytics.init();
+      if (this.duckDBAnalytics.isAvailable) await this.duckDBAnalytics.setMemoryLimit(2048);
+    } catch (err: any) {
+      this.logger.warn({ err: err?.message }, '[SqlVec] DuckDB unavailable — running OLTP-only');
+    }
     
     const olapSchemaManager = new OLAPSchemaManager(this.duckDBAnalytics);
     this.dataBridge = new DataBridge(this.duckDBAnalytics, olapSchemaManager, this.shardManager, DEFAULT_DATA_BRIDGE_CONFIG);
-    this.dataBridge.start().catch((e: any) => this.logger.error({ err: e?.message }, 'DataBridge start failed'));
+    try { this.dataBridge.start() } catch (e) { this.logger.warn("DataBridge unavailable") }.catch((e: any) => this.logger.error({ err: e?.message }, 'DataBridge start failed'));
     
     if (this.config.vector?.enabled !== false) {
       this.vectorEngine = new VectorEngine(this.shardManager, this.config.vector || { dimension: 768, mode: 'auto' as any }, dataDir);
