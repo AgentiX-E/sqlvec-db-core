@@ -1,1 +1,1 @@
-export class BottleneckRateLimiter {}
+export class BottleneckRateLimiter { constructor(_opts?: any) {} }

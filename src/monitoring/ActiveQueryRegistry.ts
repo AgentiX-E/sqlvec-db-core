@@ -1,1 +1,1 @@
-export class ActiveQueryRegistry { getActiveQueries() { return []; } }
+export class ActiveQueryRegistry { getActiveQueries() { return []; } list() { return []; } }

@@ -1,1 +1,1 @@
-export class FencingManager {}
+export class FencingManager { static getInstance() { return new FencingManager(); } }

@@ -1,4 +1,1 @@
-export class ConnectionManager { 
-  getActiveQueries() { return []; } 
-  getSessionIds() { return []; } 
-}
+export class ConnectionManager { getActiveQueries() { return []; } getSessionIds() { return []; } }

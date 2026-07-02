@@ -1,1 +1,1 @@
-export class DedupRing { add() { return true; } has() { return false; } }
+export class DedupRing { constructor(_opts?: any) {} add(_k: string) { return true; } has(_k: string) { return false; } }

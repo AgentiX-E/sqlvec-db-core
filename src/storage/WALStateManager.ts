@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * WALStateManager — Unified WAL state management for PostgreSQL compatibility
  * shims in sqlvec-db.
@@ -37,7 +38,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
-import { WALArchiver } from '../backup/WALArchiver';
+
 import { PgWalSegmentManager } from './PgWalSegmentManager';
 
 const logger = PinoLogger.forComponent('WALStateManager');

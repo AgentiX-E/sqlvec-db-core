@@ -1,1 +1,1 @@
-export class RoleManager { getRole() { return {}; } isMemberOf() { return true; } }
+export class RoleManager { getRole(_n: string) { return { superuser: false }; } isMemberOf(..._a: any[]) { return true; } }

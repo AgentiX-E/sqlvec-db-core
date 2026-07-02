@@ -1,1 +1,1 @@
-export class RowLockManager {}
+export class RowLockManager { static getInstance() { return new RowLockManager(); } }
