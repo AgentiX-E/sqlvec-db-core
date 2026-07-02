@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.db
+*.db-shm
+*.db-wal
+data/
+logs/
+coverage/
+.env
+.env.local
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.bak
