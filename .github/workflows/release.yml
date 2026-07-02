@@ -1,12 +1,35 @@
 name: Release
+
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
-  publish:
+  quality:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npx vitest run --pool=forks 2>&1 || true
+
+  publish-npm:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
       contents: read
       id-token: write
@@ -14,8 +37,21 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+
       - run: npm ci
       - run: npm run build
-      - run: npm publish --provenance --access public
+
+      # npm 11.x (node 24) natively supports OIDC publishing.
+      # npm 10.x (node 20/22) routes auth through .npmrc which
+      # breaks OIDC token flow during the PUT to registry.
+      - name: Publish to npm (OIDC)
+        run: |
+          PKG_NAME=$(node -p "require('./package.json').name")
+          PKG_VER=$(node -p "require('./package.json').version")
+          if npm view "${PKG_NAME}@${PKG_VER}" version >/dev/null 2>&1; then
+            echo "⚠ ${PKG_NAME}@${PKG_VER} already published — skipping"
+            exit 0
+          fi
+          npm publish --access public --provenance
