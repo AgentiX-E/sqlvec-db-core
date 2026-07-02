@@ -11,17 +11,25 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@turf/turf": "^7.3.5",
     "async-mutex": "^0.5.0",
     "better-sqlite3": "^12.10.0",
     "buffer-crc32": "^1.0.0",
+    "cron": "^4.4.0",
     "duckdb": "^1.4.4",
     "flatbush": "^4.5.1",
     "hash-wasm": "^4.12.0",
+    "jieba-wasm": "^2.4.0",
+    "minisearch": "^7.2.0",
+    "natural": "^8.1.1",
     "node-forge": "^1.4.0",
     "pgsql-ast-parser": "^12.0.2",
     "pino": "^9.14.0",
+    "piscina": "^5.2.0",
     "rbush": "^4.0.1",
     "safe-eval": "^0.4.1",
+    "simple-statistics": "^7.9.2",
     "zod": "^4.4.3"
   },
   "optionalDependencies": {

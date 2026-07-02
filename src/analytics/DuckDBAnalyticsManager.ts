@@ -71,18 +71,14 @@ export class DuckDBAnalyticsManager {
       return;
     }
 
-    // Step 2: Load sqlite_scanner extension for SQLite shard ATTACH support.
-    // If loading fails (e.g., extension not compiled for this platform, or
-    // database file state conflicts), fall back to 'no-scanner' mode where
-    // shard ATTACH is unavailable but native DuckDB queries still work.
-    try {
-      await this.execSQL('LOAD sqlite_scanner');
-      this._availability = 'available';
-      logger.debug('[DuckDBAnalytics] Initialized (sqlite_scanner loaded)');
-    } catch (err: any) {
-      this._availability = 'no-scanner';
-      logger.warn({ err: err.message }, '[DuckDBAnalytics] sqlite_scanner unavailable, shard ATTACH deferred');
-    }
+    // Step 2: sqlite_scanner is deferred to first attachShard() call.
+    // Loading it eagerly causes SIGABRT in duckdb@1.4.4 on Node 22+glibc
+    // (unique_ptr AssertNotNull in ExecTask::DoWork).  We default to
+    // 'no-scanner' mode — native DuckDB queries work, SQLite shard ATTACH
+    // is attempted lazily when attachShard() is first called.
+    this._availability = 'no-scanner';
+    logger.debug('[DuckDBAnalytics] Initialized (sqlite_scanner deferred)');
+
   }
 
   /**
