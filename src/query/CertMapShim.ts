@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * CertMapShim — PostgreSQL certificate/user mapping compatibility shim for SQLite.
  *

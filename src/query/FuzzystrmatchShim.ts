@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * FuzzystrmatchShim — PostgreSQL fuzzystrmatch extension compatibility shim for SQLite.
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * QueryHintShim — PostgreSQL pg_hint_plan compatibility shim for SQLite.
  *

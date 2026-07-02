@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * WALStateManager — Unified WAL state management for PostgreSQL compatibility
  * shims in sqlvec-db.

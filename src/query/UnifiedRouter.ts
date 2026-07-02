@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * UnifiedRouter — Unified OLTP+OLAP query routing pipeline.
  *

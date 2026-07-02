@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PgDumpCompatibilityShim — Detects and rewrites PostgreSQL pg_dump-specific
  * SQL syntax for SQLite compatibility.

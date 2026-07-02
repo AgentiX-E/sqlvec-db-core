@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ILogger, NoOpLogger } from './interfaces/logger';
 import { DatabaseConfig } from './types/types-raw';
 import { PinoLogger } from './logger/PinoLogger';

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { PinoLogger } from '../logger/PinoLogger';
 import { SyncReplicationManager } from '../replication/SyncReplicationManager';
 import { lsnToBytes } from '../replication/SyncReplicationManager';

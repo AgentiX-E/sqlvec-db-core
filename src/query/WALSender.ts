@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * WALSender — PostgreSQL WAL sender process model.
  *

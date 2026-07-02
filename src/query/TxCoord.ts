@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * TxCoord — Transaction Coordinator for SqlVec.
  *

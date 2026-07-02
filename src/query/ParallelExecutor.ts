@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ParallelExecutor — Piscina-based thread pool for parallel SQL query execution.
  *

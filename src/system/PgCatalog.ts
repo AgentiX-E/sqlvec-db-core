@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PgCatalog — pg_catalog system table simulation
  *

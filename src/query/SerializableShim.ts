@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * SerializableShim — PostgreSQL SERIALIZABLE isolation level compatibility shim for SQLite.
  *

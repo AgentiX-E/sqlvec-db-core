@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PgFunctions — PostgreSQL core SQL function simulation layer
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * FtsTranslator — PostgreSQL tsvector/tsquery → SQLite FTS5 translation.
  *

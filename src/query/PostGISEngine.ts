@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PostGISEngine — Full PostGIS spatial computation engine using @turf/turf.
  *

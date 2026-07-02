@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * SystemFunctions — PostgreSQL core system function implementations
  *

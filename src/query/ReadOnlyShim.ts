@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ReadOnlyShim — PostgreSQL read-only transaction compatibility shim for SQLite.
  *

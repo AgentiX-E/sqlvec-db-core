@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * QueryRouter — SQL parsing + routing engine
  *

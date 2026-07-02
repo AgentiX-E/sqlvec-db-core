@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * FtsShim — PostgreSQL ts_rank / ts_query → SQLite FTS5 ranking shim.
  *

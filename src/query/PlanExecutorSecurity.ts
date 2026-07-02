@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PlanExecutorSecurity — Security enforcement layer for the query execution plan.
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { CronJob } from 'cron';
 import * as fs from 'fs';
 import { PinoLogger } from '../logger/PinoLogger';

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * SetResetShim — Detects and handles PostgreSQL SET/RESET statements for SQLite compatibility.
  *

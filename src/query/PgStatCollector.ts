@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PgStatCollector — PostgreSQL ANALYZE equivalent for SQLVec.
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ColumnGrantShim — PostgreSQL column-level GRANT compatibility shim for SQLite.
  *

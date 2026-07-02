@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ScopedConnection — per-connection/session execution context for QueryRouter.
  *

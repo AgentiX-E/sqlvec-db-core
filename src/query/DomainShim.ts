@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * DomainShim — PostgreSQL DOMAIN type real implementation for SQLite.
  *

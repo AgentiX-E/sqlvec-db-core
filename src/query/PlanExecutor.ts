@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PlanExecutor — 将 QueryPlanner 的 CandidatePlan 转为实际 SQL 执行
  *

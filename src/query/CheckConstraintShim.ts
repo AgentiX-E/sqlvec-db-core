@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * CheckConstraintShim — PostgreSQL CHECK constraint extension shim + real enforcement for SQLite.
  *

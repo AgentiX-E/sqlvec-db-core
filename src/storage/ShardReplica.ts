@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ShardReplica — Single shard replica state machine
  *

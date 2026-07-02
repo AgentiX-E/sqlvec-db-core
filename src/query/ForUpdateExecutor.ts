@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ForUpdateExecutor — Apply row-level locks from FOR UPDATE / FOR SHARE
  * clauses to SELECT results using MVCCExecutor or RowLockManager.

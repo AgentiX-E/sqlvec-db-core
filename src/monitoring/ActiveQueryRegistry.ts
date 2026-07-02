@@ -1,1 +1,5 @@
-export class ActiveQueryRegistry { getActiveQueries() { return []; } list() { return []; } }
+import type { ActiveQuery } from './ConnectionManager';
+export class ActiveQueryRegistry {
+  getActiveQueries(): ActiveQuery[] { return []; }
+  list(): ActiveQuery[] { return []; }
+}

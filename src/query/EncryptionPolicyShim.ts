@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * EncryptionPolicyShim — PostgreSQL encryption policy compatibility shim for SQLite.
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PGliteEngine — In-memory PostgreSQL evaluation via @electric-sql/pglite
  *

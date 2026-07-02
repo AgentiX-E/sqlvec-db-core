@@ -1,2 +1,2 @@
 export class PITRManager {}
-export type PitrMgrType = any;
+export interface PitrMgrType { isActive: boolean; lastWalLsn: string; }

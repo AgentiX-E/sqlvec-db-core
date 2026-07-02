@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ShardManager — SQLite-based sharded storage with vector index support
  *

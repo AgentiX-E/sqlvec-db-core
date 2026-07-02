@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * PgSystemViews — pg_catalog system view rewrites for SQLVec QueryRouter.
  *

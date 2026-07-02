@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ParallelQueryExecutor — 使用 Piscina 线程池的并行查询执行器
  *

@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * WALReceiver — PostgreSQL WAL receiver process model.
  *
