@@ -17,7 +17,7 @@
  */
 
 import type { TransactionStatement } from './SqlParser';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { IdleTxnTimeoutManager, DEFAULT_IDLE_TXN_TIMEOUT_MS } from '../protocol/IdleTxnTimeout';
 import type { TransactionCoordinator } from '../pipeline/types';
 

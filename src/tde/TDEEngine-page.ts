@@ -28,7 +28,7 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('TDEEngine');
 

@@ -20,7 +20,7 @@
  *   - 无 key / 复杂语句 / DDL → broadcast 或 shard 0
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('SqlProfileCache');
 

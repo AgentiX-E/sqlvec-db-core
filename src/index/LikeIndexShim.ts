@@ -18,7 +18,7 @@
  * For ILIKE / SIMILAR TO: FTS5 MATCH alone suffices (FTS5 is already CI).
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('LikeIndexShim');
 

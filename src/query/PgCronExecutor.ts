@@ -1,6 +1,6 @@
 import { CronJob } from 'cron';
 import * as fs from 'fs';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 /**
  * PgCronExecutor — PostgreSQL pg_cron compatibility shim for SQLVec.

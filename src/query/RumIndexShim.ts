@@ -16,7 +16,7 @@
  * @module query/RumIndexShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('rum-index-shim');
 

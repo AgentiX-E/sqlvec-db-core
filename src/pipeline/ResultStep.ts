@@ -11,7 +11,7 @@
  * @see docs/ARCHITECTURE-OPTIMIZATION-PLAN.md §2
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { ExecutionResult, PipelineOutput, StatementCategory } from './types';
 
 const logger = PinoLogger.forComponent('ResultStep');

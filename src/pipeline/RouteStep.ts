@@ -12,7 +12,7 @@
  * @see docs/ARCHITECTURE-OPTIMIZATION-PLAN.md §2
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ShardManager } from '../storage/ShardManager';
 import type {
   PipelineContext,

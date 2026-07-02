@@ -27,7 +27,7 @@
  * @module query/ForUpdateExecutor
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { RowLockManager, LockMode as RowLockMode } from '../consensus/RowLockManager';
 import { MVCCExecutor } from './MVCCExecutor';
 import type { ForUpdateClause } from './ForUpdateShim';

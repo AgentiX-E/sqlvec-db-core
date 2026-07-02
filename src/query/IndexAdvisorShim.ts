@@ -44,7 +44,7 @@
  * @module IndexAdvisorShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { parse } from 'pgsql-ast-parser';
 import type Database from 'better-sqlite3';
 

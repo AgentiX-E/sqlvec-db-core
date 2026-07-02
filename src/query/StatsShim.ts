@@ -33,7 +33,7 @@
  * @module query/StatsShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { PgCatalog } from '../system/PgCatalog';
 import { SystemCatalog } from '../system/SystemCatalog';
 

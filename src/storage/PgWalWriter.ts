@@ -33,7 +33,7 @@
  * @module PgWalWriter
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { PgWalSegmentManager } from './PgWalSegmentManager';
 import { WALStateManager } from './WALStateManager';
 

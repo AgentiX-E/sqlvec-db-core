@@ -23,7 +23,7 @@
  *   (only these truly require manual rewriting)
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { detectLateral, rewriteLateral, type LateralResult } from './LateralJoinRewriter';
 import { detectCorrelation, type CorrelationRef } from './CorrelationDetector';
 

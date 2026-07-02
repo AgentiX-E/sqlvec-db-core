@@ -22,7 +22,7 @@
  * @module ColumnGrantShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ColumnGrantChecker } from '../security/ColumnGrantChecker';
 
 const logger = PinoLogger.forComponent('ColumnGrantShim');

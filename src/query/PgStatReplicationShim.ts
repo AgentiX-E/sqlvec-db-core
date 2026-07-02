@@ -1,4 +1,4 @@
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { SyncReplicationManager } from '../replication/SyncReplicationManager';
 import { lsnToBytes } from '../replication/SyncReplicationManager';
 

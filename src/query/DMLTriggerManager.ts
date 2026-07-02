@@ -29,7 +29,7 @@
  * @module query/DMLTriggerManager
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { PGliteEngine } from './PGliteEngine';
 
 // ── Constants ────────────────────────────────────────────────────

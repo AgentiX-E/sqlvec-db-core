@@ -22,7 +22,7 @@
  * @see docs/analytics-optimization-design.md §6
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ParsedStatement, SelectStatement } from '../query/SqlParser';
 
 const logger = PinoLogger.forComponent('AnalyticClassifier');

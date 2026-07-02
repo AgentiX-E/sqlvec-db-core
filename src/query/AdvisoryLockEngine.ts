@@ -7,7 +7,7 @@
  */
 
 import { Mutex, MutexInterface } from 'async-mutex';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 interface LockEntry {
   mutex: InstanceType<typeof Mutex>;

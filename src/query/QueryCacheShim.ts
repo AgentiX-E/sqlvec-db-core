@@ -41,7 +41,7 @@
  * @module QueryCacheShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { PgCatalog } from '../system/PgCatalog';
 
 const logger = PinoLogger.forComponent('QueryCacheShim');

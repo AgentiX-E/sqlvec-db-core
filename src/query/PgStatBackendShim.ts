@@ -13,7 +13,7 @@
  * signature (set of int4).
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('pg-stat-backend');
 

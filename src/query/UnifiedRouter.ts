@@ -33,7 +33,7 @@
  * @see RouteDecision   — Shared decision types
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { DuckDBExecutor, DuckDBExecResult } from './DuckDBExecutor';
 import { RouteDecision, DEFAULT_FALLBACK_DECISION, ExecutionResult } from './RouteDecision';
 import {

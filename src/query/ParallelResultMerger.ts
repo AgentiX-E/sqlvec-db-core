@@ -16,7 +16,7 @@
  * @module query/ParallelResultMerger
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import * as os from 'node:os';
 
 const logger = PinoLogger.forComponent('ParallelResultMerger');

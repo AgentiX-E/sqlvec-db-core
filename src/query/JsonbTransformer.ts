@@ -438,7 +438,7 @@ export function transformJsonbMutation(sql: string): JsonbTransformResult {
 // Each group provides detect + rewrite exported pairs.
 // ══════════════════════════════════════════════════════════════
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const jsonFuncLogger = PinoLogger.forComponent('JsonbTransformer::JSONFuncs');
 

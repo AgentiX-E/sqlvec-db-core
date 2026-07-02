@@ -19,7 +19,7 @@
  * @module QueryHintShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { GucSystem } from '../core/GucSystem';
 
 const logger = PinoLogger.forComponent('QueryHintShim');

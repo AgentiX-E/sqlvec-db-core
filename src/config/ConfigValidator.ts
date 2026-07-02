@@ -8,7 +8,7 @@
 import { SqlVecConfigSchema, SqlVecRawConfigSchema } from './ConfigSchema';
 import type { SqlVecConfigInferred } from './ConfigSchema';
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 const logger = PinoLogger.forComponent('ConfigValidator');
 
 export interface ValidationResult {

@@ -49,7 +49,7 @@
  * @module query/SerializableShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { DatabaseError } from '../error/DatabaseError';
 import { GucSystem } from '../core/GucSystem';
 

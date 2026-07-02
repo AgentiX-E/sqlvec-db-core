@@ -35,7 +35,7 @@
  * @module MFAShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { SecurityNoticeCollector } from './SecurityNoticeCollector';
 
 const logger = PinoLogger.forComponent('MFAShim');

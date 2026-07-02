@@ -19,7 +19,7 @@
  * so the rest of the engine sees a regular SELECT statement.
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('TableStatementShim');
 

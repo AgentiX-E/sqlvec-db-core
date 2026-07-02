@@ -24,7 +24,7 @@
  * @see docs/analytics-optimization-design.md §8
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { DuckDBAnalyticsManager } from './DuckDBAnalyticsManager';
 import type { ShardHandle } from '../storage/ShardManager';
 import * as crypto from 'crypto';

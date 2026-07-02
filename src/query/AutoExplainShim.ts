@@ -32,7 +32,7 @@
  * @module query/AutoExplainShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('auto_explain');
 

@@ -13,7 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import Database from 'better-sqlite3';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { v4 as uuidv4 } from 'uuid';
 import { WAL_CONFIGS, type WALConfig } from './WALConfig';
 import { PeriodicCheckpointer } from './PeriodicCheckpointer';
@@ -23,7 +23,7 @@ import {
   VectorConfig,
   SqlVecError,
   SqlVecErrorCode,
-} from '../core/types';
+} from '../types';
 import { TDEEngine, type TDEAlgorithm } from './TDEEngine';
 import { TDEConfig } from './TDEConfig';
 import { WriteWorkerPool } from './WriteWorkerPool';

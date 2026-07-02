@@ -42,8 +42,8 @@
  * @module CertMapShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
-import { getInstance as getCertStore } from '../auth/CertMappingStore';
+import { PinoLogger } from '../logger/PinoLogger';
+import { create as getCertStore } from '../auth/CertMappingStore';
 
 const logger = PinoLogger.forComponent('CertMapShim');
 

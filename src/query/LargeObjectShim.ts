@@ -17,7 +17,7 @@
  * @module LargeObjectShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('LargeObjectShim');
 

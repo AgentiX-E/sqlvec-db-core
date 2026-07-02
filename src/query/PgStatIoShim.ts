@@ -22,7 +22,7 @@
  *   → single row with zero/plausible defaults
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('pg-stat-io');
 

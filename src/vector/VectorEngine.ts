@@ -25,9 +25,9 @@ import {
   VectorSearchStats,
   SqlVecError,
   SqlVecErrorCode,
-} from '../core/types';
+} from '../types';
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 const logger = PinoLogger.forComponent('VectorEngine');
 
 interface DuckDBConnection {

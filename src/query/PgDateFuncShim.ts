@@ -17,7 +17,7 @@
  * SQLite custom function registration because it's a function call.
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('PgDateFuncShim');
 

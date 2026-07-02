@@ -7,7 +7,7 @@
  * @see docs/ARCHITECTURE-OPTIMIZATION-PLAN.md §4
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { RewriteOutput } from './types';
 
 const logger = PinoLogger.forComponent('ShimCache');

@@ -11,7 +11,7 @@
  */
 
 import type { QueryResult } from '../query/QueryRouter';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { PipelineContext, RouteDecision, ExecutionResult } from './types';
 
 const logger = PinoLogger.forComponent('ExecStep');

@@ -15,7 +15,7 @@
  *   → SELECT ... FROM t_like_idx('foo') JOIN t ON t.rowid = t_like_idx.rowid LIMIT 10
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('TrigramIndexShim');
 

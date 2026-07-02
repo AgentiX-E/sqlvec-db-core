@@ -18,7 +18,7 @@
  * @module XmlShimExtended
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { detectXmlFunc } from './XmlShim';
 
 const logger = PinoLogger.forComponent('XmlShimExtended');

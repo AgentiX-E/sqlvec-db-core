@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('sequence-cache');
 

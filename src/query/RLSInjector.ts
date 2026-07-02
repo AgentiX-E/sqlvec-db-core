@@ -29,7 +29,7 @@
  * @module query/RLSInjector
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { parse, toSql } from 'pgsql-ast-parser';
 import type {
   Statement,

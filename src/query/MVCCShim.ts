@@ -46,7 +46,7 @@
  * @module query/MVCCShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { GlobalMvccStats, SessionMvccStats } from './MVCCExecutor';
 import { parseWithComments, locationOf } from 'pgsql-ast-parser';
 

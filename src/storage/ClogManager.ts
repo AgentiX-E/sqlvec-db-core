@@ -12,7 +12,7 @@
  *   - Lazy allocation: XID assigned only on first write in a transaction
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import Database from 'better-sqlite3';
 
 export const CLOG_TABLE = '__clog';

@@ -53,7 +53,7 @@ import * as fs from 'node:fs';
 import Database from 'better-sqlite3';
 import { Piscina } from 'piscina';
 import type { QueryCondition } from './QueryPlanner';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('ParallelQueryExecutor');
 

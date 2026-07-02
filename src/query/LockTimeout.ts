@@ -36,7 +36,7 @@
  * @module query/LockTimeout
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ============================================================
 //  Types

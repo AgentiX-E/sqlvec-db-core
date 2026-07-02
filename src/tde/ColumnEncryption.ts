@@ -38,7 +38,7 @@
  */
 
 import * as crypto from 'node:crypto';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

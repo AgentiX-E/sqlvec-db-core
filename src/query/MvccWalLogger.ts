@@ -30,7 +30,7 @@
  */
 
 import { PgWalWriter, HEAP_RECORD_TYPES, XACT_RECORD_TYPES } from '../storage/PgWalWriter';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('MvccWalLogger');
 

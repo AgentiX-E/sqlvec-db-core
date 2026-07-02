@@ -18,7 +18,7 @@ import {
   QueryType,
   VectorConfig,
   DEFAULT_SLOW_QUERY_CONFIG,
-} from '../core/types';
+} from '../types';
 import { MetricsManager } from '../core/MetricsManager';
 import { ShardManager } from '../storage/ShardManager';
 import { VectorEngine } from '../vector/VectorEngine';
@@ -230,7 +230,7 @@ import { detectPartitionPruning, rewritePartitionPruning } from './PartitionPrun
 import { detectIsolation, rewriteIsolation } from './IsolationShim';
 import { detectWALArchive, rewriteWALArchive } from './WALArchiveShim';
 import { detectTDE, rewriteTDE } from './TDEShim';
-import { detectTDESql, detectSetTDE } from '../storage/TDEShim';
+import { detectTDESql, detectSetTDE } from '../tde/TDEShim';
 
 // Step 1x: optimizer statistics, parallel query GUCs, MVCC
 import { detectStats, rewriteStats } from './StatsShim';
@@ -320,7 +320,7 @@ import { AnalyticQueryClassifier } from '../analytics/AnalyticQueryClassifier';
 import { RouteMetrics } from '../monitoring/RouteMetrics';
 import { CostEstimator } from './CostEstimator';
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ExplainHandler, QueryExecutionStats } from './ExplainHandler';
 import { QueryPlanner } from './QueryPlanner';
 import type { TableStats } from './CostModel';

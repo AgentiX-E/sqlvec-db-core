@@ -36,7 +36,7 @@
  * @module WALStateManager
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { WALArchiver } from '../backup/WALArchiver';
 import { PgWalSegmentManager } from './PgWalSegmentManager';
 

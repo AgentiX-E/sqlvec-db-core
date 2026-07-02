@@ -12,7 +12,7 @@ import * as net from 'node:net';
 import type { DuckDBAnalyticsManager, DuckDBResult } from '../DuckDBAnalyticsManager';
 import type { FederationStrategy, NodeTransportConfig, RemoteQueryResult } from './FederationStrategy';
 import { planPushdown, wrapWithReaggregate, determineMergeStrategy, type PushdownPlan } from '../pushdown/PredicatePushdown';
-import { PinoLogger } from '../../monitoring/PinoLogger';
+import { PinoLogger } from '../../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('NodeTransportStrategy');
 

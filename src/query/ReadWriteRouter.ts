@@ -22,7 +22,7 @@
  *   - In transaction blocks → always primary
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('ReadWriteRouter');
 

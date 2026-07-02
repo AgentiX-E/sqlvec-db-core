@@ -14,7 +14,7 @@ import * as crypto from 'crypto';
 
 import { SystemTypeRegistry } from './SystemTypes';
 import { GucSystem } from '../core/GucSystem';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import {
   setMasklen, inetMerge, inetSameFamily,
   inetClientAddr, inetClientPort, inetServerAddr, inetServerPort,

@@ -40,7 +40,7 @@
  * @module query/OperatorClassShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ============================================================
 //  Types

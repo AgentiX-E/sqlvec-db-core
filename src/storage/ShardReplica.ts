@@ -12,8 +12,8 @@
 import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
-import { SqlVecError, SqlVecErrorCode, VectorConfig, ClockErrorStats } from '../core/types';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { SqlVecError, SqlVecErrorCode, VectorConfig, ClockErrorStats } from '../types';
+import { PinoLogger } from '../logger/PinoLogger';
 import { DedupRing } from '../replication/DedupRing';
 import { compareHLT, HLCTimestamp } from '../replication/HLC';
 import { HLCClockCompensator } from '../consensus/HLCClockCompensator';

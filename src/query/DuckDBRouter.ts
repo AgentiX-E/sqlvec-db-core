@@ -34,7 +34,7 @@
  * ```
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import {
   DuckDBAnalyticsManager,
   DuckDBResult,

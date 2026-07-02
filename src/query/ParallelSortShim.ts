@@ -32,7 +32,7 @@
  * @module ParallelSortShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ParallelSessionContext } from './ParallelQueryShim';
 
 const logger = PinoLogger.forComponent('ParallelSortShim');

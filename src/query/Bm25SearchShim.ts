@@ -20,7 +20,7 @@
  *   pgsql-ast-parser: for parsing query structure
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('Bm25SearchShim');
 

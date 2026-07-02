@@ -10,7 +10,7 @@
  * - stop() 触发优雅退出
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type BetterSqlite3 from 'better-sqlite3';
 
 const logger = PinoLogger.forComponent('PeriodicCheckpointer');

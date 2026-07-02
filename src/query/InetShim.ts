@@ -21,7 +21,7 @@
  * @module InetShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { Address4, Address6 } from 'ip-address';
 
 const logger = PinoLogger.forComponent('InetShim');

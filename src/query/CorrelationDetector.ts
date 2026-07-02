@@ -14,7 +14,7 @@
  * This module detects such references and provides replacement strategies.
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('CorrelationDetector');
 

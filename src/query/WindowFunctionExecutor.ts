@@ -20,7 +20,7 @@
  * 3. 返回结果（附加窗口函数列或替换原数据）
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('WindowFunctionExecutor');
 

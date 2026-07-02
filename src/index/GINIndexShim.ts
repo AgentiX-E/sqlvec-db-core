@@ -14,7 +14,7 @@
  * is a token in the FTS5 index, enabling fast contains/overlaps queries.
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('GINIndexShim');
 

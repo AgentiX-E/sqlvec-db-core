@@ -15,7 +15,7 @@
  * @module DomainShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ConstraintEvaluator } from '../constraint/ConstraintEvaluator';
 
 const logger = PinoLogger.forComponent('DomainShim');

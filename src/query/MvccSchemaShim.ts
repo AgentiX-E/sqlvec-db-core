@@ -22,7 +22,7 @@
  * @module query/MvccSchemaShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('MvccSchemaShim');
 

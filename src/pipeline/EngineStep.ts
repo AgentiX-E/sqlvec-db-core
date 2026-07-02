@@ -17,7 +17,7 @@
  * @see /src/query/DuckDBExecutor.ts
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { DuckDBExecutor } from '../query/DuckDBExecutor';
 import type { UnifiedRouter } from '../query/UnifiedRouter';
 import type { QueryTarget } from '../analytics/AnalyticQueryClassifier';

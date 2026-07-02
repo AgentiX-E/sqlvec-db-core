@@ -10,7 +10,7 @@
  * @module ArrayFuncShimAddition
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { detectArrayFunc, rewriteArrayFunc } from './ArrayFuncShim';
 
 export type {

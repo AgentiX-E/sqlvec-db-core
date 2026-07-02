@@ -21,7 +21,7 @@
  *   - Always strips both `USING BRIN` and `CONCURRENTLY` unconditionally
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import Flatbush from 'flatbush';
 
 const logger = PinoLogger.forComponent('BRINIndexShim');

@@ -18,7 +18,7 @@
  * - PinoLogger 集成，用于调试和审计
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('TopNHeuristicShim');
 

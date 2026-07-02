@@ -26,7 +26,7 @@
  * @module PartitionTableShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type Database from 'better-sqlite3';
 
 const logger = PinoLogger.forComponent('PartitionTableShim');

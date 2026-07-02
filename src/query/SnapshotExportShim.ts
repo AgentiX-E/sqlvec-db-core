@@ -42,7 +42,7 @@
  * @module SnapshotExportShim
  */
 import { randomUUID } from 'crypto';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('SnapshotExportShim');
 

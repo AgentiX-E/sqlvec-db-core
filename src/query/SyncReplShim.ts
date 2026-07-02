@@ -25,7 +25,7 @@
  * @module SyncReplShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { SyncReplicationManager, SyncReplMode } from '../replication/SyncReplicationManager';
 
 const logger = PinoLogger.forComponent('SyncReplShim');

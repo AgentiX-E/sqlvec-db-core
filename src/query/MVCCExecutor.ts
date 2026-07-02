@@ -31,7 +31,7 @@
  * @module query/MVCCExecutor
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { Mutex } from 'async-mutex';
 import { DatabaseError } from '../error/DatabaseError';
 import type MvccWalLogger from './MvccWalLogger';

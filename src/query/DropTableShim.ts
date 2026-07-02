@@ -15,7 +15,7 @@
  * the SQLite exec() method which supports multi-statement strings natively.
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('DropTableShim');
 

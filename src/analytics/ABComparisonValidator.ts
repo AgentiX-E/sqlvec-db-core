@@ -27,7 +27,7 @@
  * @see docs/architecture/oltp-olap-unification.md §10
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('ABValidator');
 

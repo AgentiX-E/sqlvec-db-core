@@ -13,7 +13,7 @@
  */
 
 import type Database from 'better-sqlite3';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { STATS_TABLE, HISTOGRAM_TABLE, MCV_LIMIT, MAX_HISTOGRAM_BUCKETS } from './AnalyzeStatsCollector';
 
 export interface StatsProvider {

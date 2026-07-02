@@ -51,7 +51,7 @@
  * @module HAPromotionShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { WALStateManager } from '../storage/WALStateManager';
 
 const logger = PinoLogger.forComponent('HAPromotionShim');

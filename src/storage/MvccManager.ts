@@ -25,7 +25,7 @@
  *   // (simplified: __xmin < snapshot.xmax AND (__xmax = 0 OR __xmax >= snapshot.xmin))
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ClogManager, XidStatus } from './ClogManager';
 
 export interface MvccSnapshot {

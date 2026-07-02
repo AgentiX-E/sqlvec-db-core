@@ -13,7 +13,7 @@
  * ```
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { DuckDBAnalyticsManager } from '../analytics/DuckDBAnalyticsManager';
 import {
   AnalyticQueryClassifier,

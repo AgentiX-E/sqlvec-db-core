@@ -23,7 +23,7 @@
  *   - ORDER BY expressions with subqueries (rare) may not be properly separated
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('DistinctOnRewriter');
 

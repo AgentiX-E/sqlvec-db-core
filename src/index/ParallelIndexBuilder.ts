@@ -41,7 +41,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
 import { Piscina } from 'piscina';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { IndexWorkerTask, IndexWorkerResult } from './parallel-index-worker';
 
 const logger = PinoLogger.forComponent('ParallelIndexBuilder');

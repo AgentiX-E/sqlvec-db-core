@@ -13,7 +13,7 @@
  * @module query/PlanExecutorSecurity
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { RLSInjector } from './RLSInjector';
 import { ColumnGrantChecker } from '../security/ColumnGrantChecker';
 type DataMaskingShim = any;

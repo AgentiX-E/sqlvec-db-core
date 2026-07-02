@@ -22,7 +22,7 @@ import {
   TDEConfig,
   SqlVecError,
   SqlVecErrorCode,
-} from '../core/types';
+} from '../types';
 
 export function loadConfig(configPath?: string): DatabaseConfig {
   let raw: any;

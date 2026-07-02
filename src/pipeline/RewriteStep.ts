@@ -12,7 +12,7 @@
  * @see docs/ARCHITECTURE-OPTIMIZATION-PLAN.md §2
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ShimCache } from './ShimCache';
 import type { PipelineContext, RewriteOutput, RewriteMeta } from './types';
 

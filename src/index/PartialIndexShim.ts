@@ -13,7 +13,7 @@
  *   - IF NOT EXISTS               →  transparent passthrough (SQLite supports it)
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('PartialIndexShim');
 

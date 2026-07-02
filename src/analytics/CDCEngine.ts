@@ -16,7 +16,7 @@
  * @see DataBridge
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { OLAPSchemaManager } from './OLAPSchemaManager';
 import { ShardManager, ShardHandle } from '../storage/ShardManager';
 import { DataBridgeConfig } from './DataBridge';

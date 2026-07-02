@@ -22,7 +22,7 @@
 import { Pull } from 'zeromq';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { WalRecord } from './WALSender';
 
 // ── Types ────────────────────────────────────────────────────────

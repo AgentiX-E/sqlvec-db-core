@@ -27,7 +27,7 @@ import { HierarchicalNSW } from 'hnswlib-node';
 import { Worker } from 'worker_threads';
 import * as path from 'path';
 import * as os from 'os';
-import { HnswConfig, ProductQuantizationConfig, DEFAULT_PQ_CONFIG } from '../core/types';
+import { HnswConfig, ProductQuantizationConfig, DEFAULT_PQ_CONFIG } from '../types';
 import { ProductQuantizer } from './ProductQuantizer';
 
 /** Internal structure for a single shard */

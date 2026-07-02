@@ -13,7 +13,7 @@
  * @module query/CreateFunctionHandler
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { PLpgSQLExecutor } from './PLpgSQLExecutor';
 
 const logger = PinoLogger.forComponent('CreateFunctionHandler');

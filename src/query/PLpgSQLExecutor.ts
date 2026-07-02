@@ -21,8 +21,8 @@
  * @module query/PLpgSQLExecutor
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
-import { SqlVecError, SqlVecErrorCode } from '../core/types';
+import { PinoLogger } from '../logger/PinoLogger';
+import { SqlVecError, SqlVecErrorCode } from '../types';
 
 // ── Logger ───────────────────────────────────────────────────────
 

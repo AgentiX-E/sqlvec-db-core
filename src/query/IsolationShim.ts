@@ -50,7 +50,7 @@
  * @module query/IsolationShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ── Logger ──────────────────────────────────────────────────────
 

@@ -13,7 +13,7 @@
  * Reference: "Product Quantization for Nearest Neighbor Search" (Jégou et al.)
  */
 
-import { ProductQuantizationConfig } from '../core/types';
+import { ProductQuantizationConfig } from '../types';
 
 export interface PQCentroids {
   /** Sub-vectors per vector */

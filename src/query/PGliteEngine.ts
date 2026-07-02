@@ -15,7 +15,7 @@
  */
 
 import { Mutex } from 'async-mutex';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { QueryCacheShim } from './QueryCacheShim';
 import type { PGlite } from '@electric-sql/pglite';
 import Database from 'better-sqlite3';

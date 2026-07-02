@@ -15,7 +15,7 @@
 
 import { Worker } from 'worker_threads';
 import path from 'path';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('WriteWorkerPool');
 

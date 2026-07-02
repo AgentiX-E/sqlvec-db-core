@@ -52,7 +52,7 @@
  * - PinoLogger integration for debugging and audit trails
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('AlterTableShim');
 

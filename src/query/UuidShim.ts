@@ -19,7 +19,7 @@
 
 import * as crypto from 'crypto';
 import * as os from 'os';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('UuidShim');
 

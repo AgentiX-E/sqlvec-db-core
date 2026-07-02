@@ -10,7 +10,7 @@
  * @module query/PartitionPruner
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import type { PartitionPredicate } from './PartitionPredicateExtractor';
 import { extractPartitionPredicates } from './PartitionPredicateExtractor';
 import type { PartitionMeta, PartitionMethod, RangeBounds, ListBounds, HashBounds } from './PartitionMetaManager';

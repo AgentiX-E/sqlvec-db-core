@@ -23,7 +23,7 @@
  * @see /src/protocol/PgWireServer.ts — 目标集成点
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { RewriteStep } from './RewriteStep';
 import { EngineStep } from './EngineStep';
 import { RouteStep, type ShardRouterFn, createShardRouter } from './RouteStep';

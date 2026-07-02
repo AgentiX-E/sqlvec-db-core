@@ -14,7 +14,7 @@
  * @module query/DoBlockHandler
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { createPlPgSqlEngine, PlPgSqlEngine } from '../plpgsql/PlPgSqlEngine';
 
 // ── Logger ───────────────────────────────────────────────────────

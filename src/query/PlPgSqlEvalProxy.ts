@@ -8,7 +8,7 @@
  */
 
 import { PlPgSqlEngine, parsePlPgSql } from '../plpgsql/PlPgSqlEngine';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('plpgsql-eval-proxy');
 

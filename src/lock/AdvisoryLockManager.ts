@@ -42,7 +42,7 @@
  */
 
 import { Mutex, type MutexInterface } from 'async-mutex';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

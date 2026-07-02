@@ -9,7 +9,7 @@
  * - **Same interface**: all exports unchanged
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { DuckDBAnalyticsManager } from './DuckDBAnalyticsManager';
 import { OLAPSchemaManager } from './OLAPSchemaManager';
 import { ShardManager, ShardHandle } from '../storage/ShardManager';

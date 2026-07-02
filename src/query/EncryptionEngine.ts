@@ -45,7 +45,7 @@
 
 import * as crypto from 'crypto';
 import { type CipherGCM, type DecipherGCM } from 'crypto';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ── Logger ───────────────────────────────────────────────────────
 

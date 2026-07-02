@@ -31,7 +31,7 @@
  * @module ReplicationSlotShim
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import { ReplicationSlotTracker } from '../storage/ReplicationSlotTracker';
 
 const logger = PinoLogger.forComponent('ReplicationSlotShim');

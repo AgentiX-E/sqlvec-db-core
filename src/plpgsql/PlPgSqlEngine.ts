@@ -24,7 +24,7 @@
  * @module plpgsql/PlPgSqlEngine
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import safeEval from 'safe-eval';
 
 // ── Logger ───────────────────────────────────────────────────────

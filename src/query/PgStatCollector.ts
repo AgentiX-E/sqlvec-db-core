@@ -11,7 +11,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 import ss from 'simple-statistics';
 
 const logger = PinoLogger.forComponent('PgStatCollector');

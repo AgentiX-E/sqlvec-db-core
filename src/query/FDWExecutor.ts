@@ -24,8 +24,8 @@
 import Database from 'better-sqlite3';
 import * as fs from 'fs';
 import * as path from 'path';
-import { PinoLogger } from '../monitoring/PinoLogger';
-import { SqlVecError, SqlVecErrorCode } from '../core/types';
+import { PinoLogger } from '../logger/PinoLogger';
+import { SqlVecError, SqlVecErrorCode } from '../types';
 
 // ── Logger ───────────────────────────────────────────────────────
 

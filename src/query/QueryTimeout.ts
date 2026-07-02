@@ -15,7 +15,7 @@
  * The actual query implementation should check the abortSignal when possible.
  */
 
-import { SqlVecError, SqlVecErrorCode } from '../core/types';
+import { SqlVecError, SqlVecErrorCode } from '../types';
 
 // ============================================================
 //  Types

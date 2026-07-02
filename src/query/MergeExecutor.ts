@@ -18,7 +18,7 @@
  *      → INSERT ... ON CONFLICT(...) DO UPDATE SET ...
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 // ============================================================
 //  Types

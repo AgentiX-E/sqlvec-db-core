@@ -16,7 +16,7 @@
  */
 
 import duckdb from 'duckdb';
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('DuckDBAnalytics');
 const SQLITE_SCANNER_EXT = 'sqlite_scanner';

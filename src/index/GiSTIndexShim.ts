@@ -30,7 +30,7 @@
  *   - Nested function calls inside index expressions assume top-level parens are well-balanced
  */
 
-import { PinoLogger } from '../monitoring/PinoLogger';
+import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('GiSTIndexShim');
 
