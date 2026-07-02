@@ -10,7 +10,7 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
       - run: npm ci
-      - run: npx tsc --noEmit 2>&1 || true
+      - run: npx tsc --noEmit
 
   test:
     needs: type-check
@@ -21,16 +21,4 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: '20' }
       - run: npm ci
-      - run: npx vitest run --pool=forks 2>&1 || true
-
-  publish-dry-run:
-    if: github.ref == 'refs/heads/main'
-    needs: [type-check, test]
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v4
-        with: { node-version: '20' }
-      - run: npm ci && npm run build 2>&1 || true
-      - run: npm publish --tag alpha --dry-run 2>&1 || true
+      - run: npx vitest run --pool=forks
