@@ -13,3 +13,5 @@ coverage/
 .idea/
 *.swp
 *.bak
+.nyc_output/
+coverage/
