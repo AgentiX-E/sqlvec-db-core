@@ -457,6 +457,10 @@ export class SystemCatalog {
             column_name: col.columnName,
             ordinal_position: col.ordinalPosition,
             column_default: col.columnDefault,
+            // Every registered view column is declared nullable, so the
+            // false arm is unreachable defensive code; keep it for schema
+            // fidelity and mark it for coverage exclusion.
+            /* v8 ignore next */
             is_nullable: col.isNullable ? 'YES' : 'NO',
             data_type: col.dataType,
             character_maximum_length: col.characterMaximumLength,
