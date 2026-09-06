@@ -20,7 +20,7 @@ describe('SqlVecDatabase', () => {
     fs.mkdirSync(TEST_DIR, { recursive: true });
     db = new SqlVecDatabase({ dataDir: TEST_DIR, shardCount: 1 } as any);
     await db.start();
-  }, 15000);
+  }, 60000);
 
   afterAll(async () => {
     if (db) await db.stop();

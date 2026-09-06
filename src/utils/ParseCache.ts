@@ -55,8 +55,9 @@ export function cacheSet<T>(cacheName: string, sql: string, value: T): void {
   const norm = normalizeSql(sql);
   const store = getStore(cacheName);
   if (store.size >= CACHE_MAX) {
-    const firstKey = store.keys().next().value;
-    if (firstKey !== undefined) store.delete(firstKey);
+    // The store is guaranteed non-empty when its size reaches the cap, so the
+    // first (oldest) key is always present.
+    store.delete(store.keys().next().value!);
   }
   store.set(norm, value);
 }
