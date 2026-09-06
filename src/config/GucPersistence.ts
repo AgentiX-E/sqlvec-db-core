@@ -83,8 +83,8 @@ export class GucPersistence {
       rawValue = rawValue.slice(1, -1);
     }
 
-    // Unescape: '' → ' in quoted strings
-    rawValue = rawValue.replace(/"'/g, "'");
+    // Unescape PostgreSQL doubled single quotes: '' → ' in quoted strings.
+    rawValue = rawValue.replace(/''/g, "'");
 
     return { key: key.toLowerCase(), value: rawValue };
   }
@@ -231,11 +231,6 @@ export class GucPersistence {
 
     // Numbers (optionally with unit suffix)
     if (/^-?\d+(\.\d+)?\s*(kB|MB|GB|TB|s|ms|min|h)?$/i.test(value)) {
-      return false;
-    }
-
-    // Bare integer
-    if (/^-?\d+$/.test(value)) {
       return false;
     }
 

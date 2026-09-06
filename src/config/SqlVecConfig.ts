@@ -117,7 +117,13 @@ function applyEnvOverrides(raw: any): void {
     const envVal = process.env[envKey];
     if (envVal !== undefined) {
       if (!raw[section]) raw[section] = {};
-      raw[section][field] = type === 'number' ? parseInt(envVal, 10) : envVal;
+      if (type === 'number') {
+        raw[section][field] = parseInt(envVal, 10);
+      } else if (type === 'boolean') {
+        raw[section][field] = envVal === 'true';
+      } else {
+        raw[section][field] = envVal;
+      }
     }
   }
 }

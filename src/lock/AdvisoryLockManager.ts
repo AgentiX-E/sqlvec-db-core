@@ -201,7 +201,10 @@ export class AdvisoryLockManager {
       state.transactionSessions.delete(sessionId);
       state.mutex.release();
 
-      // Clean up empty lock states
+      // Clean up empty lock states. Because the underlying mutex is exclusive,
+      // `heldBy` can only ever contain a single session, so this condition is
+      // always true after the sole holder is deleted.
+      /* v8 ignore next */
       if (state.heldBy.size === 0) {
         this.locks.delete(key);
       }
@@ -246,10 +249,16 @@ export class AdvisoryLockManager {
     for (const key of keysToRelease) {
       // Force release regardless of reentrant count
       const state = this.locks.get(key);
+      // `key` is collected from iterating `this.locks`, so `state` is always
+      // defined here; the guard is defensive only.
+      /* v8 ignore next */
       if (state) {
         state.heldBy.delete(sessionId);
         state.transactionSessions.delete(sessionId);
         state.mutex.release();
+        // Same rationale as `release`: the exclusive mutex guarantees a single
+        // holder, so the map is empty once the only session is removed.
+        /* v8 ignore next */
         if (state.heldBy.size === 0) {
           this.locks.delete(key);
         }
@@ -283,6 +292,9 @@ export class AdvisoryLockManager {
     }
 
     for (const key of keysToRelease) {
+      // `key` is filtered by `heldBy.has(sessionId)`, so `release` always
+      // returns true here; the conditional is defensive only.
+      /* v8 ignore next */
       if (this.release(key, sessionId)) {
         released++;
       }
