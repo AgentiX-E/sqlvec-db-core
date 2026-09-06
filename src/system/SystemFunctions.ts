@@ -1702,7 +1702,14 @@ handlers['to_hex'] = (n: any) => {
   if (n === null || n === undefined) return null;
   const num = typeof n === 'number' ? n : Number(n);
   if (isNaN(num)) return '0';
-  return Number(num).toString(16);
+  // PostgreSQL renders negative integers as 64-bit two's-complement hex
+  // (e.g. to_hex(-1) = 'ffffffffffffffff'), whereas JavaScript's toString(16)
+  // emits a leading minus sign. Normalize negatives via the unsigned
+  // 64-bit representation.
+  if (num < 0) {
+    return BigInt.asUintN(64, BigInt(Math.trunc(num))).toString(16);
+  }
+  return num.toString(16);
 };
 
 // trim_array(array, n) → any[] — remove last n elements

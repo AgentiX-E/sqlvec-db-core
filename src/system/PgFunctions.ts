@@ -81,10 +81,13 @@ function isNull(v: any): boolean {
   return v === null || v === undefined;
 }
 
-/** PostgreSQL-compatible modulo (dividend % divisor, divisor can be 0 → null) */
+/** PostgreSQL-compatible modulo (result carries the sign of the divisor) */
 function pgMod(a: number, b: number): number | null {
   if (b === 0) return null;
-  return a % b;
+  // PostgreSQL defines mod(y, x) = y - floor(y/x) * x, whose remainder is zero
+  // or has the same sign as the divisor. JavaScript's `%` is a truncated
+  // remainder (sign of the dividend), so it diverges for mixed-sign operands.
+  return a - Math.floor(a / b) * b;
 }
 
 /** PostgreSQL floor division */
