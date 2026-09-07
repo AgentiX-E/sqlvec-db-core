@@ -1690,10 +1690,17 @@ export class MVCCExecutor {
         const insertsB = this.insertedRowData.get(sidB);
         if (!insertsB || insertsB.size === 0) continue;
 
-        // Check if B inserted into any table that A has a predicate lock on
+        // Check if B inserted into any table that A has a predicate lock on.
+        // P0 fix: an rw-dependency should only be established when B's INSERT
+        // actually falls within A's predicate range. The previous check
+        // (`rows.length > 0`) ignored the predicate range entirely, treating
+        // any INSERT into the table as a phantom — over-aggressive, causing
+        // false-positive serialization aborts for out-of-range writes.
         for (const lock of predsA) {
           const rows = insertsB.get(lock.table);
-          if (rows && rows.length > 0) {
+          if (!rows || rows.length === 0) continue;
+          const matches = rows.some((row) => this.rowMatchesPredicate(row, lock));
+          if (matches) {
             if (!rwEdges.has(sidA)) rwEdges.set(sidA, new Set());
             rwEdges.get(sidA)!.add(sidB);
             break;
@@ -2454,51 +2461,59 @@ export class MVCCExecutor {
     // Only run if there are active transactions with wait-for relationships
     if (this.txnWaitFor.size === 0) return;
 
-    // Build wait-for graph and detect cycles via DFS
-    const visited = new Set<number>();
-    const inStack = new Set<number>();
+    // Reuse the canonical wait-for graph builder (waiter XID -> holder XIDs).
+    // This mirrors checkDeadlock()/findCycle(), which correctly resolve a
+    // wait-for entry's lock key into the XIDs currently holding that key.
+    const edges = this.buildWaitForGraph();
+    if (edges.size === 0) return;
 
-    const hasCycle = (node: number): boolean => {
-      if (inStack.has(node)) return true;
-      if (visited.has(node)) return false;
-      visited.add(node);
-      inStack.add(node);
+    // DFS cycle detection over the wait-for graph.
+    const color = new Map<number, 'white' | 'grey' | 'black'>();
+    for (const [from, tos] of edges) {
+      color.set(from, 'white');
+      for (const to of tos) color.set(to, 'white');
+    }
 
-      // Check wait-for: which XID is this txn waiting for?
-      for (const [waiter, target] of this.txnWaitFor) {
-        // Fix TS: align types — convert string target to number for comparison
-        if (Number(target) === node) {
-          // Node is being waited on by waiter
-          const waiterXid = this.activeTxns.get(String(waiter))?.xid;
-          if (waiterXid && hasCycle(waiterXid)) return true;
+    let hasCycle = false;
+    const dfs = (xid: number): void => {
+      if (hasCycle) return;
+      color.set(xid, 'grey');
+      for (const next of edges.get(xid) ?? []) {
+        const c = color.get(next);
+        if (c === 'grey') {
+          hasCycle = true;
+          return;
         }
+        if (c === 'white') dfs(next);
+        if (hasCycle) return;
       }
-
-      inStack.delete(node);
-      return false;
+      color.set(xid, 'black');
     };
 
-    // Check all XIDs that are part of the wait-for graph
-    for (const [, targetXid] of this.txnWaitFor) {
-      if (hasCycle(Number(targetXid))) {
-        // Deadlock detected! Resolve by aborting the youngest transaction
-        let youngestXid = 0;
-        let youngestSession = '';
-        for (const [session, txn] of this.activeTxns) {
-          if (txn.xid > youngestXid) {
-            youngestXid = txn.xid;
-            youngestSession = session;
-          }
-        }
-        if (youngestSession) {
-          this.txnDeadlocked.add(youngestXid);
-          this.logger.warn(
-            { youngestSession, youngestXid, deadlockCycle: Array.from(inStack) },
-            'Deadlock detected via periodic timer — aborting youngest transaction (40P01)',
-          );
-        }
-        break;
+    for (const xid of color.keys()) {
+      if (color.get(xid) === 'white') {
+        dfs(xid);
+        if (hasCycle) break;
       }
+    }
+
+    if (!hasCycle) return;
+
+    // Deadlock detected! Resolve by aborting the youngest transaction.
+    let youngestXid = 0;
+    let youngestSession = '';
+    for (const [session, txn] of this.activeTxns) {
+      if (txn.xid > youngestXid) {
+        youngestXid = txn.xid;
+        youngestSession = session;
+      }
+    }
+    if (youngestSession) {
+      this.txnDeadlocked.add(youngestXid);
+      this.logger.warn(
+        { youngestSession, youngestXid },
+        'Deadlock detected via periodic timer — aborting youngest transaction (40P01)',
+      );
     }
   }
 
@@ -2507,7 +2522,13 @@ export class MVCCExecutor {
   /**
    * Garbage-collect stale snapshot data for transactions that have committed.
    * Removes txnSnapshots and txnReadSets for XIDs that are no longer active.
+   *
+   * NOTE: This defensive helper is currently unreachable — commit()/rollback()
+   * delete txnSnapshots/txnReadSets entries inline and never call this method.
+   * It is retained for future refactors where snapshot cleanup is deferred,
+   * so the whole body is marked as ignored by coverage (not dead-removed).
    */
+  /* v8 ignore next 12 */
   private gcStaleSnapshots(): void {
     let cleaned = 0;
     for (const [xid] of this.txnSnapshots) {
@@ -2666,7 +2687,12 @@ export class MVCCExecutor {
 
   /**
    * Update lastActivityAt for a session.
+   *
+   * NOTE: Defensive helper, currently unreachable — no caller in the codebase
+   * invokes it (activity is updated inline via ensureConflictStats). Retained
+   * for API completeness; body is marked ignored by coverage, not removed.
    */
+  /* v8 ignore next 6 */
   private updateSessionActivity(sessionId: string): void {
     const stats = this.conflictStats.get(sessionId);
     if (stats) {
