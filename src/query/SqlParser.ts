@@ -433,9 +433,14 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
       tables.push(...extractSubqueryTablesFromExpr(arg));
     }
   }
-  if (expr.when && Array.isArray(expr.when)) {
-    for (const w of expr.when) {
+  // CASE expression: pgsql-ast-parser v12 uses `whens: [{ when, value }]`
+  // (plural, with condition/value keys); older parsers used `when: [{ condition, result }]`.
+  const whenBranches = expr.whens || expr.when;
+  if (whenBranches && Array.isArray(whenBranches)) {
+    for (const w of whenBranches) {
+      if (w.value) tables.push(...extractSubqueryTablesFromExpr(w.value));
       if (w.result) tables.push(...extractSubqueryTablesFromExpr(w.result));
+      if (w.when) tables.push(...extractSubqueryTablesFromExpr(w.when));
       if (w.condition) tables.push(...extractSubqueryTablesFromExpr(w.condition));
     }
   }
