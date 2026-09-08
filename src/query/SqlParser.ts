@@ -1254,7 +1254,9 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
   // Recurse
   if (expr.left) { const r = findWindowFunctionsInExpr(expr.left); if (r) return r; }
   if (expr.right) { const r = findWindowFunctionsInExpr(expr.right); if (r) return r; }
-  if (expr.when) { for (const w of expr.when) { const r = findWindowFunctionsInExpr(w.result); if (r) return r; } }
+  // CASE: v12 uses `whens: [{ when, value }]`; legacy used `when: [{ result, condition }]`.
+  const branches = expr.whens || expr.when;
+  if (branches) { for (const w of branches) { const r = findWindowFunctionsInExpr(w.value || w.result); if (r) return r; } }
   if (expr.result) { const r = findWindowFunctionsInExpr(expr.result); if (r) return r; }
 
   return null;
@@ -1363,8 +1365,10 @@ export function rewriteWindowSql(sql: string): string {
       }
       if (expr.left) stripOver(expr.left);
       if (expr.right) stripOver(expr.right);
-      if (expr.when && Array.isArray(expr.when)) {
-        for (const w of expr.when) stripOver(w.result);
+      // CASE: v12 `whens: [{ when, value }]`; legacy `when: [{ result }]`.
+      const branches = expr.whens || expr.when;
+      if (branches && Array.isArray(branches)) {
+        for (const w of branches) stripOver(w.value || w.result);
       }
       if (expr.result) stripOver(expr.result);
       if (expr.def) stripOver(expr.def);
