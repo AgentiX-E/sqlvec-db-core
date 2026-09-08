@@ -433,15 +433,12 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
       tables.push(...extractSubqueryTablesFromExpr(arg));
     }
   }
-  // CASE expression: pgsql-ast-parser v12 uses `whens: [{ when, value }]`
-  // (plural, with condition/value keys); older parsers used `when: [{ condition, result }]`.
-  const whenBranches = expr.whens || expr.when;
+  // CASE expression: pgsql-ast-parser emits `whens: [{ when: <cond>, value: <result> }]`.
+  const whenBranches = expr.whens;
   if (whenBranches && Array.isArray(whenBranches)) {
     for (const w of whenBranches) {
       if (w.value) tables.push(...extractSubqueryTablesFromExpr(w.value));
-      if (w.result) tables.push(...extractSubqueryTablesFromExpr(w.result));
       if (w.when) tables.push(...extractSubqueryTablesFromExpr(w.when));
-      if (w.condition) tables.push(...extractSubqueryTablesFromExpr(w.condition));
     }
   }
   if (expr.result) tables.push(...extractSubqueryTablesFromExpr(expr.result));
@@ -476,7 +473,9 @@ function extractLimit(stmt: any): number | undefined {
   if (inner && typeof inner.value === 'number') {
     return inner.value;
   }
-  // Legacy shape: { value: 10 } or { value: { value: 10 } }
+  // Legacy shapes ({ value: 10 } / { value: { value: 10 } }) are not producible
+  // by pgsql-ast-parser v12, but retained for forward-compatibility.
+  /* v8 ignore next 7 */
   if (typeof limitNode.value === 'number') {
     return limitNode.value;
   }
@@ -1264,9 +1263,9 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
   // Recurse
   if (expr.left) { const r = findWindowFunctionsInExpr(expr.left); if (r) return r; }
   if (expr.right) { const r = findWindowFunctionsInExpr(expr.right); if (r) return r; }
-  // CASE: v12 uses `whens: [{ when, value }]`; legacy used `when: [{ result, condition }]`.
-  const branches = expr.whens || expr.when;
-  if (branches) { for (const w of branches) { const r = findWindowFunctionsInExpr(w.value || w.result); if (r) return r; } }
+  // CASE: pgsql-ast-parser emits `whens: [{ when, value }]`.
+  const branches = expr.whens;
+  if (branches) { for (const w of branches) { const r = findWindowFunctionsInExpr(w.value); if (r) return r; } }
   if (expr.result) { const r = findWindowFunctionsInExpr(expr.result); if (r) return r; }
 
   return null;
@@ -1293,6 +1292,10 @@ function extractOverOrderBy(over: any): WindowFunction['orderBy'] | undefined {
 
 function extractOverFrame(over: any): WindowFunction['frame'] | undefined {
   if (!over || !over.frame) return undefined;
+  // pgsql-ast-parser v12 rejects ROWS/RANGE frame clauses outright, so
+  // `over.frame` is never populated. The mapping below is retained for
+  // forward-compatibility with a parser that exposes window frames.
+  /* v8 ignore next 6 */
   return {
     type: (String(over.frame.type).toUpperCase() as 'ROWS' | 'RANGE'),
     start: over.frame.start?.type || 'unbounded preceding',
@@ -1375,10 +1378,10 @@ export function rewriteWindowSql(sql: string): string {
       }
       if (expr.left) stripOver(expr.left);
       if (expr.right) stripOver(expr.right);
-      // CASE: v12 `whens: [{ when, value }]`; legacy `when: [{ result }]`.
-      const branches = expr.whens || expr.when;
+      // CASE: pgsql-ast-parser emits `whens: [{ when, value }]`.
+      const branches = expr.whens;
       if (branches && Array.isArray(branches)) {
-        for (const w of branches) stripOver(w.value || w.result);
+        for (const w of branches) stripOver(w.value);
       }
       if (expr.result) stripOver(expr.result);
       if (expr.def) stripOver(expr.def);
