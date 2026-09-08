@@ -1580,8 +1580,8 @@ export function detectFTS(sql: string): FTSConfig {
       return {
         hasFts: true,
         configName: plaintoMatch[1] || 'english',
-        column: plaintoMatch[2] || undefined,
-        queryText: plaintoMatch[3],
+        column: tsvectorMatch?.[2] || undefined,
+        queryText: plaintoMatch[2],
         operator: '@@',
       };
     }
@@ -1590,8 +1590,8 @@ export function detectFTS(sql: string): FTSConfig {
       return {
         hasFts: true,
         configName: phrasetoMatch[1] || 'english',
-        column: phrasetoMatch[2] || undefined,
-        queryText: phrasetoMatch[3],
+        column: tsvectorMatch?.[2] || undefined,
+        queryText: phrasetoMatch[2],
         operator: '@@',
       };
     }
