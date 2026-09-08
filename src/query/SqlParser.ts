@@ -461,12 +461,24 @@ function detectJoin(stmt: any): boolean {
 }
 
 function extractLimit(stmt: any): number | undefined {
-  if (stmt.limit && typeof stmt.limit.value === 'number') {
-    return stmt.limit.value;
+  // pgsql-ast-parser v12 wraps LIMIT/OFFSET as `stmt.limit = { limit?: {...}, offset?: {...} }`
+  // where each node is `{ type: 'integer'|'parameter', value?: number, name?: string }`.
+  const limitNode = stmt.limit;
+  if (!limitNode) return undefined;
+
+  // v12 shape: { limit: { type: 'integer', value: 10 } }
+  const inner = limitNode.limit;
+  if (inner && typeof inner.value === 'number') {
+    return inner.value;
   }
-  if (stmt.limit && stmt.limit.value?.value !== undefined) {
-    return stmt.limit.value.value;
+  // Legacy shape: { value: 10 } or { value: { value: 10 } }
+  if (typeof limitNode.value === 'number') {
+    return limitNode.value;
   }
+  if (limitNode.value?.value !== undefined) {
+    return limitNode.value.value;
+  }
+  // Parameterized LIMIT ($1) has no constant numeric value.
   return undefined;
 }
 
