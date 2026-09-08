@@ -574,6 +574,15 @@ function parseInsertHeuristic(sql: string): InsertStatement {
 
 // ──────────────────────────────────────────────
 
+/*
+ * parseInsert + extractInsertKeys are unreachable: parseStatement() routes every
+ * INSERT through parseInsertHeuristic() via an unconditional fast-path early
+ * return (see the `if (/^\s*INSERT\b/i.test(trimmed)) return ...` guard). The
+ * AST-based INSERT parser below is retained as a fallback implementation in
+ * case the fast path is ever removed. Marked ignore-next so coverage reflects
+ * that these branches are not exercisable through the current call graph.
+ */
+/* v8 ignore next 12 */
 function parseInsert(stmt: any, sql: string): InsertStatement {
   const table = stmt.into?.name || '';
   const columns = (stmt.columns || []).map((c: any) => c.name);
@@ -593,6 +602,7 @@ function parseInsert(stmt: any, sql: string): InsertStatement {
   };
 }
 
+/* v8 ignore next 28 */
 function extractInsertKeys(
   stmt: any,
   columns: string[],
