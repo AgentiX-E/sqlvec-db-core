@@ -54,4 +54,16 @@ describe('SqlParser rewriteFTS column+queryText and generic @@', () => {
     const r = rewriteFTS('SELECT * FROM t WHERE a @@ b');
     expect(r).not.toContain('@@');
   });
+
+  it('returns unchanged when hasFts but no @@ (to_tsvector only)', () => {
+    const sql = "SELECT to_tsvector('english', body) FROM t";
+    const r = rewriteFTS(sql);
+    expect(r).toBe(sql);
+  });
+
+  it('returns unchanged when hasFts but no @@ (to_tsquery only)', () => {
+    const sql = "SELECT to_tsquery('english', 'hello') FROM t";
+    const r = rewriteFTS(sql);
+    expect(r).toBe(sql);
+  });
 });
