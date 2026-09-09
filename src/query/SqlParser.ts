@@ -441,6 +441,7 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
       if (w.when) tables.push(...extractSubqueryTablesFromExpr(w.when));
     }
   }
+  if (expr.else) tables.push(...extractSubqueryTablesFromExpr(expr.else));
   if (expr.result) tables.push(...extractSubqueryTablesFromExpr(expr.result));
   if (expr.def) tables.push(...extractSubqueryTablesFromExpr(expr.def));
 
@@ -1263,9 +1264,14 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
   // Recurse
   if (expr.left) { const r = findWindowFunctionsInExpr(expr.left); if (r) return r; }
   if (expr.right) { const r = findWindowFunctionsInExpr(expr.right); if (r) return r; }
-  // CASE: pgsql-ast-parser emits `whens: [{ when, value }]`.
+  // Function call args may nest window functions (e.g. COALESCE(SUM(x) OVER (), ...)).
+  if (expr.args && Array.isArray(expr.args)) {
+    for (const a of expr.args) { const r = findWindowFunctionsInExpr(a); if (r) return r; }
+  }
+  // CASE: pgsql-ast-parser emits `whens: [{ when, value }]` plus `else`.
   const branches = expr.whens;
   if (branches) { for (const w of branches) { const r = findWindowFunctionsInExpr(w.value); if (r) return r; } }
+  if (expr.else) { const r = findWindowFunctionsInExpr(expr.else); if (r) return r; }
   if (expr.result) { const r = findWindowFunctionsInExpr(expr.result); if (r) return r; }
 
   return null;
