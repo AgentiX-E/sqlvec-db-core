@@ -893,19 +893,20 @@ function collectRefColumns(expr: any, columns: string[]): void {
 
   // ── Generic structure walk: left/right (binary), operand (unary), args (call) ──
   // Same pattern as ASTParser.collectRefColumns — handles all expression types
-  // without requiring type-specific branches.
-  if (expr.left) collectRefColumns(expr.left, columns);
-  if (expr.right) collectRefColumns(expr.right, columns);
-  if (expr.operand) collectRefColumns(expr.operand, columns);
+  // without requiring type-specific branches. collectRefColumns(undefined) is a
+  // no-op (entry guard), so no presence check is needed before recursing.
+  collectRefColumns(expr.left, columns);
+  collectRefColumns(expr.right, columns);
+  collectRefColumns(expr.operand, columns);
   if (expr.args && Array.isArray(expr.args)) {
     for (const arg of expr.args) collectRefColumns(arg, columns);
   }
 
   // Handle select subqueries
-  if (expr.where) collectRefColumns(expr.where, columns);
+  collectRefColumns(expr.where, columns);
   if (expr.columns && Array.isArray(expr.columns)) {
     for (const col of expr.columns) {
-      if (col.expr) collectRefColumns(col.expr, columns);
+      collectRefColumns(col.expr, columns);
     }
   }
 }
@@ -1169,7 +1170,12 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
   }
   // CASE: pgsql-ast-parser emits `whens: [{ when, value }]` plus `else`.
   const branches = expr.whens;
-  if (branches) { for (const w of branches) { const r = findWindowFunctionsInExpr(w.value); if (r) return r; } }
+  if (branches) {
+    for (const w of branches) {
+      const r = findWindowFunctionsInExpr(w.value) || findWindowFunctionsInExpr(w.when);
+      if (r) return r;
+    }
+  }
   if (expr.else) { const r = findWindowFunctionsInExpr(expr.else); if (r) return r; }
 
   return null;
@@ -1276,8 +1282,9 @@ export function rewriteWindowSql(sql: string): string {
           modified = true;
         }
       }
-      if (expr.left) stripOver(expr.left);
-      if (expr.right) stripOver(expr.right);
+      // stripOver(undefined) is a no-op (entry guard), so recurse unconditionally.
+      stripOver(expr.left);
+      stripOver(expr.right);
       // Function call args may nest window functions.
       if (expr.args && Array.isArray(expr.args)) {
         for (const a of expr.args) stripOver(a);
@@ -1285,9 +1292,12 @@ export function rewriteWindowSql(sql: string): string {
       // CASE: pgsql-ast-parser emits `whens: [{ when, value }]` plus `else`.
       const branches = expr.whens;
       if (branches && Array.isArray(branches)) {
-        for (const w of branches) stripOver(w.value);
+        for (const w of branches) {
+          stripOver(w.value);
+          stripOver(w.when);
+        }
       }
-      if (expr.else) stripOver(expr.else);
+      stripOver(expr.else);
     }
 
     for (const col of cols) {
