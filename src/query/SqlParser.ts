@@ -1075,14 +1075,9 @@ export interface WindowFunction {
 }
 
 const AGGREGATE_WINDOW_FNS = new Set(['SUM', 'AVG', 'COUNT', 'MIN', 'MAX']);
-const RANKING_WINDOW_FNS = new Set(['ROW_NUMBER', 'RANK', 'DENSE_RANK', 'NTILE']);
 
 function isAggregateWindow(fn: string): boolean {
   return AGGREGATE_WINDOW_FNS.has(fn);
-}
-
-function isRankingWindow(fn: string): boolean {
-  return RANKING_WINDOW_FNS.has(fn);
 }
 
 /**
