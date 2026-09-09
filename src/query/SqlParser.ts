@@ -452,8 +452,6 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
     }
   }
   if (expr.else) tables.push(...extractSubqueryTablesFromExpr(expr.else));
-  if (expr.result) tables.push(...extractSubqueryTablesFromExpr(expr.result));
-  if (expr.def) tables.push(...extractSubqueryTablesFromExpr(expr.def));
 
   return tables;
 }
@@ -1268,7 +1266,6 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
   const branches = expr.whens;
   if (branches) { for (const w of branches) { const r = findWindowFunctionsInExpr(w.value); if (r) return r; } }
   if (expr.else) { const r = findWindowFunctionsInExpr(expr.else); if (r) return r; }
-  if (expr.result) { const r = findWindowFunctionsInExpr(expr.result); if (r) return r; }
 
   return null;
 }
@@ -1380,13 +1377,16 @@ export function rewriteWindowSql(sql: string): string {
       }
       if (expr.left) stripOver(expr.left);
       if (expr.right) stripOver(expr.right);
-      // CASE: pgsql-ast-parser emits `whens: [{ when, value }]`.
+      // Function call args may nest window functions.
+      if (expr.args && Array.isArray(expr.args)) {
+        for (const a of expr.args) stripOver(a);
+      }
+      // CASE: pgsql-ast-parser emits `whens: [{ when, value }]` plus `else`.
       const branches = expr.whens;
       if (branches && Array.isArray(branches)) {
         for (const w of branches) stripOver(w.value);
       }
-      if (expr.result) stripOver(expr.result);
-      if (expr.def) stripOver(expr.def);
+      if (expr.else) stripOver(expr.else);
     }
 
     for (const col of cols) {
