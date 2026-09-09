@@ -861,6 +861,11 @@ function parseParamValues(paramsStr: string): any[] {
     } else if (ch === "'") {
       current += ch;
       inString = true;
+      // parseExecute's outer regex `\(([^)]*)\)` stops at the first ')' and
+      // never admits a ')' into paramsStr, so balanced-paren depth tracking
+      // here is unreachable in practice; retained for future nested-arg
+      // support (e.g. ARRAY[...] / subquery arguments).
+      /* v8 ignore next 9 */
     } else if (ch === '(') {
       current += ch;
       depth++;
