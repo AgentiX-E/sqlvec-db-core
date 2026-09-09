@@ -462,9 +462,11 @@ function detectJoin(stmt: any): boolean {
   if (!stmt.from) return false;
 
   for (const fromItem of stmt.from) {
+    // pgsql-ast-parser v12 emits a flat `from` array with no 'join'-typed item
+    // and no `joins` array; retained for parser-version compatibility.
+    /* v8 ignore next 3 */
     if (fromItem.type === 'join') return true;
     if (fromItem.joins && fromItem.joins.length > 0) return true;
-    // Multiple FROM items (comma-separated) is also a kind of join
   }
 
   // Multi-table FROM (comma-separated)
