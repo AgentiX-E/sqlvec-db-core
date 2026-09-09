@@ -1115,11 +1115,9 @@ function isAggregateWindow(fn: string): boolean {
  */
 export function extractWindowFunctions(sql: string): WindowFunction[] {
   try {
+    // parse() throws on empty/invalid input (caught below) and otherwise
+    // returns a non-empty array, so ast[0] is always defined here.
     const ast = parse(sql);
-    if (!ast || ast.length === 0) {
-      return fallbackExtractWindowFunctions(sql);
-    }
-
     const stmt = ast[0];
     // pgsql-ast-parser v12 exposes selected columns under the `columns` key.
     const cols = (stmt as any).columns;
@@ -1265,9 +1263,9 @@ function fallbackExtractWindowFunctions(sql: string): WindowFunction[] {
  */
 export function rewriteWindowSql(sql: string): string {
   try {
+    // parse() throws on empty/invalid input (caught below) and otherwise
+    // returns a non-empty array, so ast[0] is always defined here.
     const ast = parse(sql);
-    if (!ast || ast.length === 0) return sql;
-
     const stmt = ast[0];
     const cols = (stmt as any).columns;
     if (!cols) return sql;
@@ -1348,9 +1346,9 @@ export function extractCtes(sql: string): CteDefinition[] {
   const isRecursive = /^\s*WITH\s+RECURSIVE\b/i.test(sql);
 
   try {
+    // parse() throws on empty/invalid input (caught below) and otherwise
+    // returns a non-empty array, so ast[0] is always defined here.
     const ast = parse(sql);
-    if (!ast || ast.length === 0) return [];
-
     const stmt = ast[0];
 
     // pgsql-ast-parser v12: root type = 'with', bind = CTE array, in = main query
