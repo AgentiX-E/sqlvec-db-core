@@ -272,12 +272,10 @@ export function parseStatement(sql: string): ParsedStatement {
           parsed = parseDDL(stmt, trimmed);
           break;
         }
-        // Check for PREPARE/EXECUTE/DEALLOCATE (not fully supported by pgsql-ast-parser)
+        // Check for PREPARE/DEALLOCATE (not fully supported by pgsql-ast-parser;
+        // EXECUTE and cursor statements throw and are handled in fallbackParse).
         if (/^\s*PREPARE\s+/i.test(trimmed)) { parsed = parsePrepare(trimmed); break; }
-        if (/^\s*EXECUTE\s+/i.test(trimmed)) { parsed = parseExecute(trimmed); break; }
         if (/^\s*DEALLOCATE\s+/i.test(trimmed)) { parsed = parseDeallocate(trimmed); break; }
-        // Check for cursor statements
-        if (/^\s*(DECLARE|FETCH|MOVE|CLOSE)\s+/i.test(trimmed)) { parsed = parseCursorStmt(trimmed); break; }
         parsed = { type: 'UNKNOWN', originalSql: sql };
     }
 
@@ -936,18 +934,6 @@ function fallbackParse(sql: string): ParsedStatement {
       tables,
       hasJoin,
       isMultiShard: hasJoin && tables.length > 1,
-    };
-  }
-
-  if (upper.startsWith('INSERT')) {
-    const tableMatch = sql.match(/INSERT\s+INTO\s+`?(\w+)`?/i);
-    const hasReturning = /\bRETURNING\b/i.test(upper);
-    return {
-      type: 'INSERT',
-      originalSql: sql,
-      table: tableMatch?.[1] || '',
-      columns: [],
-      hasReturning,
     };
   }
 
