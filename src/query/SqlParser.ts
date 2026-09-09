@@ -748,7 +748,11 @@ function parseParamValues(paramsStr: string): any[] {
       current += ch;
       inString = true;
     } else if (ch === ',') {
-      params.push(parseSingleParam(current.trim()));
+      // Skip empty segments (e.g. "EXECUTE p(,)" or "(1,,2)") rather than
+      // emitting a spurious empty-string parameter.
+      if (current.trim()) {
+        params.push(parseSingleParam(current.trim()));
+      }
       current = '';
     } else {
       current += ch;
