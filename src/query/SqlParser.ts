@@ -342,6 +342,16 @@ function extractSelectTables(stmt: any): string[] {
     tables.push(...extractSubqueryTablesFromExpr(stmt.where));
   }
 
+  // Extract tables from scalar/ANY/ALL/EXISTS/CASE subqueries in the SELECT
+  // list (e.g. `SELECT (SELECT MAX(y) FROM v)`, `SELECT x IN (SELECT id FROM u)`).
+  if (stmt.columns && Array.isArray(stmt.columns)) {
+    for (const col of stmt.columns) {
+      if (col.expr) {
+        tables.push(...extractSubqueryTablesFromExpr(col.expr));
+      }
+    }
+  }
+
   return [...new Set(tables)];
 }
 
