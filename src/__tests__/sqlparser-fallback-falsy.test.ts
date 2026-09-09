@@ -53,6 +53,7 @@ describe('SqlParser fallbackParse falsy branches', () => {
     const idx = parseStatement('CREATE INDEX i ON t (c)');
     expect((idx as any).ddlType).toBe('CREATE_INDEX');
     const vt = parseStatement('CREATE VIRTUAL TABLE v USING fts5(c)');
-    expect((vt as any).ddlType).toBe('CREATE_INDEX');
+    expect((vt as any).ddlType).toBe('CREATE_TABLE');
+    expect((vt as any).table).toBe('v');
   });
 });

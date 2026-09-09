@@ -972,6 +972,18 @@ function fallbackParse(sql: string): ParsedStatement {
     };
   }
 
+  if (upper.startsWith('CREATE VIRTUAL TABLE')) {
+    // SQLite FTS5 virtual tables are still tables — extract their name and
+    // classify as CREATE_TABLE (not CREATE_INDEX) for correct shard routing.
+    const tableMatch = sql.match(/CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
+    return {
+      type: 'DDL',
+      originalSql: sql,
+      table: tableMatch?.[1],
+      ddlType: 'CREATE_TABLE',
+    };
+  }
+
   if (upper.startsWith('CREATE INDEX') || upper.startsWith('CREATE VIRTUAL')) {
     return {
       type: 'DDL',
