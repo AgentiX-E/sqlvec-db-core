@@ -1164,6 +1164,7 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
   // Recurse
   if (expr.left) { const r = findWindowFunctionsInExpr(expr.left); if (r) return r; }
   if (expr.right) { const r = findWindowFunctionsInExpr(expr.right); if (r) return r; }
+  if (expr.operand) { const r = findWindowFunctionsInExpr(expr.operand); if (r) return r; }
   // Function call args may nest window functions (e.g. COALESCE(SUM(x) OVER (), ...)).
   if (expr.args && Array.isArray(expr.args)) {
     for (const a of expr.args) { const r = findWindowFunctionsInExpr(a); if (r) return r; }
@@ -1285,6 +1286,7 @@ export function rewriteWindowSql(sql: string): string {
       // stripOver(undefined) is a no-op (entry guard), so recurse unconditionally.
       stripOver(expr.left);
       stripOver(expr.right);
+      stripOver(expr.operand);
       // Function call args may nest window functions.
       if (expr.args && Array.isArray(expr.args)) {
         for (const a of expr.args) stripOver(a);
