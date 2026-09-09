@@ -896,7 +896,24 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
     const ast = parse(trimmed);
     const stmt = ast?.[0] as any;
     if (stmt && stmt.type === 'with' && stmt.in?.type === 'select') {
-      return parseSelect(stmt.in, trimmed);
+      const main = parseSelect(stmt.in, trimmed);
+
+      // Collect tables referenced inside each CTE definition (stmt.bind). These
+      // are real data tables that the main query depends on transitively and
+      // must be included for shard routing (isMultiShard / table presence).
+      const cteTables: string[] = [];
+      if (Array.isArray(stmt.bind)) {
+        for (const cte of stmt.bind) {
+          if (cte?.statement) {
+            cteTables.push(...extractTablesFromExpr(cte.statement));
+          }
+        }
+      }
+
+      return {
+        ...main,
+        tables: [...new Set([...main.tables, ...cteTables])],
+      };
     }
     return { type: 'UNKNOWN', originalSql: sql };
   } catch {
