@@ -998,13 +998,6 @@ function collectRefColumns(expr: any, columns: string[]): void {
     for (const arg of expr.args) collectRefColumns(arg, columns);
   }
 
-  // Handle function wrappers: any(...), all(...), exists(...)
-  if (expr.type === 'call' && expr.arguments && Array.isArray(expr.arguments)) {
-    for (const arg of expr.arguments) {
-      if (arg && arg.type === 'select') collectRefColumns(arg.where, columns);
-    }
-  }
-
   // Handle select subqueries
   if (expr.where) collectRefColumns(expr.where, columns);
   if (expr.columns && Array.isArray(expr.columns)) {
