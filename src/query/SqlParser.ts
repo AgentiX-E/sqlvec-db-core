@@ -164,7 +164,15 @@ export interface CursorStatement {
   scroll?: boolean;
   hold?: boolean;
   /** For FETCH: direction and count */
-  direction?: 'NEXT' | 'PRIOR' | 'FIRST' | 'LAST' | 'ABSOLUTE' | 'RELATIVE';
+  direction?:
+    | 'NEXT'
+    | 'PRIOR'
+    | 'FIRST'
+    | 'LAST'
+    | 'ABSOLUTE'
+    | 'RELATIVE'
+    | 'FORWARD'
+    | 'BACKWARD';
   fetchCount?: number;
 }
 
@@ -795,7 +803,7 @@ function parseCursorStmt(sql: string): CursorStatement {
 
   // FETCH [direction [count]] FROM cursor
   const fetchMatch = trimmed.match(
-    /^\s*FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE)\s+(\d+)\s+FROM\s+|(NEXT|PRIOR|FIRST|LAST)\s+FROM\s+|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
+    /^\s*FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+(\d+)\s+FROM\s+|(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+FROM\s+|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
   );
   if (fetchMatch) {
     const cursorName = fetchMatch[4] || '';
@@ -813,7 +821,7 @@ function parseCursorStmt(sql: string): CursorStatement {
 
   // MOVE [direction [count]] [FROM] cursor
   const moveMatch = trimmed.match(
-    /^\s*MOVE\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE)\s+(\d+)\s+(?:FROM\s+)?|(NEXT|PRIOR|FIRST|LAST)\s+(?:FROM\s+)?|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
+    /^\s*MOVE\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+(\d+)\s+(?:FROM\s+)?|(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+(?:FROM\s+)?|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
   );
   if (moveMatch) {
     const cursorName = moveMatch[4] || '';
