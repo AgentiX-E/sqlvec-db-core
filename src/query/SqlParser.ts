@@ -1052,7 +1052,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('INSERT')) {
-    const tableMatch = upper.match(/INSERT\s+INTO\s+`?(\w+)`?/i);
+    const tableMatch = sql.match(/INSERT\s+INTO\s+`?(\w+)`?/i);
     const hasReturning = /\bRETURNING\b/i.test(upper);
     return {
       type: 'INSERT',
@@ -1064,7 +1064,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('UPDATE')) {
-    const tableMatch = upper.match(/UPDATE\s+`?(\w+)`?/i);
+    const tableMatch = sql.match(/UPDATE\s+`?(\w+)`?/i);
     // Extract WHERE columns via regex when pgsql-ast-parser fails
     const whereMatch = sql.match(/WHERE\s+(?:`?(\w+)`?\s*=\s*[']?(?:\d+|\$\d+)[']?\b)/i);
     return {
@@ -1076,7 +1076,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('DELETE')) {
-    const tableMatch = upper.match(/DELETE\s+FROM\s+`?(\w+)`?/i);
+    const tableMatch = sql.match(/DELETE\s+FROM\s+`?(\w+)`?/i);
     const whereMatch = sql.match(/WHERE\s+(?:`?(\w+)`?\s*=\s*[']?(?:\d+|\$\d+)[']?\b)/i);
     return {
       type: 'DELETE',
@@ -1087,7 +1087,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('CREATE TABLE')) {
-    const tableMatch = upper.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
+    const tableMatch = sql.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
     const rewritten = sql.replace(/\bSERIAL\b/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT');
     return {
       type: 'DDL',
@@ -1107,7 +1107,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('ALTER')) {
-    const tableMatch = upper.match(/ALTER\s+TABLE\s+`?(\w+)`?/i);
+    const tableMatch = sql.match(/ALTER\s+TABLE\s+`?(\w+)`?/i);
     return {
       type: 'DDL',
       originalSql: sql,
@@ -1117,7 +1117,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('DROP')) {
-    const tableMatch = upper.match(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?/i);
+    const tableMatch = sql.match(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?/i);
     return {
       type: 'DDL',
       originalSql: sql,
