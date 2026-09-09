@@ -579,19 +579,13 @@ function parseDDL(stmt: any, sql: string): DDLStatement {
     case 'alter index':
       ddlType = 'ALTER';
       break;
-    case 'drop':
     case 'drop table':
     case 'drop index':
-    case 'drop view':
-    case 'drop schema':
     case 'drop sequence':
-    case 'drop extension':
       ddlType = 'DROP';
       break;
-    case 'truncate':
-    case 'truncate table':
-      ddlType = 'OTHER';
-      break;
+    // create schema/view/sequence/extension, truncate table, etc. fall through
+    // to the default 'OTHER' (no dedicated DDL type is tracked for them).
   }
 
   const table = extractDDLTable(stmt);
@@ -994,7 +988,7 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('DROP')) {
-    const tableMatch = sql.match(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?/i);
+    const tableMatch = sql.match(/DROP\s+(?:TABLE|INDEX|VIEW|SCHEMA|SEQUENCE|EXTENSION)\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?/i);
     return {
       type: 'DDL',
       originalSql: sql,
