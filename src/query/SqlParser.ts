@@ -455,11 +455,10 @@ function extractOrderBy(stmt: any): string | undefined {
 
   // Convert ORDER BY AST back to string
   const parts = stmt.orderBy.map((ob: any) => {
-    // pgsql-ast-parser v12 uses `by` field; older versions use `expr`
-    const orderExpr = ob.by || ob.expr;
-    if (!orderExpr) return '';
-    const expr = toSql.expr(orderExpr);
-    return ob.type === 'desc' || ob.order === 'DESC' ? `${expr} DESC` : `${expr} ASC`;
+    // pgsql-ast-parser v12 exposes { by: { name }, order: 'DESC' }.
+    if (!ob.by) return '';
+    const expr = toSql.expr(ob.by);
+    return ob.order === 'DESC' ? `${expr} DESC` : `${expr} ASC`;
   });
   return parts.join(', ');
 }
@@ -1110,8 +1109,8 @@ export function extractWindowFunctions(sql: string): WindowFunction[] {
     }
 
     const stmt = ast[0];
-    // pgsql-ast-parser v12: use `columns` key, fallback to `select` for compat
-    const cols = (stmt as any).columns || (stmt as any).select;
+    // pgsql-ast-parser v12 exposes selected columns under the `columns` key.
+    const cols = (stmt as any).columns;
     if (!cols) return fallbackExtractWindowFunctions(sql);
 
     const result: WindowFunction[] = [];
@@ -1252,7 +1251,7 @@ export function rewriteWindowSql(sql: string): string {
     if (!ast || ast.length === 0) return sql;
 
     const stmt = ast[0];
-    const cols = (stmt as any).columns || (stmt as any).select;
+    const cols = (stmt as any).columns;
     if (!cols) return sql;
 
     let modified = false;
