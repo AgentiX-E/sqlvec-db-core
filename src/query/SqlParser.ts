@@ -1452,11 +1452,15 @@ export function detectFTS(sql: string): FTSConfig {
     const plaintoMatch = sql.match(/plainto_tsquery\s*\(\s*(?:'(\w+)'\s*,)?\s*'([^']+)'/i);
     const phrasetoMatch = sql.match(/phraseto_tsquery\s*\(\s*(?:'(\w+)'\s*,)?\s*'([^']+)'/i);
 
+    // Column may be a bare identifier on the left of `@@` (`col @@ to_tsquery(...)`)
+    // rather than inside to_tsvector(...). Extract it when tsvectorMatch missed.
+    const bareColumnMatch = sql.match(/(\w+)\s*@@/i);
+
     if (plaintoMatch) {
       return {
         hasFts: true,
         configName: plaintoMatch[1] || 'english',
-        column: tsvectorMatch?.[2] || undefined,
+        column: tsvectorMatch?.[2] || bareColumnMatch?.[1] || undefined,
         queryText: plaintoMatch[2],
         operator: '@@',
       };
@@ -1466,7 +1470,7 @@ export function detectFTS(sql: string): FTSConfig {
       return {
         hasFts: true,
         configName: phrasetoMatch[1] || 'english',
-        column: tsvectorMatch?.[2] || undefined,
+        column: tsvectorMatch?.[2] || bareColumnMatch?.[1] || undefined,
         queryText: phrasetoMatch[2],
         operator: '@@',
       };
@@ -1476,7 +1480,7 @@ export function detectFTS(sql: string): FTSConfig {
       return {
         hasFts: true,
         configName: tsqueryMatch[1] || 'english',
-        column: tsvectorMatch?.[2] || undefined,
+        column: tsvectorMatch?.[2] || bareColumnMatch?.[1] || undefined,
         queryText: tsqueryMatch[2],
         operator: '@@',
       };
@@ -1513,11 +1517,13 @@ export function rewriteFTS(sql: string): string {
   if (!fts.hasFts) return sql;
 
   if (fts.column && fts.queryText) {
-    // Rewrite to SQLite FTS5 MATCH
-    return sql.replace(
-      /to_tsvector\s*\([^)]*\)\s*@@\s*(?:plainto_tsquery|phraseto_tsquery|to_tsquery)\s*\([^)]*\)/gi,
-      `${fts.column} MATCH '${fts.queryText.replace(/'/g, "''")}'`,
-    );
+    // Rewrite to SQLite FTS5 MATCH. Match the left side either as a
+    // to_tsvector(...) call or as a bare column identifier (`col @@ ...`),
+    // and the right side as a plainto/phraseto/to_tsquery(...) call.
+    const left = `(?:(?:to_tsvector\\s*\\([^)]*\\))|'?(?:${fts.column.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})'?)\\s*`;
+    const right = '(?:plainto_tsquery|phraseto_tsquery|to_tsquery)\\s*\\([^)]*\\)';
+    const re = new RegExp(`${left}@@\\s*${right}`, 'gi');
+    return sql.replace(re, `${fts.column} MATCH '${fts.queryText.replace(/'/g, "''")}'`);
   }
 
   // Generic replacement: convert @@ to MATCH
