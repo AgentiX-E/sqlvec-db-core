@@ -710,6 +710,7 @@ function parseDDL(stmt: any, sql: string): DDLStatement {
       ddlType = 'DROP';
       break;
     case 'truncate':
+    case 'truncate table':
       ddlType = 'OTHER';
       break;
   }
@@ -730,6 +731,8 @@ function extractDDLTable(stmt: any): string | undefined {
   if (stmt.name?.name) return stmt.name.name;
   if (stmt.table?.name) return stmt.table.name;
   if (stmt.from?.name) return stmt.from.name;
+  // TRUNCATE uses a plural `tables: [{ name }]` array (type 'truncate table').
+  if (stmt.tables && stmt.tables.length > 0) return stmt.tables[0].name;
   if (stmt.names && stmt.names.length > 0) return stmt.names[0].name;
   return undefined;
 }
