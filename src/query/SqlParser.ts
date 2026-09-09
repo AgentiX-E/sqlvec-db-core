@@ -739,33 +739,24 @@ function rewriteSERIAL(stmt: any, originalSql: string): string | undefined {
   let modified = false;
   for (const col of stmt.columns) {
     if (col.dataType && col.dataType.name && col.dataType.name.toLowerCase() === 'serial') {
-      // Rewrite SERIAL to INTEGER
-      col.dataType.name = 'INTEGER';
-
-      // Ensure PRIMARY KEY constraint if not already present
-      const hasPK = col.constraints?.some((c: any) =>
-        c.type === 'primary key' || c.type === 'primary key constraint',
-      );
-      if (!hasPK) {
-        if (!col.constraints) col.constraints = [];
-        col.constraints.push({ type: 'primary key' });
-      }
-
-      // Add AUTOINCREMENT
-      if (!col.constraints) col.constraints = [];
-      col.constraints.push({ type: 'autoinc' });
-
       modified = true;
     }
   }
 
   if (modified) {
-    try {
-      return toSql.statement ? toSql.statement(stmt) : originalSql;
-    } catch {
-      // If toSql fails (e.g. unsupported AST node), rewrite with string replacement
-      return originalSql.replace(/\bSERIAL\b/gi, 'INTEGER');
-    }
+    // pgsql-ast-parser's toSql cannot serialize the SQLite-specific
+    // AUTOINCREMENT constraint (`{ type: 'autoinc' }` throws NotSupported).
+    // Reconstruct via string replacement instead: PostgreSQL SERIAL is
+    // semantically `INTEGER NOT NULL` with an implicit sequence, which maps
+    // to SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`.
+    //
+    // If a column is already written `SERIAL PRIMARY KEY`, collapsing to
+    // `INTEGER PRIMARY KEY AUTOINCREMENT PRIMARY KEY` would be wrong, so drop
+    // any trailing `PRIMARY KEY` that directly follows the SERIAL keyword.
+    return originalSql.replace(
+      /\bSERIAL\s+PRIMARY\s+KEY\b/gi,
+      'INTEGER PRIMARY KEY AUTOINCREMENT',
+    ).replace(/\bSERIAL\b/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT');
   }
 
   return undefined;
