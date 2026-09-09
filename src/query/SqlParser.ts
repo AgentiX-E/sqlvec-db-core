@@ -328,7 +328,10 @@ function extractSelectTables(stmt: any): string[] {
       const name = fromItem.name?.alias || fromItem.name?.name;
       if (name) tables.push(name);
     } else if (fromItem.type === 'join') {
-      // JOINs have inner tables
+      // pgsql-ast-parser v12 emits a FLAT `from` array (each joined table is a
+      // { type: 'table', join: {...} } element) — never a 'join' typed item.
+      // Retained for parser-version compatibility.
+      /* v8 ignore next 5 */
       if (fromItem.table?.name) {
         tables.push(fromItem.table.name);
       }
@@ -339,7 +342,11 @@ function extractSelectTables(stmt: any): string[] {
     }
   }
 
-  // Also extract from JOINs in from items
+  // Also extract from JOINs in from items. The `fromItem.joins` array does not
+  // exist in pgsql-ast-parser v12's flat `from` representation (JOIN metadata
+  // lives on the joined table's `join` field), so this loop is unreachable
+  // there; retained for parser-version compatibility.
+  /* v8 ignore next 9 */
   for (const fromItem of stmt.from) {
     if (fromItem.joins) {
       for (const join of fromItem.joins) {
@@ -377,6 +384,9 @@ function extractTablesFromExpr(expr: any): string[] {
     for (const fi of expr.from) {
       if (fi.type === 'table' && fi.name?.name) tables.push(fi.name.name);
       if (fi.type === 'statement') tables.push(...extractTablesFromExpr(fi));
+      // `fi.joins` does not exist in pgsql-ast-parser v12's flat `from` array;
+      // retained for parser-version compatibility.
+      /* v8 ignore next 5 */
       if (fi.joins) {
         for (const j of fi.joins) {
           if (j.table?.name) tables.push(j.table.name);
