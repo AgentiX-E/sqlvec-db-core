@@ -664,7 +664,10 @@ function rewriteSERIAL(stmt: any, originalSql: string): string | undefined {
  */
 function parsePrepare(sql: string): PrepareStatement {
   const trimmed = sql.trim();
-  const nameMatch = trimmed.match(/^\s*PREPARE\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?\s*AS\s+/i);
+  // Match "PREPARE name [(types)]" — the optional "AS sql" is extracted
+  // separately below so a bare "PREPARE name" still yields its name. The
+  // negative lookahead excludes the AS keyword from being captured as a name.
+  const nameMatch = trimmed.match(/^\s*PREPARE\s+((?!AS\b)[A-Za-z_][A-Za-z0-9_]*)\s*(?:\(([^)]*)\))?/i);
   if (!nameMatch) {
     return { type: 'PREPARE', originalSql: sql, name: '', paramTypes: [], innerSql: '' };
   }
