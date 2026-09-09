@@ -1201,7 +1201,9 @@ function fallbackExtractWindowFunctions(sql: string): WindowFunction[] {
       );
     }
 
-    const orderMatch = overClause.match(/ORDER\s+BY\s+(.*?)$/i);
+    // Stop at a window frame clause (ROWS/RANGE); pgsql-ast-parser throws on
+    // those and routes here, but the frame must not pollute the orderBy key.
+    const orderMatch = overClause.match(/ORDER\s+BY\s+(.*?)(?:\s+(?:ROWS|RANGE)\b|$)/i);
     if (orderMatch) {
       orderMatch[1].split(',').forEach((s: string) => {
         const trimmed = s.trim();
