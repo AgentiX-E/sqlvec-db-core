@@ -382,7 +382,7 @@ function extractTablesFromExpr(expr: any): string[] {
     tables.push(...extractTablesFromExpr(expr.in));
     if (expr.bind) {
       for (const cte of expr.bind) {
-        if (cte.statement) tables.push(...extractTablesFromExpr(cte.statement));
+        tables.push(...extractTablesFromExpr(cte.statement));
       }
     }
   }
@@ -412,11 +412,12 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
     }
   }
 
-  // 3. Recurse into binary/unary/ternary expressions
-  if (expr.left) tables.push(...extractSubqueryTablesFromExpr(expr.left));
-  if (expr.right) tables.push(...extractSubqueryTablesFromExpr(expr.right));
-  if (expr.operand) tables.push(...extractSubqueryTablesFromExpr(expr.operand));
-  if (expr.value) tables.push(...extractSubqueryTablesFromExpr(expr.value));
+  // 3. Recurse into binary/unary/ternary expressions. Each helper short-circuits
+  //    on a null/undefined node, so no presence check is needed here.
+  tables.push(...extractSubqueryTablesFromExpr(expr.left));
+  tables.push(...extractSubqueryTablesFromExpr(expr.right));
+  tables.push(...extractSubqueryTablesFromExpr(expr.operand));
+  tables.push(...extractSubqueryTablesFromExpr(expr.value));
   if (expr.args && Array.isArray(expr.args)) {
     for (const arg of expr.args) {
       tables.push(...extractSubqueryTablesFromExpr(arg));
@@ -426,11 +427,11 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
   const whenBranches = expr.whens;
   if (whenBranches && Array.isArray(whenBranches)) {
     for (const w of whenBranches) {
-      if (w.value) tables.push(...extractSubqueryTablesFromExpr(w.value));
-      if (w.when) tables.push(...extractSubqueryTablesFromExpr(w.when));
+      tables.push(...extractSubqueryTablesFromExpr(w.value));
+      tables.push(...extractSubqueryTablesFromExpr(w.when));
     }
   }
-  if (expr.else) tables.push(...extractSubqueryTablesFromExpr(expr.else));
+  tables.push(...extractSubqueryTablesFromExpr(expr.else));
 
   return tables;
 }
