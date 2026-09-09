@@ -62,10 +62,11 @@ function getCachedAST(sql: string): ParsedStatement | undefined {
 
 function setCachedAST(sql: string, stmt: ParsedStatement): void {
   const normalized = normalizeSqlTemplate(sql);
-  // LRU eviction: if at capacity, delete oldest entry
+  // LRU eviction: if at capacity, delete oldest entry. size >= AST_CACHE_MAX
+  // guarantees at least one key exists, so the first key is always defined.
   if (astCache.size >= AST_CACHE_MAX) {
-    const firstKey = astCache.keys().next().value;
-    if (firstKey !== undefined) astCache.delete(firstKey);
+    const firstKey = astCache.keys().next().value as string;
+    astCache.delete(firstKey);
   }
   // Store with original SQL reference for proper template matching
   astCache.set(normalized, { ...stmt, originalSql: sql } as ParsedStatement);
@@ -291,12 +292,11 @@ export function parseStatement(sql: string): ParsedStatement {
     setCachedAST(sql, parsed);
     return parsed;
   } catch (err: any) {
-    // Fallback: use heuristic parsing for robustness
+    // Fallback: use heuristic parsing for robustness. fallbackParse always
+    // returns a statement (worst case UNKNOWN), so no null check is needed.
     const fallback = fallbackParse(trimmed);
-    if (fallback) {
-      setCachedAST(sql, fallback);
-    }
-    return fallback || { type: 'UNKNOWN', originalSql: sql };
+    setCachedAST(sql, fallback);
+    return fallback;
   }
 }
 
