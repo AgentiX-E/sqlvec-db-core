@@ -242,9 +242,6 @@ export function parseStatement(sql: string): ParsedStatement {
       case 'select':
         parsed = parseSelect(stmt, trimmed);
         break;
-      case 'insert':
-        parsed = parseInsert(stmt, trimmed);
-        break;
       case 'update':
         parsed = parseUpdate(stmt, trimmed);
         break;
@@ -327,35 +324,10 @@ function extractSelectTables(stmt: any): string[] {
     if (fromItem.type === 'table') {
       const name = fromItem.name?.alias || fromItem.name?.name;
       if (name) tables.push(name);
-    } else if (fromItem.type === 'join') {
-      // pgsql-ast-parser v12 emits a FLAT `from` array (each joined table is a
-      // { type: 'table', join: {...} } element) — never a 'join' typed item.
-      // Retained for parser-version compatibility.
-      /* v8 ignore next 5 */
-      if (fromItem.table?.name) {
-        tables.push(fromItem.table.name);
-      }
     } else if (fromItem.type === 'statement' || fromItem.type === 'with') {
       // Subquery in FROM: extract tables from inner SELECT
       const innerTables = extractTablesFromExpr(fromItem);
       tables.push(...innerTables);
-    }
-  }
-
-  // Also extract from JOINs in from items. The `fromItem.joins` array does not
-  // exist in pgsql-ast-parser v12's flat `from` representation (JOIN metadata
-  // lives on the joined table's `join` field), so this loop is unreachable
-  // there; retained for parser-version compatibility.
-  /* v8 ignore next 9 */
-  for (const fromItem of stmt.from) {
-    if (fromItem.joins) {
-      for (const join of fromItem.joins) {
-        if (join.table?.name) {
-          tables.push(join.table.name);
-        } else if (join.table?.type === 'statement' || join.table?.type === 'with') {
-          tables.push(...extractTablesFromExpr(join.table));
-        }
-      }
     }
   }
 
@@ -384,15 +356,6 @@ function extractTablesFromExpr(expr: any): string[] {
     for (const fi of expr.from) {
       if (fi.type === 'table' && fi.name?.name) tables.push(fi.name.name);
       if (fi.type === 'statement') tables.push(...extractTablesFromExpr(fi));
-      // `fi.joins` does not exist in pgsql-ast-parser v12's flat `from` array;
-      // retained for parser-version compatibility.
-      /* v8 ignore next 5 */
-      if (fi.joins) {
-        for (const j of fi.joins) {
-          if (j.table?.name) tables.push(j.table.name);
-          if (j.table?.type === 'statement') tables.push(...extractTablesFromExpr(j.table));
-        }
-      }
     }
     // Extract tables from subqueries in WHERE clause
     if (expr.where) {
@@ -459,15 +422,8 @@ function extractSubqueryTablesFromExpr(expr: any): string[] {
 function detectJoin(stmt: any): boolean {
   if (!stmt.from) return false;
 
-  for (const fromItem of stmt.from) {
-    // pgsql-ast-parser v12 emits a flat `from` array with no 'join'-typed item
-    // and no `joins` array; retained for parser-version compatibility.
-    /* v8 ignore next 3 */
-    if (fromItem.type === 'join') return true;
-    if (fromItem.joins && fromItem.joins.length > 0) return true;
-  }
-
-  // Multi-table FROM (comma-separated)
+  // pgsql-ast-parser v12 flattens JOINs into a `from` array of `{ type: 'table' }`
+  // items, so a multi-table FROM (comma- or JOIN-separated) is the join signal.
   if (stmt.from.length > 1) return true;
 
   return false;
@@ -483,15 +439,6 @@ function extractLimit(stmt: any): number | undefined {
   const inner = limitNode.limit;
   if (inner && typeof inner.value === 'number') {
     return inner.value;
-  }
-  // Legacy shapes ({ value: 10 } / { value: { value: 10 } }) are not producible
-  // by pgsql-ast-parser v12, but retained for forward-compatibility.
-  /* v8 ignore next 7 */
-  if (typeof limitNode.value === 'number') {
-    return limitNode.value;
-  }
-  if (limitNode.value?.value !== undefined) {
-    return limitNode.value.value;
   }
   // Parameterized LIMIT ($1) has no constant numeric value.
   return undefined;
@@ -580,74 +527,6 @@ function parseInsertHeuristic(sql: string): InsertStatement {
     keyColumn,
     keyValues,
   };
-}
-
-// ──────────────────────────────────────────────
-
-/*
- * parseInsert + extractInsertKeys are unreachable: parseStatement() routes every
- * INSERT through parseInsertHeuristic() via an unconditional fast-path early
- * return (see the `if (/^\s*INSERT\b/i.test(trimmed)) return ...` guard). The
- * AST-based INSERT parser below is retained as a fallback implementation in
- * case the fast path is ever removed. Marked ignore-next so coverage reflects
- * that these branches are not exercisable through the current call graph.
- */
-/* v8 ignore next 12 */
-function parseInsert(stmt: any, sql: string): InsertStatement {
-  const table = stmt.into?.name || '';
-  const columns = (stmt.columns || []).map((c: any) => c.name);
-  const hasReturning = !!stmt.returning && stmt.returning.length > 0;
-
-  // Extract VALUES for hash routing
-  const { keyColumn, keyValues } = extractInsertKeys(stmt, columns);
-
-  return {
-    type: 'INSERT',
-    originalSql: sql,
-    table,
-    columns,
-    hasReturning,
-    keyColumn,
-    keyValues,
-  };
-}
-
-/* v8 ignore next 28 */
-function extractInsertKeys(
-  stmt: any,
-  columns: string[],
-): { keyColumn?: string; keyValues?: any[] } {
-  // Find the first "id-like" column (id, aid, bid, tid, or column ending in _id)
-  const idColIndex = columns.findIndex(
-    (c: string) => /^(id|aid|bid|tid|.*_id)$/i.test(c),
-  );
-
-  if (idColIndex === -1) return {};
-
-  const keyColumn = columns[idColIndex];
-  const insert = stmt.insert;
-
-  if (insert?.type === 'values' && insert.values && insert.values.length > 0) {
-    const keyValues: any[] = [];
-    for (const row of insert.values) {
-      if (row && row[idColIndex] !== undefined) {
-        const val = row[idColIndex];
-        // Extract the value based on type
-        if (val && val.type === 'integer') {
-          keyValues.push(String(val.value));
-        } else if (val && val.type === 'ref' && val.name) {
-          keyValues.push(val.name);
-        } else if (val && val.value !== undefined) {
-          keyValues.push(String(val.value));
-        } else {
-          keyValues.push(String(val));
-        }
-      }
-    }
-    return { keyColumn, keyValues: keyValues.length > 0 ? keyValues : undefined };
-  }
-
-  return { keyColumn };
 }
 
 // ──────────────────────────────────────────────
@@ -852,8 +731,9 @@ function parseParamValues(paramsStr: string): any[] {
   const params: any[] = [];
   let current = '';
   let inString = false;
-  let depth = 0;
 
+  // parseExecute's outer regex `\(([^)]*)\)` stops at the first ')', so paramsStr
+  // never contains parentheses; a top-level comma (depth 0) is the separator.
   for (let i = 0; i < paramsStr.length; i++) {
     const ch = paramsStr[i];
     if (inString) {
@@ -864,18 +744,7 @@ function parseParamValues(paramsStr: string): any[] {
     } else if (ch === "'") {
       current += ch;
       inString = true;
-      // parseExecute's outer regex `\(([^)]*)\)` stops at the first ')' and
-      // never admits a ')' into paramsStr, so balanced-paren depth tracking
-      // here is unreachable in practice; retained for future nested-arg
-      // support (e.g. ARRAY[...] / subquery arguments).
-      /* v8 ignore next 9 */
-    } else if (ch === '(') {
-      current += ch;
-      depth++;
-    } else if (ch === ')') {
-      current += ch;
-      depth--;
-    } else if (ch === ',' && depth === 0) {
+    } else if (ch === ',') {
       params.push(parseSingleParam(current.trim()));
       current = '';
     } else {
@@ -937,7 +806,7 @@ function parseCursorStmt(sql: string): CursorStatement {
     /^\s*FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE)\s+(\d+)\s+FROM\s+|(NEXT|PRIOR|FIRST|LAST)\s+FROM\s+|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
   );
   if (fetchMatch) {
-    const cursorName = fetchMatch[4] || fetchMatch[5] || '';
+    const cursorName = fetchMatch[4] || '';
     const direction = (fetchMatch[1] || fetchMatch[3] || 'NEXT').toUpperCase() as CursorStatement['direction'];
     const count = fetchMatch[2] ? parseInt(fetchMatch[2], 10) : 1;
     return {
@@ -955,7 +824,7 @@ function parseCursorStmt(sql: string): CursorStatement {
     /^\s*MOVE\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE)\s+(\d+)\s+(?:FROM\s+)?|(NEXT|PRIOR|FIRST|LAST)\s+(?:FROM\s+)?|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
   );
   if (moveMatch) {
-    const cursorName = moveMatch[4] || moveMatch[5] || '';
+    const cursorName = moveMatch[4] || '';
     return {
       type: 'CURSOR',
       originalSql: sql,
@@ -1298,16 +1167,10 @@ function extractOverOrderBy(over: any): WindowFunction['orderBy'] | undefined {
 }
 
 function extractOverFrame(over: any): WindowFunction['frame'] | undefined {
-  if (!over || !over.frame) return undefined;
-  // pgsql-ast-parser v12 rejects ROWS/RANGE frame clauses outright, so
-  // `over.frame` is never populated. The mapping below is retained for
-  // forward-compatibility with a parser that exposes window frames.
-  /* v8 ignore next 6 */
-  return {
-    type: (String(over.frame.type).toUpperCase() as 'ROWS' | 'RANGE'),
-    start: over.frame.start?.type || 'unbounded preceding',
-    end: over.frame.end?.type || 'current row',
-  };
+  // pgsql-ast-parser v12 rejects ROWS/RANGE frame clauses outright (throws on
+  // parse), so `over.frame` is never populated; window frames are therefore
+  // unavailable in the AST path and always resolve to undefined.
+  return undefined;
 }
 
 function fallbackExtractWindowFunctions(sql: string): WindowFunction[] {
