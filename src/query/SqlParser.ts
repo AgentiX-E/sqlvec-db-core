@@ -1033,6 +1033,15 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
 function fallbackParse(sql: string): ParsedStatement {
   const upper = sql.trim().toUpperCase().replace(/\s+/g, ' ');
 
+  // EXPLAIN [ANALYZE] [VERBOSE] [(option [, ...])] <statement> — pgsql-ast-parser
+  // v12 rejects EXPLAIN, so route the wrapped statement instead of UNKNOWN.
+  if (/^EXPLAIN\b/i.test(upper)) {
+    const inner = sql.replace(/^EXPLAIN\b(?:\s+(?:ANALYZE|VERBOSE)\b)*\s*(?:\([^)]*\)\s*)?/i, '');
+    if (inner && inner !== sql) {
+      return fallbackParse(inner);
+    }
+  }
+
   if (upper.startsWith('SELECT')) {
     const tables = extractTableNamesHeuristic(sql);
     const hasJoin = /\bJOIN\b/i.test(upper) || /\bFROM\b[\s\S]*?,/i.test(upper);
