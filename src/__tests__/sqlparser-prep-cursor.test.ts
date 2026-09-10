@@ -80,8 +80,8 @@ describe('SqlParser fallbackParse path (AST fails → heuristic)', () => {
     expect(r.type).toBe('UNKNOWN');
   });
 
-  it('handles VACUUM / SHOW as UNKNOWN (AST + fallback both miss)', () => {
-    expect(parseStatement('VACUUM t').type).toBe('UNKNOWN');
+  it('handles VACUUM as a DDL maintenance statement and SHOW as UNKNOWN', () => {
+    expect(parseStatement('VACUUM t').type).toBe('DDL');
     expect(parseStatement('SHOW all').type).toBe('UNKNOWN');
   });
 });

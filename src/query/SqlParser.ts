@@ -1148,6 +1148,21 @@ function fallbackParse(sql: string): ParsedStatement {
     return parseCursorStmt(sql);
   }
 
+  // Single-table maintenance/utility statements rejected by pgsql-ast-parser
+  // v12: VACUUM [FULL] [ANALYZE] table, ANALYZE table, COPY table FROM/TO ...
+  // Route the target table via DDL/OTHER so shard placement is preserved.
+  const maintenanceMatch = sql.match(
+    /^(?:VACUUM\s+(?:FULL\s+)?(?:ANALYZE\s+)?|ANALYZE\s+|COPY\s+)/i,
+  );
+  if (maintenanceMatch) {
+    const tableMatch = sql.match(
+      /^(?:VACUUM\s+(?:FULL\s+)?(?:ANALYZE\s+)?|ANALYZE\s+|COPY\s+)`?([A-Za-z_][A-Za-z0-9_]*)`?/i,
+    );
+    if (tableMatch) {
+      return { type: 'DDL', originalSql: sql, table: tableMatch[1], ddlType: 'OTHER' };
+    }
+  }
+
   return { type: 'UNKNOWN', originalSql: sql };
 }
 
