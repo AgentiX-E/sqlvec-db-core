@@ -1205,7 +1205,6 @@ function findWindowFunctionsInExpr(expr: any): WindowFunction[] | null {
         .filter(Boolean),
       partitionBy: extractPartitionBy(expr.over),
       orderBy: extractOverOrderBy(expr.over),
-      frame: extractOverFrame(expr.over),
     };
     return [wf];
   }
@@ -1250,13 +1249,6 @@ function extractOverOrderBy(over: any): WindowFunction['orderBy'] | undefined {
       : (() => { try { return toSql.expr(ob.by); } catch { return ''; } })();
     return { key, dir: (ob.order === 'DESC' ? 'DESC' : 'ASC') as 'ASC' | 'DESC' };
   });
-}
-
-function extractOverFrame(over: any): WindowFunction['frame'] | undefined {
-  // pgsql-ast-parser v12 rejects ROWS/RANGE frame clauses outright (throws on
-  // parse), so `over.frame` is never populated; window frames are therefore
-  // unavailable in the AST path and always resolve to undefined.
-  return undefined;
 }
 
 function fallbackExtractWindowFunctions(sql: string): WindowFunction[] {
