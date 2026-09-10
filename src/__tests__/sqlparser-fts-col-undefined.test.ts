@@ -23,4 +23,20 @@ describe('SqlParser detectFTS column undefined fallback', () => {
     const f = detectFTS("WHERE to_tsvector(col) @@ to_tsquery('english', 'hello')");
     expect(f.column).toBe('col');
   });
+
+  it('returns undefined column for plainto_tsquery with a non-column lhs', () => {
+    const f = detectFTS(
+      "to_tsquery('english', 'x') @@ plainto_tsquery('english', 'hello')",
+    );
+    expect(f.column).toBeUndefined();
+    expect(f.queryText).toBe('hello');
+  });
+
+  it('returns undefined column for phraseto_tsquery with a non-column lhs', () => {
+    const f = detectFTS(
+      "to_tsquery('english', 'x') @@ phraseto_tsquery('english', 'a b')",
+    );
+    expect(f.column).toBeUndefined();
+    expect(f.queryText).toBe('a b');
+  });
 });
