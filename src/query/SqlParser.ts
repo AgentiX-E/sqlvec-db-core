@@ -944,8 +944,12 @@ function collectRefColumns(expr: any, columns: string[]): void {
  * for routing purposes. pgsql-ast-parser returns { type: 'with', bind: [...], in: { type: 'select', ... } }
  */
 function parseWith(trimmed: string, sql: string): ParsedStatement {
+  // pgsql-ast-parser v12 rejects the RECURSIVE keyword, but `WITH RECURSIVE`
+  // is a valid recursive CTE whose tables are extracted exactly like a plain
+  // WITH. Strip RECURSIVE before parsing so recursive CTEs route correctly.
+  const parseable = trimmed.replace(/^\s*WITH\s+RECURSIVE\b/i, 'WITH');
   try {
-    const ast = parse(trimmed);
+    const ast = parse(parseable);
     const stmt = ast?.[0] as any;
     if (stmt && stmt.type === 'with') {
       // Collect tables referenced inside each CTE definition (stmt.bind). These
