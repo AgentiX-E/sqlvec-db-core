@@ -173,7 +173,8 @@ export interface CursorStatement {
     | 'ABSOLUTE'
     | 'RELATIVE'
     | 'FORWARD'
-    | 'BACKWARD';
+    | 'BACKWARD'
+    | 'ALL';
   fetchCount?: number;
 }
 
@@ -819,7 +820,7 @@ function parseCursorStmt(sql: string): CursorStatement {
 
   // FETCH [direction [count]] FROM cursor
   const fetchMatch = trimmed.match(
-    /^\s*FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+(\d+)\s+FROM\s+|(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+FROM\s+|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
+    /^\s*FETCH\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD|ALL)\s+(\d+)\s+FROM\s+|(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD|ALL)\s+FROM\s+|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
   );
   if (fetchMatch) {
     const cursorName = fetchMatch[4] || '';
@@ -837,7 +838,7 @@ function parseCursorStmt(sql: string): CursorStatement {
 
   // MOVE [direction [count]] [FROM] cursor
   const moveMatch = trimmed.match(
-    /^\s*MOVE\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+(\d+)\s+(?:FROM\s+)?|(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD)\s+(?:FROM\s+)?|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
+    /^\s*MOVE\s+(?:(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD|ALL)\s+(\d+)\s+(?:FROM\s+)?|(NEXT|PRIOR|FIRST|LAST|ABSOLUTE|RELATIVE|FORWARD|BACKWARD|ALL)\s+(?:FROM\s+)?|FROM\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i,
   );
   if (moveMatch) {
     const cursorName = moveMatch[4] || '';
