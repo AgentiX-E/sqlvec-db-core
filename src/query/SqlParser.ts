@@ -284,6 +284,15 @@ export function parseStatement(sql: string): ParsedStatement {
         // EXECUTE and cursor statements throw and are handled in fallbackParse).
         if (/^\s*PREPARE\s+/i.test(trimmed)) { parsed = parsePrepare(trimmed); break; }
         if (/^\s*DEALLOCATE\s+/i.test(trimmed)) { parsed = parseDeallocate(trimmed); break; }
+        // Set operations (UNION [ALL]/INTERSECT [ALL]/EXCEPT [ALL]) parse to
+        // 'union'/'union all' etc. and are not a SELECT; extract tables from
+        // all arms recursively.
+        const setType = (stmt as any).type;
+        if (setType === 'union' || setType === 'union all' || setType === 'intersect' || setType === 'intersect all' || setType === 'except' || setType === 'except all') {
+          const tables = extractTablesFromExpr(stmt);
+          parsed = { type: 'SELECT', originalSql: sql, tables, hasJoin: false, isMultiShard: false };
+          break;
+        }
         parsed = { type: 'UNKNOWN', originalSql: sql };
     }
 
@@ -402,6 +411,19 @@ function extractTablesFromExpr(expr: any): string[] {
       }
     }
   }
+
+  // Set operations: pgsql-ast-parser v12 emits { type: 'union'|'union all'|
+  // 'intersect'|'intersect all'|'except'|'except all', left, right }. Recurse
+  // into both arms (e.g. SELECT * FROM a UNION SELECT * FROM b).
+  if (
+    expr.type === 'union' || expr.type === 'union all' ||
+    expr.type === 'intersect' || expr.type === 'intersect all' ||
+    expr.type === 'except' || expr.type === 'except all'
+  ) {
+    tables.push(...extractTablesFromExpr(expr.left));
+    tables.push(...extractTablesFromExpr(expr.right));
+  }
+
   return tables;
 }
 
@@ -988,6 +1010,19 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
     }
     return { type: 'UNKNOWN', originalSql: sql };
   } catch {
+    // pgsql-ast-parser v12 rejects some PostgreSQL constructs the CTE body may
+    // use (INTERSECT/EXCEPT, etc.). Fall back to a heuristic table extraction
+    // so the query still routes as a SELECT with a best-effort table set.
+    const tables = extractTableNamesHeuristic(trimmed);
+    if (tables.length > 0) {
+      return {
+        type: 'SELECT',
+        originalSql: sql,
+        tables,
+        hasJoin: /\bJOIN\b/i.test(trimmed),
+        isMultiShard: /\bJOIN\b/i.test(trimmed) && tables.length > 1,
+      };
+    }
     return { type: 'UNKNOWN', originalSql: sql };
   }
 }
@@ -1109,8 +1144,12 @@ function fallbackParse(sql: string): ParsedStatement {
 
 function extractTableNamesHeuristic(sql: string): string[] {
   const tables: string[] = [];
-  const fromMatch = sql.match(/FROM\s+`?(\w+)`?/i);
-  if (fromMatch) tables.push(fromMatch[1]);
+  // Match every FROM clause table, including those after set operations
+  // (UNION/INTERSECT/EXCEPT) — e.g. `SELECT * FROM a INTERSECT SELECT * FROM b`.
+  const fromMatches = sql.matchAll(/FROM\s+`?(\w+)`?/gi);
+  for (const match of fromMatches) {
+    tables.push(match[1]);
+  }
   const joinMatches = sql.matchAll(/JOIN\s+`?(\w+)`?\s*/gi);
   for (const match of joinMatches) {
     tables.push(match[1]);
