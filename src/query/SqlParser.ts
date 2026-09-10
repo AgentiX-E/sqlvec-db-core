@@ -1146,7 +1146,12 @@ function extractTableNamesHeuristic(sql: string): string[] {
   const tables: string[] = [];
   // Match every FROM clause table, including those after set operations
   // (UNION/INTERSECT/EXCEPT) — e.g. `SELECT * FROM a INTERSECT SELECT * FROM b`.
-  const fromMatches = sql.matchAll(/FROM\s+`?(\w+)`?/gi);
+  // Skip the ONLY modifier (`FROM ONLY t` → table is `t`) and do not confuse
+  // the word "FROM" inside `IS DISTINCT FROM` / `IS NOT DISTINCT FROM` for a
+  // table source.
+  const fromMatches = sql.matchAll(
+    /(?<!DISTINCT\s)FROM\s+(?:ONLY\s+)?`?(\w+)`?/gi,
+  );
   for (const match of fromMatches) {
     tables.push(match[1]);
   }
