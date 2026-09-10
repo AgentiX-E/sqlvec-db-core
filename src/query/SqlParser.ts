@@ -239,11 +239,9 @@ export function parseStatement(sql: string): ParsedStatement {
 
   // Use pgsql-ast-parser for all other statements
   try {
+    // parse() throws on empty/invalid input (handled by the catch below) and
+    // otherwise returns a non-empty array, so ast[0] is always defined here.
     const ast = parse(trimmed);
-    if (!ast || ast.length === 0) {
-      return { type: 'UNKNOWN', originalSql: sql };
-    }
-
     const stmt = ast[0];
 
     let parsed: ParsedStatement;
