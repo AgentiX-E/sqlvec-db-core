@@ -1007,7 +1007,9 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('UPDATE')) {
-    const tableMatch = sql.match(/UPDATE\s+`?(\w+)`?/i);
+    // Skip the ONLY inheritance modifier: `UPDATE ONLY table` targets the
+    // named table, not a table literally called "ONLY".
+    const tableMatch = sql.match(/UPDATE\s+(?:ONLY\s+)?`?(\w+)`?/i);
     // Extract WHERE columns via regex when pgsql-ast-parser fails
     const whereMatch = sql.match(/WHERE\s+(?:`?(\w+)`?\s*=\s*[']?(?:\d+|\$\d+)[']?\b)/i);
     return {
@@ -1019,7 +1021,8 @@ function fallbackParse(sql: string): ParsedStatement {
   }
 
   if (upper.startsWith('DELETE')) {
-    const tableMatch = sql.match(/DELETE\s+FROM\s+`?(\w+)`?/i);
+    // DELETE FROM [ONLY] table — ONLY is an inheritance modifier.
+    const tableMatch = sql.match(/DELETE\s+FROM\s+(?:ONLY\s+)?`?(\w+)`?/i);
     const whereMatch = sql.match(/WHERE\s+(?:`?(\w+)`?\s*=\s*[']?(?:\d+|\$\d+)[']?\b)/i);
     return {
       type: 'DELETE',
