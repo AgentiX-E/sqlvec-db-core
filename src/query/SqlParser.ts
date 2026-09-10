@@ -1163,6 +1163,15 @@ function fallbackParse(sql: string): ParsedStatement {
     }
   }
 
+  // MERGE INTO target USING source ON ... (PostgreSQL 15+) — rejected by
+  // pgsql-ast-parser v12. Preserve the merge target table for routing.
+  if (upper.startsWith('MERGE')) {
+    const tableMatch = sql.match(/MERGE\s+INTO\s+`?(\w+)`?/i);
+    if (tableMatch) {
+      return { type: 'UPDATE', originalSql: sql, table: tableMatch[1], whereColumns: undefined };
+    }
+  }
+
   return { type: 'UNKNOWN', originalSql: sql };
 }
 
