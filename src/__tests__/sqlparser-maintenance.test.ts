@@ -18,4 +18,12 @@ describe('SqlParser maintenance statement table extraction', () => {
     expect(r.type).toBe('DDL');
     expect(r.table).toBe('t');
   });
+
+  it('returns UNKNOWN for a bare VACUUM with no table', () => {
+    expect((parseStatement('VACUUM') as any).type).toBe('UNKNOWN');
+  });
+
+  it('returns UNKNOWN for COPY of a subquery (no simple table name)', () => {
+    expect((parseStatement('COPY (SELECT * FROM t) TO STDOUT') as any).type).toBe('UNKNOWN');
+  });
 });

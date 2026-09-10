@@ -27,4 +27,8 @@ describe('SqlParser EXPLAIN unwrapping', () => {
       (parseStatement('EXPLAIN ANALYZE VERBOSE SELECT a.id FROM a JOIN b ON a.id = b.id') as any).tables,
     ).toEqual(['a', 'b']);
   });
+
+  it('returns UNKNOWN for a bare EXPLAIN with no wrapped statement', () => {
+    expect((parseStatement('EXPLAIN') as any).type).toBe('UNKNOWN');
+  });
 });
