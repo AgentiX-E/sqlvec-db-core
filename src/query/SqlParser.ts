@@ -918,9 +918,7 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
   try {
     const ast = parse(trimmed);
     const stmt = ast?.[0] as any;
-    if (stmt && stmt.type === 'with' && stmt.in?.type === 'select') {
-      const main = parseSelect(stmt.in, trimmed);
-
+    if (stmt && stmt.type === 'with') {
       // Collect tables referenced inside each CTE definition (stmt.bind). These
       // are real data tables that the main query depends on transitively and
       // must be included for shard routing (isMultiShard / table presence).
@@ -933,10 +931,27 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
         }
       }
 
-      return {
-        ...main,
-        tables: [...new Set([...main.tables, ...cteTables])],
-      };
+      // SELECT main query: the common case.
+      if (stmt.in?.type === 'select') {
+        const main = parseSelect(stmt.in, trimmed);
+        return {
+          ...main,
+          tables: [...new Set([...main.tables, ...cteTables])],
+        };
+      }
+
+      // Data-modifying CTE: WITH ... INSERT/UPDATE/DELETE are valid PostgreSQL.
+      // Route by the target table; attach the CTE tables to SELECT only (the
+      // update/delete statement shapes carry a single `table` field).
+      if (stmt.in?.type === 'update') {
+        return parseUpdate(stmt.in, trimmed);
+      }
+      if (stmt.in?.type === 'delete') {
+        return parseDelete(stmt.in, trimmed);
+      }
+      if (stmt.in?.type === 'insert') {
+        return parseInsertHeuristic(trimmed);
+      }
     }
     return { type: 'UNKNOWN', originalSql: sql };
   } catch {
