@@ -899,9 +899,22 @@ function collectRefColumns(expr: any, columns: string[]): void {
   collectRefColumns(expr.left, columns);
   collectRefColumns(expr.right, columns);
   collectRefColumns(expr.operand, columns);
+  collectRefColumns(expr.value, columns);
   if (expr.args && Array.isArray(expr.args)) {
     for (const arg of expr.args) collectRefColumns(arg, columns);
   }
+
+  // CASE expression: pgsql-ast-parser emits `whens: [{ when, value }]` plus
+  // `else`, and a simple CASE (`CASE <scrutinee> WHEN ...`) puts the scrutinee
+  // in the top-level `value` (already walked above).
+  const whenBranches = expr.whens;
+  if (whenBranches && Array.isArray(whenBranches)) {
+    for (const w of whenBranches) {
+      collectRefColumns(w.value, columns);
+      collectRefColumns(w.when, columns);
+    }
+  }
+  collectRefColumns(expr.else, columns);
 
   // Handle select subqueries
   collectRefColumns(expr.where, columns);
