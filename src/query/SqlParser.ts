@@ -296,7 +296,12 @@ export function parseStatement(sql: string): ParsedStatement {
     // Fallback: use heuristic parsing for robustness. fallbackParse always
     // returns a statement (worst case UNKNOWN), so no null check is needed.
     const fallback = fallbackParse(trimmed);
-    setCachedAST(sql, fallback);
+    // Do not cache statements whose result embeds literal parameter values
+    // (EXECUTE params). Their normalized template collapses differing values
+    // into '?', so a cache hit would return stale values for a later query.
+    if (fallback.type !== 'EXECUTE') {
+      setCachedAST(sql, fallback);
+    }
     return fallback;
   }
 }
