@@ -331,6 +331,10 @@ function extractSelectTables(stmt: any): string[] {
     if (fromItem.type === 'table') {
       const name = fromItem.name?.alias || fromItem.name?.name;
       if (name) tables.push(name);
+      // JOIN ... ON <cond> may embed a subquery (e.g. ON t.id = (SELECT MAX(v.id) FROM v)).
+      if (fromItem.join?.on) {
+        tables.push(...extractSubqueryTablesFromExpr(fromItem.join.on));
+      }
     } else if (fromItem.type === 'statement' || fromItem.type === 'with') {
       // Subquery in FROM: extract tables from inner SELECT
       const innerTables = extractTablesFromExpr(fromItem);
@@ -372,11 +376,19 @@ function extractTablesFromExpr(expr: any): string[] {
   if (expr.type === 'select' && expr.from) {
     for (const fi of expr.from) {
       if (fi.type === 'table' && fi.name?.name) tables.push(fi.name.name);
+      // JOIN ... ON may embed a subquery.
+      if (fi.join?.on) tables.push(...extractSubqueryTablesFromExpr(fi.join.on));
       if (fi.type === 'statement') tables.push(...extractTablesFromExpr(fi));
     }
     // Extract tables from subqueries in WHERE clause
     if (expr.where) {
       tables.push(...extractSubqueryTablesFromExpr(expr.where));
+    }
+    // Extract tables from subqueries in the SELECT list.
+    if (expr.columns && Array.isArray(expr.columns)) {
+      for (const col of expr.columns) {
+        if (col.expr) tables.push(...extractSubqueryTablesFromExpr(col.expr));
+      }
     }
   }
   if (expr.type === 'with' && expr.in) {
