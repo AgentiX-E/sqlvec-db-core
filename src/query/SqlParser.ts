@@ -1013,10 +1013,11 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
     return { type: 'UNKNOWN', originalSql: sql };
   } catch {
     // pgsql-ast-parser v12 rejects some PostgreSQL constructs the CTE body may
-    // use (INTERSECT/EXCEPT, etc.). Fall back to a heuristic table extraction
-    // so the query still routes as a SELECT with a best-effort table set.
+    // use (INTERSECT/EXCEPT, etc.). Fall back to a heuristic table extraction;
+    // a WITH ... SELECT is still a SELECT even when no table is referenced
+    // (e.g. `SELECT 1`), so route it as SELECT with a best-effort table set.
     const tables = extractTableNamesHeuristic(trimmed);
-    if (tables.length > 0) {
+    if (/\bSELECT\b/i.test(trimmed)) {
       return {
         type: 'SELECT',
         originalSql: sql,
