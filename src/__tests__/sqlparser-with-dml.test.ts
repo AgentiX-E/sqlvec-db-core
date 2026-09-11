@@ -40,4 +40,10 @@ describe('SqlParser data-modifying CTE (WITH ... INSERT/UPDATE/DELETE)', () => {
     expect(r.type).toBe('SELECT');
     expect(r.tables).toEqual(['c', 'u']);
   });
+
+  it('returns UNKNOWN for a WITH whose main query is bare VALUES', () => {
+    // `WITH c AS (...) VALUES (...)` parses to in.type === 'values' (not a
+    // select/update/delete/insert DML), so it falls through to UNKNOWN.
+    expect((parseStatement('WITH c AS (SELECT 1) VALUES (2)') as any).type).toBe('UNKNOWN');
+  });
 });
