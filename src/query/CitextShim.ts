@@ -38,6 +38,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('CitextShim');
 
@@ -59,9 +60,11 @@ export interface CitextRewriteResult {
  * @returns Rewritten SQL with CITEXT → TEXT.
  */
 export function rewriteCitextType(sql: string): string {
-  return sql
-    .replace(/\bCITEXT\b/gi, 'TEXT')
-    .replace(/\bcitext\b/gi, 'TEXT');
+  // Protect string literals, quoted identifiers, and comments so a `CITEXT`
+  // token inside them (e.g. `SELECT 'CITEXT'`) is never rewritten to TEXT.
+  const protectedSql = protectSQL(sql);
+  const rewritten = protectedSql.protectedSql.replace(/\bCITEXT\b/gi, 'TEXT');
+  return restoreSQL({ ...protectedSql, protectedSql: rewritten });
 }
 
 // ── Operator rewriting ───────────────────────────────────────────
@@ -106,10 +109,7 @@ export function rewriteCitextComparisons(
         `\\b(${colPattern})\\s*=\\s*('[^']*'|[^\\s,;)]+)(?=\\s+(?:AND|OR|WHERE|ORDER|GROUP|LIMIT|HAVING|SET|RETURNING|OFFSET|FETCH)|\\s*[,;)]|$)`,
         'gi',
       ),
-      (_match, col, expr) => {
-        if (/^LOWER\s*\(/i.test(_match.trim())) return _match;
-        return `LOWER(${col}) = LOWER(${expr})`;
-      },
+      (_match, col, expr) => `LOWER(${col}) = LOWER(${expr})`,
     );
 
     // Pattern 2: col <> expr → LOWER(col) <> LOWER(expr)
@@ -118,10 +118,7 @@ export function rewriteCitextComparisons(
         `\\b(${colPattern})\\s*<>\\s*('[^']*'|[^\\s,;)]+)(?=\\s+(?:AND|OR|WHERE|ORDER|GROUP|LIMIT|HAVING|SET|RETURNING|OFFSET|FETCH)|\\s*[,;)]|$)`,
         'gi',
       ),
-      (_match, col, expr) => {
-        if (/^LOWER\s*\(/i.test(_match.trim())) return _match;
-        return `LOWER(${col}) <> LOWER(${expr})`;
-      },
+      (_match, col, expr) => `LOWER(${col}) <> LOWER(${expr})`,
     );
 
     // Pattern 3: col != expr → LOWER(col) != LOWER(expr)
@@ -130,10 +127,7 @@ export function rewriteCitextComparisons(
         `\\b(${colPattern})\\s*!=\\s*('[^']*'|[^\\s,;)]+)(?=\\s+(?:AND|OR|WHERE|ORDER|GROUP|LIMIT|HAVING|SET|RETURNING|OFFSET|FETCH)|\\s*[,;)]|$)`,
         'gi',
       ),
-      (_match, col, expr) => {
-        if (/^LOWER\s*\(/i.test(_match.trim())) return _match;
-        return `LOWER(${col}) != LOWER(${expr})`;
-      },
+      (_match, col, expr) => `LOWER(${col}) != LOWER(${expr})`,
     );
 
     // Pattern 4: col LIKE expr → LOWER(col) LIKE LOWER(expr)
@@ -142,10 +136,7 @@ export function rewriteCitextComparisons(
         `\\b(${colPattern})\\s+LIKE\\s+('[^']*'|[^\\s,;)]+)(?=\\s+(?:AND|OR|WHERE|ORDER|GROUP|LIMIT|HAVING|SET|RETURNING|OFFSET|FETCH)|\\s*[,;)]|$)`,
         'gi',
       ),
-      (_match, col, expr) => {
-        if (/^LOWER\s*\(/i.test(_match.trim())) return _match;
-        return `LOWER(${col}) LIKE LOWER(${expr})`;
-      },
+      (_match, col, expr) => `LOWER(${col}) LIKE LOWER(${expr})`,
     );
   }
 
@@ -182,22 +173,6 @@ export function detectCitextType(sql: string): boolean {
 
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Wrap an expression in LOWER(), handling string literals and identifiers.
- */
-function wrapExpr(expr: string): string {
-  const trimmed = expr.trim();
-  // If it's already a literal or simple expression, wrap it directly
-  if (trimmed.startsWith("'") || trimmed.startsWith('"') || /^[a-zA-Z_][\w.]*$/.test(trimmed)) {
-    return trimmed;
-  }
-  // If it's a complex expression but not already LOWER(), wrap in parens
-  if (!/^LOWER\s*\(.*\)/i.test(trimmed)) {
-    return trimmed;
-  }
-  return trimmed;
 }
 
 export { logger };
