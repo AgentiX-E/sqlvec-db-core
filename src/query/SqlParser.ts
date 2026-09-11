@@ -1108,6 +1108,19 @@ function fallbackParse(sql: string): ParsedStatement {
     return parseInsertHeuristic(sql);
   }
 
+  // TABLE name — shorthand for SELECT * FROM name (SQL standard, rejected by
+  // pgsql-ast-parser v12). Route the referenced table as a SELECT.
+  if (upper.startsWith('TABLE')) {
+    const tableMatch = sql.match(/TABLE\s+(?:ONLY\s+)?`?(\w+)`?/i);
+    return {
+      type: 'SELECT',
+      originalSql: sql,
+      tables: tableMatch ? [tableMatch[1]] : [],
+      hasJoin: false,
+      isMultiShard: false,
+    };
+  }
+
   if (upper.startsWith('UPDATE')) {
     // Skip the ONLY inheritance modifier: `UPDATE ONLY table` targets the
     // named table, not a table literally called "ONLY".
