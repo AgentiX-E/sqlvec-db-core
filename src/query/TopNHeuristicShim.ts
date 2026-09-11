@@ -48,7 +48,7 @@ export interface TopNResult {
  *   SET LOCAL enable_top_n_heuristic = off;
  */
 const SET_TOP_N_PATTERN =
-  /^\s*SET\s+(?:SESSION\s+|LOCAL\s+)?enable_top_n_heuristic\s*(?:[=:]\s*|\s+TO\s+)(on|off|true|false|0|1)\s*;?\s*$/i;
+  /^\s*SET\s+(?:SESSION\s+|LOCAL\s+)?enable_top_n_heuristic\s*(?:[=:]\s*|\s+TO\s+)(on|off|true|false|0|1|default)\s*;?\s*$/i;
 
 /**
  * 匹配 SHOW enable_top_n_heuristic 语句。
