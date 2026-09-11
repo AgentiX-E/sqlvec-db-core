@@ -527,7 +527,9 @@ function parseInsertHeuristic(sql: string): InsertStatement {
   const trimmed = sql.trim();
 
   // Extract table name: INSERT [INTO] table_name ...
-  const tableMatch = trimmed.match(/INSERT\s+(?:INTO\s+)?[`"']?(\w+)[`"']?\s*(?:\(|\bVALUES\b|\bDEFAULT\b)/i);
+  // Accept a column list, VALUES, DEFAULT, or SELECT as the terminator so
+  // `INSERT INTO t SELECT ...` (INSERT ... SELECT form) also matches.
+  const tableMatch = trimmed.match(/INSERT\s+(?:INTO\s+)?[`"']?(\w+)[`"']?\s*(?:\(|\bVALUES\b|\bDEFAULT\b|\bSELECT\b)/i);
   const table = tableMatch ? tableMatch[1] : '';
 
   // Extract column list if present: INSERT INTO t (col1, col2, ...)
