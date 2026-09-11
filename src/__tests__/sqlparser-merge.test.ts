@@ -19,4 +19,9 @@ describe('SqlParser MERGE target table', () => {
     ) as any;
     expect(r.table).toBe('t');
   });
+
+  it('returns UNKNOWN for a bare MERGE with no table name', () => {
+    expect((parseStatement('MERGE INTO') as any).type).toBe('UNKNOWN');
+    expect((parseStatement('MERGE') as any).type).toBe('UNKNOWN');
+  });
 });
