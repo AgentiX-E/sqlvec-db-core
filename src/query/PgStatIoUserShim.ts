@@ -22,6 +22,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('pg-stat-io-user');
 
@@ -94,29 +95,30 @@ export function rewritePgStatIoUser(sql: string): string {
     return sql;
   }
 
-  let rewrittenSql = sql;
+  // Protect string literals and comments so a view name inside them is never
+  // rewritten as a table reference.
+  const protectedSql = protectSQL(sql);
 
-  // Handle pg_statio_user_tables
-  if (PG_STATIO_USER_TABLES_PATTERN.test(sql)) {
-    rewrittenSql = sql.replace(
-      /\bpg_statio_user_tables\b/gi,
-      `(${PG_STATIO_USER_TABLES_VALUES})`,
-    );
-  }
-  // Handle pg_statio_user_indexes
-  else if (PG_STATIO_USER_INDEXES_PATTERN.test(sql)) {
-    rewrittenSql = sql.replace(
-      /\bpg_statio_user_indexes\b/gi,
-      `(${PG_STATIO_USER_INDEXES_VALUES})`,
-    );
-  }
+  // Both views may appear in a single query (e.g. a join), so apply each
+  // substitution independently rather than an if/else that stops at the first.
+  const target = protectedSql.protectedSql;
+  const withTablesReplaced = PG_STATIO_USER_TABLES_PATTERN.test(sql)
+    ? target.replace(/\bpg_statio_user_tables\b/gi, `(${PG_STATIO_USER_TABLES_VALUES})`)
+    : target;
+  const withIndexesReplaced = PG_STATIO_USER_INDEXES_PATTERN.test(sql)
+    ? withTablesReplaced.replace(/\bpg_statio_user_indexes\b/gi, `(${PG_STATIO_USER_INDEXES_VALUES})`)
+    : withTablesReplaced;
 
-  if (rewrittenSql !== sql) {
+  const restoredSql = withIndexesReplaced !== target
+    ? restoreSQL({ ...protectedSql, protectedSql: withIndexesReplaced })
+    : sql;
+
+  if (restoredSql !== sql) {
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: restoredSql },
       'pg_statio_user_tables/indexes query rewritten to VALUES clause',
     );
   }
 
-  return rewrittenSql;
+  return restoredSql;
 }

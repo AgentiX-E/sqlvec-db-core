@@ -14,6 +14,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('pg-stat-backend');
 
@@ -52,18 +53,21 @@ export function rewritePgStatBackend(sql: string): string {
   }
 
   // Replace pg_stat_get_backend_idset() (with optional whitespace in parens)
-  // with (SELECT 0 WHERE 1=0) for an empty set result
-  const rewrittenSql = sql.replace(
+  // with (SELECT 0 WHERE 1=0) for an empty set result. String literals and
+  // comments are protected so a token inside them is never rewritten.
+  const protectedSql = protectSQL(sql);
+  const rewrittenSql = protectedSql.protectedSql.replace(
     /pg_stat_get_backend_idset\s*\(\s*\)/gi,
     '(SELECT 0 WHERE 1=0)',
   );
+  const restoredSql = restoreSQL({ ...protectedSql, protectedSql: rewrittenSql });
 
-  if (rewrittenSql !== sql) {
+  if (restoredSql !== sql) {
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: restoredSql },
       'pg_stat_get_backend_idset() query rewritten to empty set',
     );
   }
 
-  return rewrittenSql;
+  return restoredSql;
 }

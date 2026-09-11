@@ -20,6 +20,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('pg-stat-archiver');
 
@@ -70,18 +71,22 @@ export function rewritePgStatArchiver(sql: string): string {
     return sql;
   }
 
-  // Replace pg_stat_archiver table reference with the VALUES subquery
-  const rewrittenSql = sql.replace(
+  // Protect string literals and comments so a `pg_stat_archiver` token inside
+  // them (e.g. `SELECT 'pg_stat_archiver'` or `-- pg_stat_archiver`) is never
+  // rewritten as a table reference.
+  const protectedSql = protectSQL(sql);
+  const rewrittenSql = protectedSql.protectedSql.replace(
     /\bpg_stat_archiver\b/gi,
     `(${PG_STAT_ARCHIVER_VALUES})`,
   );
+  const restoredSql = restoreSQL({ ...protectedSql, protectedSql: rewrittenSql });
 
-  if (rewrittenSql !== sql) {
+  if (restoredSql !== sql) {
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: restoredSql },
       'pg_stat_archiver query rewritten to VALUES clause',
     );
   }
 
-  return rewrittenSql;
+  return restoredSql;
 }

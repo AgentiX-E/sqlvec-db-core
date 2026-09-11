@@ -24,6 +24,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('pg-stat-checkpointer');
 
@@ -77,17 +78,21 @@ export function rewritePgStatCheckpointer(sql: string): string {
   }
 
   // Replace pg_stat_checkpointer table reference with the VALUES subquery
-  const rewrittenSql = sql.replace(
+  // Protect string literals and comments so a `pg_stat_checkpointer` token inside
+  // them is never rewritten as a table reference.
+  const protectedSql = protectSQL(sql);
+  const rewrittenSql = protectedSql.protectedSql.replace(
     /\bpg_stat_checkpointer\b/gi,
     `(${PG_STAT_CHECKPOINTER_VALUES})`,
   );
+  const restoredSql = restoreSQL({ ...protectedSql, protectedSql: rewrittenSql });
 
-  if (rewrittenSql !== sql) {
+  if (restoredSql !== sql) {
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: restoredSql },
       'pg_stat_checkpointer query rewritten to VALUES clause',
     );
   }
 
-  return rewrittenSql;
+  return restoredSql;
 }

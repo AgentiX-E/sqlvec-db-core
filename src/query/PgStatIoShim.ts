@@ -23,6 +23,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('pg-stat-io');
 
@@ -75,6 +76,12 @@ export function rewritePgStatIo(sql: string): string {
     return sql;
   }
 
+  // Protect string literals and comments so a `pg_stat_io` token inside them
+  // is never rewritten as a table reference.
+  const protectedSql = protectSQL(sql);
+  const restore = (rewritten: string): string =>
+    restoreSQL({ ...protectedSql, protectedSql: rewritten });
+
   // Handle SELECT ... FROM pg_stat_io
   if (PG_STAT_IO_SELECT_PATTERN.test(sql)) {
     // Extract column list for column-specific queries
@@ -83,35 +90,37 @@ export function rewritePgStatIo(sql: string): string {
     // This preserves column-selection when present.
 
     // Replace pg_stat_io table reference with the VALUES subquery
-    let rewrittenSql = sql.replace(
+    let rewrittenSql = protectedSql.protectedSql.replace(
       /\bpg_stat_io\b/gi,
       `(${PG_STAT_IO_VALUES})`,
     );
+    const restoredSql = restore(rewrittenSql);
 
     // If this is a standalone query (not a CTE or subquery reference),
     // clean up any double parentheses
-    if (rewrittenSql !== sql) {
+    if (restoredSql !== sql) {
       logger.debug(
-        { original: sql, rewritten: rewrittenSql },
+        { original: sql, rewritten: restoredSql },
         'pg_stat_io query rewritten to VALUES clause',
       );
     }
 
-    return rewrittenSql;
+    return restoredSql;
   }
 
   // Non-SELECT references to pg_stat_io (e.g., in subqueries)
-  let rewrittenSql = sql.replace(
+  let rewrittenSql = protectedSql.protectedSql.replace(
     /\bpg_stat_io\b/gi,
     `(${PG_STAT_IO_VALUES})`,
   );
+  const restoredSql = restore(rewrittenSql);
 
-  if (rewrittenSql !== sql) {
+  if (restoredSql !== sql) {
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: restoredSql },
       'pg_stat_io reference rewritten',
     );
   }
 
-  return rewrittenSql;
+  return restoredSql;
 }
