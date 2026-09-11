@@ -137,15 +137,17 @@ export class BackslashQuoteShim {
     while ((match = stringLitRe.exec(sql)) !== null) {
       const lit = match[0];
       if (lit.includes('\\')) {
-        // This is a backslash in a string literal with standard_conforming_strings = ON
-        warnings.push(
-          `WARNING: non-standard escape sequence in string literal (standard_conforming_strings = on). ` +
-          `Use E'...' for escape syntax if backslash escaping is intended.`,
-        );
-
-        if (!settings.standardConformingStrings) {
-          // Off mode: backslashes ARE escapes, so no additional warning
-          // But we still report the non-standard usage
+        // A backslash inside a string literal is only notable when
+        // standard_conforming_strings is ON: in that mode the backslash is a
+        // literal character, so an embedded `\'`-style sequence is likely a
+        // mistake the user intended as an escape. With OFF, backslashes are
+        // legitimate escapes and PostgreSQL emits no such warning.
+        if (settings.standardConformingStrings) {
+          warnings.push(
+            `WARNING: non-standard escape sequence in string literal (standard_conforming_strings = on). ` +
+            `Use E'...' for escape syntax if backslash escaping is intended.`,
+          );
+        } else {
           warnings.push(
             `HINT: Consider setting standard_conforming_strings = on for SQL-standard behaviour.`,
           );
