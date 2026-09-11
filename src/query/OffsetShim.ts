@@ -22,7 +22,11 @@
 // 2. Has no LIMIT keyword before it at the same level
 // 3. Is the last SELECT-level OFFSET in the query
 
-const OFFSET_RE = /\bOFFSET\s+(?:\$?\d+|\?)\b/i;
+// A bare OFFSET may be followed by a numeric literal, a `$n` parameter, or a
+// `?` placeholder. The trailing bound uses `(?!\w)` rather than `\b` because a
+// `?` placeholder is a non-word character — `\b` would fail between `?` and the
+// following non-word/end-of-input, silently missing `OFFSET ?`.
+const OFFSET_RE = /\bOFFSET\s+(?:\$?\d+|\?)(?!\w)/i;
 
 /**
  * Check if the SQL has a bare OFFSET clause (no preceding LIMIT at the same level)
