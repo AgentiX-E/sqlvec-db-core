@@ -1013,21 +1013,68 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
     return { type: 'UNKNOWN', originalSql: sql };
   } catch {
     // pgsql-ast-parser v12 rejects some PostgreSQL constructs the CTE body may
-    // use (INTERSECT/EXCEPT, etc.). Fall back to a heuristic table extraction;
-    // a WITH ... SELECT is still a SELECT even when no table is referenced
-    // (e.g. `SELECT 1`), so route it as SELECT with a best-effort table set.
-    const tables = extractTableNamesHeuristic(trimmed);
-    if (/\bSELECT\b/i.test(trimmed)) {
-      return {
-        type: 'SELECT',
-        originalSql: sql,
-        tables,
-        hasJoin: /\bJOIN\b/i.test(trimmed),
-        isMultiShard: /\bJOIN\b/i.test(trimmed) && tables.length > 1,
-      };
+    // use (INTERSECT/EXCEPT, etc.). Re-dispatch the trailing statement (after
+    // the WITH clause) through the fallback heuristic so a WITH whose main
+    // query is SELECT/UPDATE/DELETE/INSERT still routes by its true type. For
+    // a SELECT, also merge the tables referenced inside the CTE bodies.
+    const mainQuery = extractMainQueryAfterWith(trimmed);
+    if (mainQuery) {
+      const parsed = fallbackParse(mainQuery);
+      if (parsed.type === 'SELECT') {
+        const allTables = extractTableNamesHeuristic(trimmed);
+        // CTE-body tables first, then the main-query tables, matching the AST
+        // path's ordering (bind tables precede the main query's tables).
+        return {
+          ...parsed,
+          tables: [...new Set([...allTables, ...(parsed.tables || [])])],
+        };
+      }
+      return parsed;
     }
     return { type: 'UNKNOWN', originalSql: sql };
   }
+}
+
+/**
+ * Extract the statement following a WITH clause (the "main query"). Walks CTE
+ * definitions by tracking parenthesis depth so nested subqueries inside CTE
+ * bodies are skipped, then returns everything after the final CTE's closing
+ * parenthesis — e.g. `WITH c AS (SELECT 1) SELECT 2` yields `SELECT 2`, and
+ * `WITH c AS (...), d AS (...) UPDATE t ...` yields `UPDATE t ...`.
+ */
+function extractMainQueryAfterWith(sql: string): string | null {
+  // Skip the leading WITH keyword and any CTE list. Iterate: locate the next
+  // `AS (` at the current top level, then skip its balanced parenthesized body.
+  let i = 0;
+  const bodyRegex = /\bAS\s*\(/gi;
+
+  // Find successive CTE bodies (`AS (...)`) and advance past each; the main
+  // query is whatever remains after the last CTE body's closing parenthesis.
+  let match: RegExpExecArray | null;
+  let pos = 0;
+  let found = false;
+  bodyRegex.lastIndex = 0;
+  while ((match = bodyRegex.exec(sql)) !== null) {
+    // Skip this CTE's balanced body.
+    let depth = 1;
+    let j = match.index + match[0].length;
+    for (; j < sql.length && depth > 0; j++) {
+      const ch = sql[j];
+      if (ch === '(') depth++;
+      else if (ch === ')') depth--;
+    }
+    pos = j;
+    found = true;
+    bodyRegex.lastIndex = pos;
+    // Stop scanning when the next non-space token is not a comma (i.e. the
+    // main query starts).
+    const rest = sql.slice(pos).trimStart();
+    if (!rest.startsWith(',')) break;
+  }
+
+  if (!found) return null;
+  const remainder = sql.slice(pos).trim();
+  return remainder.length > 0 ? remainder : null;
 }
 
 /**
@@ -1055,6 +1102,10 @@ function fallbackParse(sql: string): ParsedStatement {
       hasJoin,
       isMultiShard: hasJoin && tables.length > 1,
     };
+  }
+
+  if (upper.startsWith('INSERT')) {
+    return parseInsertHeuristic(sql);
   }
 
   if (upper.startsWith('UPDATE')) {
