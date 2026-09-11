@@ -18,6 +18,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('MacAddrShim');
 
@@ -44,12 +45,6 @@ export interface MacAddrResult {
  * Case-insensitive per standard SQL identifier convention.
  */
 const NET_TYPE_RE = /\b(MACADDR8?|INET|CIDR)\b/gi;
-
-/**
- * Compiled set of the recognized network type names (lowercased)
- * for fast lookup in detectNetType and related checks.
- */
-const NET_TYPE_NAMES = new Set(['macaddr', 'macaddr8', 'inet', 'cidr']);
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -79,8 +74,11 @@ export function detectNetType(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
+  // Protect string literals, quoted identifiers, and comments so a network
+  // type name inside them (`SELECT 'inet'`) is not reported as a type reference.
+  // Reset lastIndex because NET_TYPE_RE is a shared module-level global regex.
   NET_TYPE_RE.lastIndex = 0;
-  return NET_TYPE_RE.test(sql);
+  return NET_TYPE_RE.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -122,33 +120,24 @@ export function rewriteNetType(sql: string): MacAddrResult {
     return { sql, rewritten: false };
   }
 
-  // Quick check first: bail early if no network type is present
+  // Quick check first: bail early if no network type is present (outside literals).
   if (!detectNetType(sql)) {
     return { sql, rewritten: false };
   }
 
-  // Check each type to see if a rewrite is actually needed
-  let rewritten = false;
-  for (const typeName of NET_TYPE_NAMES) {
-    const pattern = new RegExp(`\\b${escapeRegExp(typeName)}\\b`, 'gi');
-    if (pattern.test(sql)) {
-      rewritten = true;
-      break;
-    }
-  }
+  // Protect string literals, quoted identifiers, and comments so a network
+  // type name inside them (e.g. `SELECT 'inet'`) is never rewritten to TEXT.
+  const protectedSql = protectSQL(sql);
+  const rewrittenSql = restoreSQL({
+    ...protectedSql,
+    protectedSql: protectedSql.protectedSql.replace(NET_TYPE_RE, 'TEXT'),
+  });
 
-  // Perform the replacement – replace all network type keywords with TEXT
-  const rewrittenSql = sql.replace(NET_TYPE_RE, 'TEXT');
+  // detectNetType() already guaranteed a network type keyword is present, so
+  // the replacement above necessarily changed the SQL.
+  logger.debug({ original: sql, rewritten: rewrittenSql }, 'Rewrote network type(s) to TEXT');
 
-  if (rewrittenSql !== sql) {
-    rewritten = true;
-  }
-
-  if (rewritten) {
-    logger.debug({ original: sql, rewritten: rewrittenSql }, 'Rewrote network type(s) to TEXT');
-  }
-
-  return { sql: rewrittenSql, rewritten };
+  return { sql: rewrittenSql, rewritten: true };
 }
 
 /**
@@ -181,19 +170,4 @@ export function simplifyNetExpr(sql: string): MacAddrResult {
   // No-op: pass through unchanged
   // Full operator rewriting can be added here in a future iteration
   return { sql, rewritten: false };
-}
-
-// ── Internal Helpers ─────────────────────────────────────────────
-
-/**
- * Escape special regex characters in a string.
- *
- * Ensures that type names are safely interpolated into regex patterns
- * without unintended regex metacharacters being interpreted.
- *
- * @param str - The string to escape.
- * @returns The string with regex special characters escaped.
- */
-function escapeRegExp(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
