@@ -43,9 +43,23 @@ function placeholderFor(index: number): string {
 }
 
 /**
- * 占位符正则模式：__LIT_(\d+)__
+ * Placeholder regex source: matches `__LIT_(\d+)__`.
+ *
+ * NOTE: kept as a *source string* (`.source`) rather than a shared module-level
+ * `g` RegExp so every consumer builds its own instance. A shared `g` RegExp
+ * would leak `lastIndex` state across `test()`/`replace()` calls (the same trap
+ * documented in MacAddrShim), silently causing missed matches depending on call
+ * order.
  */
-const PLACEHOLDER_RE = /__LIT_(\d+)__/g;
+const PLACEHOLDER_RE_SOURCE = '__LIT_(\\d+)__';
+
+/**
+ * Return a fresh, non-shared global RegExp matching a placeholder.
+ */
+function placeholderRegex(): RegExp {
+  // eslint-disable-next-line require-unicode-regexp
+  return new RegExp(PLACEHOLDER_RE_SOURCE, 'g');
+}
 
 // ── 扫描器：按优先级顺序匹配所有字面量和注释 ──
 
@@ -90,7 +104,9 @@ function scanLiteralRanges(sql: string): Array<{
       matches.push({ start, end, raw, type: 'identifier' });
     } else if (raw.startsWith('--')) {
       matches.push({ start, end, raw, type: 'single-line-comment' });
-    } else if (raw.startsWith('/*')) {
+    } else {
+      // The scanner regex only yields four token kinds; anything reaching here
+      // must be a multi-line comment (`/* ... *​/`).
       matches.push({ start, end, raw, type: 'multi-line-comment' });
     }
   }
@@ -167,6 +183,15 @@ export function protectSQL(sql: string): ProtectedSQL {
  *
  * 从右向左替换确保偏移量正确。
  *
+ * NOTE (known limitation): a bare `__LIT_N__` token that happens to appear in
+ * the *original* SQL code (e.g. a real column named `__LIT_0__`) is
+ * indistinguishable from a placeholder token and will be replaced if its index
+ * is within bounds. This is accepted because the `__LIT_` prefix is an internal
+ * convention that never appears in real schema identifiers, and rewriting the
+ * placeholder scheme would break consumers (PgCronShim) that in-line match
+ * `__LIT_(\d+)__` against `protectedSql`. Strings/comments are safe: they are
+ * themselves protected and thus never contain a bare `__LIT_N__` after restore.
+ *
  * @param protectedSQL ProtectedSQL 对象
  * @returns 恢复后的原始 SQL
  */
@@ -175,7 +200,7 @@ export function restoreSQL(protectedSQL: ProtectedSQL): string {
   const literals = protectedSQL.literals;
 
   // 使用 replace 替换所有占位符
-  result = result.replace(PLACEHOLDER_RE, (match, indexStr) => {
+  result = result.replace(placeholderRegex(), (match, indexStr) => {
     const idx = parseInt(indexStr, 10);
     if (idx >= 0 && idx < literals.length) {
       return literals[idx];
@@ -194,8 +219,7 @@ export function restoreSQL(protectedSQL: ProtectedSQL): string {
  * 用于验证保护/恢复的一致性。
  */
 export function hasPlaceholders(sql: string): boolean {
-  PLACEHOLDER_RE.lastIndex = 0;
-  return PLACEHOLDER_RE.test(sql);
+  return placeholderRegex().test(sql);
 }
 
 /**
@@ -203,7 +227,7 @@ export function hasPlaceholders(sql: string): boolean {
  */
 export function extractPlaceholderIndices(protectedSql: string): number[] {
   const indices: number[] = [];
-  const re = new RegExp(PLACEHOLDER_RE.source, 'g');
+  const re = placeholderRegex();
   let m: RegExpExecArray | null;
   while ((m = re.exec(protectedSql)) !== null) {
     indices.push(parseInt(m[1], 10));
