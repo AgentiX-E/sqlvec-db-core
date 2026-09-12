@@ -14,6 +14,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('JsonAggShim');
 
@@ -61,7 +62,9 @@ export function detectJsonAgg(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return false;
   }
-  return ANY_JSON_AGG_RE.test(sql);
+  // Detect only outside string literals, quoted identifiers, and comments, so
+  // `SELECT 'json_arrayagg(x)'` is not treated as a JSON aggregate.
+  return ANY_JSON_AGG_RE.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -81,7 +84,11 @@ export function rewriteJsonAgg(sql: string): JsonAggResult {
     return { sql, rewritten: false };
   }
 
-  let rewrittenSql = sql;
+  // Protect string literals, quoted identifiers, and comments so a JSON
+  // aggregate name inside them (e.g. `SELECT 'json_arrayagg(x)'`) is never
+  // rewritten to a SQLite aggregate.
+  const protectedSql = protectSQL(sql);
+  let rewrittenSql = protectedSql.protectedSql;
   let matchFound = false;
 
   // 1. Rewrite JSON_OBJECTAGG(KEY k VALUE v) → json_group_object(k, v)
@@ -111,11 +118,12 @@ export function rewriteJsonAgg(sql: string): JsonAggResult {
   );
 
   if (matchFound) {
+    const restored = restoreSQL({ ...protectedSql, protectedSql: rewrittenSql });
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: restored },
       'JSON aggregate constructor rewritten',
     );
-    return { sql: rewrittenSql, rewritten: true };
+    return { sql: restored, rewritten: true };
   }
 
   // Fallback: no match found in actual replacement pass
