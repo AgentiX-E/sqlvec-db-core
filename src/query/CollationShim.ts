@@ -18,22 +18,43 @@
  *
  * Strategy: Remove the `COLLATE <identifier-or-string>` token pair from the SQL string
  * using regex. COLLATE is a reserved keyword in PG, so the risk of false positives
- * is low.
+ * is low. String literals, quoted identifiers, and comments are protected first so
+ * a COLLATE token inside them is never stripped.
  */
 
-const COLLATE_PATTERN = /\s+COLLATE\s+(?:"[^"]*"|'[^']*'|[a-zA-Z_][a-zA-Z0-9_.]*)/gi;
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
+
+/**
+ * Regex source for `COLLATE <identifier-or-string>` (the `g`/`i` flags are applied
+ * per-call via a fresh instance, never via a shared module-level RegExp).
+ */
+const COLLATE_PATTERN_SOURCE = '\\s+COLLATE\\s+(?:"[^"]*"|\'[^\']*\'|[a-zA-Z_][a-zA-Z0-9_.]*)';
 
 /**
  * Strip all COLLATE clauses from a SQL string.
  * Returns the SQL with COLLATE removed.
+ *
+ * String literals, quoted identifiers, and comments are shielded behind
+ * placeholders before stripping so a COLLATE keyword that appears inside them is
+ * preserved verbatim.
  */
 export function stripCollate(sql: string): string {
-  return sql.replace(COLLATE_PATTERN, '');
+  const protectedSql = protectSQL(sql);
+  const stripped = protectedSql.protectedSql.replace(
+    new RegExp(COLLATE_PATTERN_SOURCE, 'gi'),
+    '',
+  );
+  return restoreSQL({ ...protectedSql, protectedSql: stripped });
 }
 
 /**
  * Check if a SQL string contains a COLLATE clause.
+ *
+ * Uses a fresh (non-shared) regex instance on each call so `lastIndex` state from
+ * a previous `test()` never leaks across invocations (a shared `/g` RegExp would
+ * return different results for the same input depending on call order — the same
+ * trap documented in MacAddrShim and LiteralProtectionLayer).
  */
 export function hasCollate(sql: string): boolean {
-  return COLLATE_PATTERN.test(sql);
+  return new RegExp(COLLATE_PATTERN_SOURCE, 'gi').test(sql);
 }

@@ -55,7 +55,7 @@ export class ScopedConnection {
    * Check if column grant enforcement is available and should be applied.
    */
   get hasColumnGrants(): boolean {
-    return !!(this.columnGrantChecker && this.columnGrantChecker.isReady() && this._user !== 'public');
+    return !!(this.columnGrantChecker && this.columnGrantChecker.isReady && this._user !== 'public');
   }
 
   // ── Factory ─────────────────────────────────────────────────
