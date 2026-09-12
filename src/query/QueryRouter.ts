@@ -230,8 +230,7 @@ import { detectGINParam, rewriteGINParam } from './GINParamShim';
 import { detectPartitionPruning, rewritePartitionPruning } from './PartitionPruningShim';
 import { detectIsolation, rewriteIsolation } from './IsolationShim';
 import { detectWALArchive, rewriteWALArchive } from './WALArchiveShim';
-import { detectTDE, rewriteTDE } from './TDEShim';
-import { detectTDESql, detectSetTDE } from '../storage/TDEShim';
+import { detectTDE, rewriteTDE, detectTDESql, detectSetTDE } from './TDEShim';
 
 // Step 1x: optimizer statistics, parallel query GUCs, MVCC
 import { detectStats, rewriteStats } from './StatsShim';
@@ -2376,7 +2375,7 @@ export class QueryRouter {
       // Step 1w-bis: TDE GUC handling (dot-notation: tde.enabled, SET tde.key, etc.)
       if (shouldRun('config') && detectTDESql(postProcessSql)) {
         // Try SHOW first
-        const showResult = (await import('../storage/TDEShim')).rewriteShow(postProcessSql);
+        const showResult = rewriteShow(postProcessSql);
         if (showResult !== null) {
           postProcessSql = showResult;
         } else {
@@ -6715,24 +6714,17 @@ export class QueryRouter {
     params: any[] | undefined,
     start: number,
   ): Promise<QueryResult> {
-    // Fallback: try to execute as-is against all shards
-    try {
-      const rows = await this.shardManager.queryAll((stmt as any).originalSql, params);
-      return {
-        rows,
-        rowCount: rows.length,
-        queryTimeMs: Date.now() - start,
-        engine: 'shard',
-      };
-    } catch (err: any) {
-        logger.debug({ err: err.message }, 'Query fallback returned empty result');
-        return {
-          rows: [],
-          rowCount: 0,
-          queryTimeMs: Date.now() - start,
-          engine: 'shard',
-        };
-      }
+    // Fallback: try to execute as-is against all shards. If every shard rejects
+    // the statement (e.g. a malformed query that does not match any known
+    // statement type), propagate the error to the caller instead of silently
+    // returning an empty result set — swallowing it would hide real SQL errors.
+    const rows = await this.shardManager.queryAll((stmt as any).originalSql, params);
+    return {
+      rows,
+      rowCount: rows.length,
+      queryTimeMs: Date.now() - start,
+      engine: 'shard',
+    };
   }
 
   // ──────────────────────────────────────────────

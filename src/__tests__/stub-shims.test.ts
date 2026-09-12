@@ -20,7 +20,10 @@ describe('stub shims (contract lock)', () => {
   it('TDEShim detectors always report no match', () => {
     expect(detectTDE()).toBe(false);
     expect(detectTDESql()).toBe(false);
-    expect(detectSetTDE()).toBe(false);
+  });
+
+  it('TDEShim detectSetTDE returns an inert result (no rewrite)', () => {
+    expect(detectSetTDE('SET tde.key = 1')).toEqual({ sql: 'SET tde.key = 1', rewritten: false });
   });
 
   it('TDEShim rewriter is a pass-through', () => {
