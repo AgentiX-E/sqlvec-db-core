@@ -18,8 +18,8 @@
  */
 
 import * as crypto from 'crypto';
-import * as os from 'os';
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('UuidShim');
 
@@ -36,9 +36,6 @@ export interface UuidResult {
 
 /** UUID v1: 100-nanosecond intervals between 15 Oct 1582 and Unix epoch */
 const UUID_EPOCH_OFFSET = 122192928000000000;
-
-/** UUID v4 variant bits: RFC 4122 */
-const VARIANT_BITS = 0x8000; // 10xx xxxx
 
 // ── UUID v1 generator ────────────────────────────────────────────
 
@@ -192,7 +189,9 @@ export function detectUuidUsage(sql: string): boolean {
     return false;
   }
 
-  const cleaned = stripStringsAndComments(sql);
+  // Protect literals/identifiers/comments (including multi-line comments) so a
+  // UUID function name inside them is not reported as real usage.
+  const cleaned = protectSQL(sql).protectedSql;
 
   return (
     RE_GEN_RANDOM_UUID().test(cleaned) ||
@@ -230,7 +229,10 @@ export function rewriteUuidSql(sql: string): UuidResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  let result = sql;
+  // Protect string literals, quoted identifiers, and comments so a UUID
+  // construct inside them (e.g. `SELECT 'gen_random_uuid()'`) is never rewritten.
+  const protectedSql = protectSQL(sql);
+  let result = protectedSql.protectedSql;
 
   // 1. uuid_generate_v1() → literal UUID v1 string
   result = result.replace(RE_UUID_GENERATE_V1(), () => `'${uuidGenerateV1()}'`);
@@ -256,25 +258,12 @@ export function rewriteUuidSql(sql: string): UuidResult {
   // 7. Replace standalone UUID type keyword → TEXT
   result = result.replace(RE_UUID_TYPE(), 'TEXT');
 
-  const rewritten = result !== sql;
+  const restored = restoreSQL({ ...protectedSql, protectedSql: result });
+  const rewritten = restored !== sql;
 
   if (rewritten) {
-    logger.debug({ original: sql, rewritten: result }, 'Rewrote UUID SQL for SQLite compatibility');
+    logger.debug({ original: sql, rewritten: restored }, 'Rewrote UUID SQL for SQLite compatibility');
   }
 
-  return { sql: result, rewritten };
-}
-
-// ── Internal Helpers ─────────────────────────────────────────────
-
-/**
- * Strip string literals, quoted identifiers and SQL comments from SQL
- * to avoid false positives during UUID detection.
- */
-function stripStringsAndComments(sql: string): string {
-  return sql
-    .replace(/'[^']*'/g, '')
-    .replace(/"[^"]*"/g, '')
-    .replace(/--[^\n]*/g, '')
-    .replace(/\s+/g, ' ');
+  return { sql: restored, rewritten };
 }
