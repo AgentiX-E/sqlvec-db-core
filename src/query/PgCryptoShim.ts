@@ -30,6 +30,7 @@
 
 import * as forge from 'node-forge';
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('PgCryptoShim');
 
@@ -74,17 +75,17 @@ const RE_CRYPT = (): RegExp =>
 
 /**
  * pgp_sym_encrypt(expr1, expr2)
- * Captures the first argument (the data payload).
+ * Captures the data payload (expr1) and the key/passphrase (expr2).
  */
 const RE_PGP_SYM_ENCRYPT = (): RegExp =>
-  /\bpgp_sym_encrypt\s*\(\s*((?:[^,()]+|\([^)]*\))+)\s*,\s*[^)]+\)/gi;
+  /\bpgp_sym_encrypt\s*\(\s*((?:[^,()]+|\([^)]*\))+)\s*,\s*([^)]+)\)/gi;
 
 /**
  * pgp_sym_decrypt(expr1, expr2)
- * Captures the first argument (the ciphertext payload).
+ * Captures the ciphertext payload (expr1) and the key/passphrase (expr2).
  */
 const RE_PGP_SYM_DECRYPT = (): RegExp =>
-  /\bpgp_sym_decrypt\s*\(\s*((?:[^,()]+|\([^)]*\))+)\s*,\s*[^)]+\)/gi;
+  /\bpgp_sym_decrypt\s*\(\s*((?:[^,()]+|\([^)]*\))+)\s*,\s*([^)]+)\)/gi;
 
 /**
  * pgp_pub_encrypt(expr1, expr2) / pgp_pub_decrypt(expr1, expr2)
@@ -132,7 +133,9 @@ export function detectPgCrypto(sql: string): boolean {
     return false;
   }
 
-  const cleaned = stripStringsAndComments(sql);
+  // Protect literals/identifiers/comments (including multi-line comments) so a
+  // pgcrypto function name inside them is not reported as real usage.
+  const cleaned = protectSQL(sql).protectedSql;
 
   return RE_ANY_PGCRYPTO_FN().test(cleaned);
 }
@@ -315,7 +318,10 @@ export function rewritePgCrypto(sql: string): PgCryptoResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  let result = sql;
+  // Protect string literals, quoted identifiers, and comments so a pgcrypto
+  // function name inside them is never rewritten.
+  const protectedSql = protectSQL(sql);
+  let result = protectedSql.protectedSql;
 
   // 1. gen_salt(...) -> 'salt'  (must run first so crypt() sees a simple literal)
   result = result.replace(RE_GEN_SALT(), "'salt'");
@@ -343,45 +349,20 @@ export function rewritePgCrypto(sql: string): PgCryptoResult {
   // 8. hmac(expr1, expr2, ...) -> hex(sha256(expr1 || expr2))
   result = result.replace(RE_HMAC(), 'hex(sha256($1 || $2))');
 
-  const rewritten = result !== sql;
+  const restored = restoreSQL({ ...protectedSql, protectedSql: result });
+  const rewritten = restored !== sql;
 
   if (rewritten) {
     logger.debug(
-      { original: sql, rewritten: result },
+      { original: sql, rewritten: restored },
       'Rewrote pgcrypto SQL for SQLite compatibility',
     );
   }
 
-  return { sql: result, rewritten };
+  return { sql: restored, rewritten };
 }
 
 // ---- Internal Helpers -------------------------------------------
-
-/**
- * Strip string literals, quoted identifiers, and SQL comments from SQL
- * to avoid false positives during pgcrypto detection.
- *
- * This is a best-effort heuristic:
- *   - Handles single-quoted strings ('...')
- *   - Handles double-quoted identifiers ("...")
- *   - Handles single-line comments (--...)
- *   - Does not handle multi-line block comments (slash-asterisk ... asterisk-slash)
- *   - Does not handle escaped quotes within strings beyond basic omission.
- *
- * @param sql - Raw SQL string.
- * @returns SQL with non-code tokens replaced by spaces.
- */
-function stripStringsAndComments(sql: string): string {
-  return sql
-    // Remove single-quoted string literals
-    .replace(/'[^']*'/g, '')
-    // Remove double-quoted identifiers
-    .replace(/"[^"]*"/g, '')
-    // Remove single-line comments
-    .replace(/--[^\n]*/g, '')
-    // Collapse whitespace
-    .replace(/\s+/g, ' ');
-}
 
 /**
  * Encode a UTF-8 string to a binary string (latin-1) for use with forge.
