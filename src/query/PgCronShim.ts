@@ -33,6 +33,7 @@
 
 import { PgCronExecutor } from './PgCronExecutor';
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL, type ProtectedSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('PgCronShim');
 
@@ -107,30 +108,57 @@ interface CronScheduleArgs {
 
 /**
  * Extract the arguments from a `cron.schedule('name', 'schedule', 'sql')` call.
+ *
+ * Operates on a protected SQL string where each argument literal has been
+ * replaced by a `__LIT_N__` placeholder. This guarantees the call is a real
+ * statement-level reference, not text embedded inside a string literal or
+ * comment (which protectSQL collapses into a single placeholder of its own).
  */
-function extractCronScheduleArgs(sql: string): CronScheduleArgs | null {
+function extractCronScheduleArgs(protectedSql: ProtectedSQL): CronScheduleArgs | null {
   // eslint-disable-next-line require-unicode-regexp
-  const match = /\bcron\s*\.\s*schedule\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/gi.exec(sql);
+  const match = /\bcron\s*\.\s*schedule\s*\(\s*__LIT_(\d+)__\s*,\s*__LIT_(\d+)__\s*,\s*__LIT_(\d+)__\s*\)/gi
+    .exec(protectedSql.protectedSql);
   if (!match) return null;
   return {
-    name: match[1],
-    cronExpr: match[2],
-    sql: match[3],
+    name: unquote(protectedSql.literals[+match[1]]),
+    cronExpr: unquote(protectedSql.literals[+match[2]]),
+    sql: unquote(protectedSql.literals[+match[3]]),
   };
 }
 
 /**
  * Extract the argument from a `cron.unschedule('name' or jobid)` call.
+ *
+ * Same protection guarantees as extractCronScheduleArgs.
  */
-function extractCronUnscheduleArgs(sql: string): string | null {
+function extractCronUnscheduleArgs(protectedSql: ProtectedSQL): string | null {
+  // String argument → resolve the placeholder back to its literal value.
   // eslint-disable-next-line require-unicode-regexp
-  const match = /\bcron\s*\.\s*unschedule\s*\(\s*'([^']*)'\s*\)/gi.exec(sql);
-  if (match) return match[1];
-  // Try numeric
+  const match = /\bcron\s*\.\s*unschedule\s*\(\s*__LIT_(\d+)__\s*\)/gi.exec(protectedSql.protectedSql);
+  if (match) return unquote(protectedSql.literals[+match[1]]);
+  // Numeric argument → a bare number is not protected, match it directly.
   // eslint-disable-next-line require-unicode-regexp
-  const numMatch = /\bcron\s*\.\s*unschedule\s*\(\s*(\d+)\s*\)/gi.exec(sql);
+  const numMatch = /\bcron\s*\.\s*unschedule\s*\(\s*(\d+)\s*\)/gi.exec(protectedSql.protectedSql);
   if (numMatch) return numMatch[1];
   return null;
+}
+
+/**
+ * Strip a pair of surrounding quotes from a stored literal, if present.
+ *
+ * Accepts both single-quoted string literals and double-quoted identifiers so
+ * that cron.schedule('a', ...) and cron.schedule("a", ...) resolve to the same
+ * bare argument value. Unquoted values (e.g. numeric arguments) pass through.
+ */
+function unquote(literal: string): string {
+  if (literal.length >= 2) {
+    const first = literal[0];
+    const last = literal[literal.length - 1];
+    if ((first === "'" || first === '"') && last === first) {
+      return literal.slice(1, -1);
+    }
+  }
+  return literal;
 }
 
 // ---- Detect -----------------------------------------------------
@@ -150,7 +178,9 @@ export function detectPgCron(sql: string): boolean {
     return false;
   }
 
-  const cleaned = stripStringsAndComments(sql);
+  // Protect literals/identifiers/comments (including multi-line comments) so a
+  // cron.schedule/cron.job reference inside them is not reported as real usage.
+  const cleaned = protectSQL(sql).protectedSql;
 
   if (RE_ANY_CRON_FN().test(cleaned)) {
     return true;
@@ -185,12 +215,19 @@ export function rewritePgCron(sql: string): PgCronResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  let result = sql;
+  // Protect string literals, quoted identifiers, and comments so a cron
+  // reference inside them is never rewritten (nor triggers a scheduling side
+  // effect). Guard with detectPgCron for an early-out on non-cron SQL.
+  if (!detectPgCron(sql)) {
+    return { sql, rewritten: false };
+  }
+
+  const protectedSql = protectSQL(sql);
+  let result = protectedSql.protectedSql;
 
   // 1. cron.schedule(...) — extract args and register with executor
-  const scheduleMatch = RE_CRON_SCHEDULE().test(result);
-  if (scheduleMatch) {
-    const args = extractCronScheduleArgs(result);
+  if (RE_CRON_SCHEDULE().test(result)) {
+    const args = extractCronScheduleArgs(protectedSql);
     if (args) {
       const executor = getPgCronExecutor();
       try {
@@ -223,7 +260,7 @@ export function rewritePgCron(sql: string): PgCronResult {
 
   // 2. cron.unschedule(...) — remove job from executor
   if (RE_CRON_UNSCHEDULE().test(result)) {
-    const name = extractCronUnscheduleArgs(result);
+    const name = extractCronUnscheduleArgs(protectedSql);
     if (name) {
       const executor = getPgCronExecutor();
       executor.unschedule(name);
@@ -258,28 +295,15 @@ export function rewritePgCron(sql: string): PgCronResult {
     }
   }
 
-  const rewritten = result !== sql;
+  const restored = restoreSQL({ ...protectedSql, protectedSql: result });
+  const rewritten = restored !== sql;
 
   if (rewritten) {
     logger.debug(
-      { original: sql, rewritten: result },
+      { original: sql, rewritten: restored },
       'Rewrote pg_cron SQL for SQLite compatibility',
     );
   }
 
-  return { sql: result, rewritten };
-}
-
-// ---- Internal Helpers -------------------------------------------
-
-/**
- * Strip string literals, quoted identifiers, and SQL comments from SQL
- * to avoid false positives during pg_cron detection.
- */
-function stripStringsAndComments(sql: string): string {
-  return sql
-    .replace(/'[^']*'/g, '')
-    .replace(/"[^"]*"/g, '')
-    .replace(/--[^\n]*/g, '')
-    .replace(/\s+/g, ' ');
+  return { sql: restored, rewritten };
 }
