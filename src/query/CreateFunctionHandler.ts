@@ -60,7 +60,10 @@ export function parseCreateFunction(sql: string): ParsedFunction | null {
     const prefix = trimmed.substring(0, dollarQuoteStart.startIndex).trim();
 
     // Parse the prefix: CREATE [OR REPLACE] FUNCTION name(params) [RETURNS type] [LANGUAGE lang] [AS]
-    const prefixRegex = /^CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+(\w+)\s*\(([^)]*)\)\s*(?:RETURNS\s+(\w+(?:\s*\[\])?)\s*)?(?:LANGUAGE\s+\w+\s*)?(?:AS\s*)?$/i;
+    // `type` may be a composite (numeric(10,2), varchar(50), character varying,
+    // TABLE(...), SETOF type, or an array type) — hence the lookahead-based
+    // capture that stops at LANGUAGE/AS.
+    const prefixRegex = /^CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+(\w+)\s*\(([^)]*)\)\s*(?:RETURNS\s+((?:(?!\b(?:LANGUAGE|AS)\b).)+)\s*)?(?:LANGUAGE\s+\w+\s*)?(?:AS\s*)?$/i;
     const prefixMatch = prefix.match(prefixRegex);
     if (!prefixMatch) return null;
 
@@ -68,11 +71,13 @@ export function parseCreateFunction(sql: string): ParsedFunction | null {
     rawParams = prefixMatch[3].trim();
     isReplace = !!prefixMatch[1];
     if (prefixMatch[4]) {
-      returnType = prefixMatch[4];
+      returnType = prefixMatch[4].trim();
     }
   } else {
     // No dollar quoting — try a simpler approach: strip known keywords
-    // This is the bare body approach: CREATE FUNCTION name() body
+    // This is the bare body approach: CREATE FUNCTION name() body (no dollar quote).
+    // In this unwrapped form the body follows RETURNS with no delimiter, so the
+    // return type stays a simple word to avoid swallowing the body.
     const bareRegex = /^\s*CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\s+(\w+)\s*\(([^)]*)\)\s*(?:RETURNS\s+(\w+)\s*)?(.*?)\s*$/i;
     const bareMatch = trimmed.match(bareRegex);
     if (!bareMatch) return null;
@@ -86,7 +91,8 @@ export function parseCreateFunction(sql: string): ParsedFunction | null {
     body = (bareMatch[5] || '').replace(/LANGUAGE\s+\w+/i, '').trim();
   }
 
-  if (!name) return null;
+  // `name` is always non-empty here: both prefixRegex and bareRegex capture it
+  // with a `(\w+)` group that requires at least one word character.
 
   const paramCount = rawParams ? rawParams.split(',').filter(p => p.trim().length > 0).length : 0;
 
@@ -141,13 +147,15 @@ export function detectCreateFunction(sql: string): boolean {
  * Detect whether a SQL statement is a DROP FUNCTION.
  */
 export function detectDropFunction(sql: string): boolean {
-  return /^\s*DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(\w+)/i.test(sql.trim());
+  // Reject the invalid `DROP FUNCTION IF NOT EXISTS` form (IF NOT EXISTS is
+  // only valid for CREATE); otherwise it would misread `IF` as the name.
+  return /^\s*DROP\s+FUNCTION\s+(?!IF\s+NOT\s+EXISTS\b)(?:IF\s+EXISTS\s+)?(\w+)/i.test(sql.trim());
 }
 
 /**
  * Extract function name from DROP FUNCTION.
  */
 export function extractDropFunctionName(sql: string): string | null {
-  const match = sql.trim().match(/^\s*DROP\s+FUNCTION\s+(?:IF\s+EXISTS\s+)?(\w+)/i);
+  const match = sql.trim().match(/^\s*DROP\s+FUNCTION\s+(?!IF\s+NOT\s+EXISTS\b)(?:IF\s+EXISTS\s+)?(\w+)/i);
   return match ? match[1] : null;
 }
