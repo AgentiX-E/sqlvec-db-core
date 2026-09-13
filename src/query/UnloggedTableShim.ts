@@ -42,6 +42,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('UnloggedTableShim');
 
@@ -120,13 +121,16 @@ export function detectUnloggedTable(sql: string): boolean {
 
   const trimmed = sql.trim();
 
-  // Quick prefix check — avoids running regex on every statement
+  // Quick prefix check — avoids running regex on every statement. Must start
+  // with the `CREATE` keyword followed by whitespace (space/tab/newline).
   const upper = trimmed.toUpperCase();
-  if (!upper.startsWith('CREATE ')) {
+  if (!upper.startsWith('CREATE') || !/\s/.test(upper[6] ?? '')) {
     return false;
   }
 
-  return UNLOGGED_TABLE_DETECT.test(trimmed);
+  // Detect only outside string literals/quoted identifiers/comments so a
+  // `DEFAULT 'create unlogged table'` or comment mention is never reported.
+  return UNLOGGED_TABLE_DETECT.test(protectSQL(trimmed).protectedSql);
 }
 
 /**
@@ -183,8 +187,11 @@ export function rewriteUnloggedTable(sql: string): UnloggedTableResult {
   }
 
   // ── Step 2: Rewrite by stripping the UNLOGGED keyword ──────────
+  // Protect literals/quoted identifiers/comments so UNLOGGED inside them is
+  // never stripped (e.g. a `DEFAULT 'create unlogged table'` column default).
+  const protectedSql = protectSQL(trimmed);
 
-  const rewritten = trimmed.replace(
+  const rewrittenProtected = protectedSql.protectedSql.replace(
     UNLOGGED_TABLE_PATTERN,
     (_match, create: string, temp: string | undefined, table: string) => {
       // $1 = "CREATE " (preserved)
@@ -193,6 +200,8 @@ export function rewriteUnloggedTable(sql: string): UnloggedTableResult {
       return `${create}${temp ?? ''}${table}`;
     },
   );
+
+  const rewritten = restoreSQL({ ...protectedSql, protectedSql: rewrittenProtected });
 
   logger.debug(
     { original: trimmed, rewritten },
