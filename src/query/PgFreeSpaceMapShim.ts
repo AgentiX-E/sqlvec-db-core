@@ -23,6 +23,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('PgFreeSpaceMapShim');
 
@@ -84,7 +85,9 @@ const RE_PG_FREESPACEMAP = /\bpg_freespacemap\b/i;
  */
 export function detectPgFreeSpaceMap(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
-  return RE_PG_FREESPACEMAP.test(sql);
+  // Detect only outside string literals, quoted identifiers, and comments so
+  // `SELECT 'pg_freespacemap'` is not treated as a reference.
+  return RE_PG_FREESPACEMAP.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -99,21 +102,27 @@ export function rewritePgFreeSpaceMap(sql: string): FsmRewriteResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  const cleaned = sql.replace(/--[^\n]*/g, '').replace(/'[^']*'/g, '').replace(/\s+/g, ' ').trim();
+  // Protect string literals, quoted identifiers, and comments so a
+  // pg_freespacemap mention inside them is never rewritten.
+  const protectedSql = protectSQL(sql);
 
-  if (!RE_PG_FREESPACEMAP.test(cleaned)) {
+  if (!RE_PG_FREESPACEMAP.test(protectedSql.protectedSql)) {
     return { sql, rewritten: false };
   }
 
-  const result = sql.replace(
+  const rewrittenProtected = protectedSql.protectedSql.replace(
     /\bpg_freespacemap\b/gi,
     '(SELECT 0 AS relfilenode, 0 AS blkno, 1228 AS avail)',
   );
 
+  const result = restoreSQL({ ...protectedSql, protectedSql: rewrittenProtected });
+
+  // Reaching this point means a pg_freespacemap outside literals was matched
+  // above, so `result` necessarily differs from `sql` (the replacement always
+  // changes the text). `rewritten` is still computed defensively for the
+  // return contract.
   const rewritten = result !== sql;
-  if (rewritten) {
-    logger.debug({ original: sql, rewritten: result }, 'Rewrote pg_freespacemap reference');
-  }
+  logger.debug({ original: sql, rewritten: result }, 'Rewrote pg_freespacemap reference');
 
   return { sql: result, rewritten };
 }
