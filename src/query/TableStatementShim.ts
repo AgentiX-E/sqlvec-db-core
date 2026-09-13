@@ -81,10 +81,11 @@ export function detectTableStatement(sql: string): boolean {
     return false;
   }
 
-  // Fast prefix check before regex
+  // Fast prefix check before regex: must start with the `TABLE` keyword
+  // followed by whitespace (space, tab, or newline).
   const trimmed = sql.trim();
   const upper = trimmed.toUpperCase();
-  if (!upper.startsWith('TABLE ')) {
+  if (!upper.startsWith('TABLE') || !/\s/.test(upper[5] ?? '')) {
     return false;
   }
 
@@ -121,13 +122,9 @@ export function rewriteTableStatement(sql: string): TableStatementResult {
     return { sql, rewritten: false };
   }
 
-  const match = sql.trim().match(TABLE_CAPTURE_PATTERN);
-  if (!match || !match[1] || match[1].trim().length === 0) {
-    // `TABLE` with no following identifier — pass through as-is
-    logger.warn({ sql: sql.trim() }, 'TABLE statement with no table name — passthrough');
-    return { sql: sql.trim(), rewritten: false };
-  }
-
+  // detectTableStatement already guarantees `TABLE` is followed by whitespace
+  // and a non-empty trailing expression, so the capture always succeeds here.
+  const match = sql.trim().match(TABLE_CAPTURE_PATTERN)!;
   const rest = match[1].trim();
   const rewrittenSql = `SELECT * FROM ${rest}`;
 
