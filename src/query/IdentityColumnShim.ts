@@ -16,6 +16,8 @@
  * @module IdentityColumnShim
  */
 
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
+
 const IDENTITY_PATTERN = /GENERATED\s+(?:BY\s+DEFAULT|ALWAYS)\s+AS\s+IDENTITY/i;
 
 /**
@@ -26,7 +28,9 @@ const IDENTITY_PATTERN = /GENERATED\s+(?:BY\s+DEFAULT|ALWAYS)\s+AS\s+IDENTITY/i;
  * @returns `true` if an identity column pattern is found.
  */
 export function detectIdentityColumn(sql: string): boolean {
-  return IDENTITY_PATTERN.test(sql);
+  // Detect only outside string literals/quoted identifiers/comments so a
+  // mention inside `'GENERATED ALWAYS AS IDENTITY'` is not reported.
+  return IDENTITY_PATTERN.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -57,13 +61,17 @@ export function rewriteIdentityColumn(sql: string): string {
   // We replace the entire construct with: column_name INTEGER PRIMARY KEY AUTOINCREMENT
   const identityRegex = /(\b\w+\s+)(INT|BIGINT|SMALLINT|INTEGER)((?:\s+(?:NOT\s+)?NULL\s*|\s+PRIMARY\s+KEY\s*|\s+UNIQUE\s*)*?)(\s+GENERATED\s+(?:BY\s+DEFAULT|ALWAYS)\s+AS\s+IDENTITY)((?:\s+PRIMARY\s+KEY)?(?:\s+(?:NOT\s+)?NULL)?(?:\s+UNIQUE)?)/gi;
 
-  let result = sql;
-  result = result.replace(identityRegex, (_match, colNamePart: string, _colType: string, _middle: string) => {
-    // Replace with just `columnName INTEGER PRIMARY KEY AUTOINCREMENT`
-    return `${colNamePart.trim()} INTEGER PRIMARY KEY AUTOINCREMENT`;
-  });
+  const protectedSql = protectSQL(sql);
 
-  return result;
+  const result = protectedSql.protectedSql.replace(
+    identityRegex,
+    (_match, colNamePart: string, _colType: string, _middle: string) => {
+      // Replace with just `columnName INTEGER PRIMARY KEY AUTOINCREMENT`
+      return `${colNamePart.trim()} INTEGER PRIMARY KEY AUTOINCREMENT`;
+    },
+  );
+
+  return restoreSQL({ ...protectedSql, protectedSql: result });
 }
 
 /**
@@ -76,7 +84,9 @@ export function detectSerialColumn(sql: string): boolean {
   if (!/^\s*CREATE\s+TABLE\s/i.test(sql)) {
     return false;
   }
-  return /\b(SERIAL|BIGSERIAL|SMALLSERIAL)\b/i.test(sql);
+  // Detect only outside string literals so a `DEFAULT 'SERIAL'` column default
+  // is not reported as a SERIAL pseudo-type.
+  return /\b(SERIAL|BIGSERIAL|SMALLSERIAL)\b/i.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -96,8 +106,11 @@ export function rewriteSerialColumn(sql: string): string {
     return sql;
   }
 
+  // Protect literals so a `DEFAULT 'x SERIAL y'` string is never rewritten.
+  const protectedSql = protectSQL(sql);
+
   // Does the DDL already have a PRIMARY KEY (inline or table-level)?
-  const hasExistingPK = /\bPRIMARY\s+KEY\b/i.test(sql);
+  const hasExistingPK = /\bPRIMARY\s+KEY\b/i.test(protectedSql.protectedSql);
 
   // Replace SERIAL/BIGSERIAL/SMALLSERIAL column types.
   // Regex matches: word_boundary column_name whitespace SERIAL-type word_boundary
@@ -105,13 +118,16 @@ export function rewriteSerialColumn(sql: string): string {
   let autoIncrementAssigned = false;
 
   const serialRegex = /\b(\w+)\s+(SERIAL|BIGSERIAL|SMALLSERIAL)\b/gi;
-  const result = sql.replace(serialRegex, (_match: string, colName: string) => {
-    if (autoIncrementAssigned || hasExistingPK) {
-      return `${colName} INTEGER`;
-    }
-    autoIncrementAssigned = true;
-    return `${colName} INTEGER PRIMARY KEY AUTOINCREMENT`;
-  });
+  const result = protectedSql.protectedSql.replace(
+    serialRegex,
+    (_match: string, colName: string) => {
+      if (autoIncrementAssigned || hasExistingPK) {
+        return `${colName} INTEGER`;
+      }
+      autoIncrementAssigned = true;
+      return `${colName} INTEGER PRIMARY KEY AUTOINCREMENT`;
+    },
+  );
 
-  return result;
+  return restoreSQL({ ...protectedSql, protectedSql: result });
 }
