@@ -18,6 +18,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('LargeObjectShim');
 
@@ -75,7 +76,9 @@ export function detectLargeObjectFunc(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return false;
   }
-  return ANY_LO_FUNC_RE.test(sql.trim());
+  // Detect only outside string literals/quoted identifiers/comments so a
+  // mention inside `'lo_write(...)'` or a comment is not reported.
+  return ANY_LO_FUNC_RE.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -119,7 +122,9 @@ export function rewriteLargeObjectFunc(sql: string): LargeObjectResult {
     return { sql, rewritten: false };
   }
 
-  let working = sql;
+  // Protect literals/comments so large-object mentions inside them survive.
+  const protectedSql = protectSQL(sql);
+  let working = protectedSql.protectedSql;
   let rewritten = false;
 
   // ── Phase 1: lo_write(handle, buf) → 0 ──
@@ -144,5 +149,5 @@ export function rewriteLargeObjectFunc(sql: string): LargeObjectResult {
     logger.debug({ before: sql, after: working }, 'Large object function rewritten');
   }
 
-  return { sql: working, rewritten };
+  return { sql: restoreSQL({ ...protectedSql, protectedSql: working }), rewritten };
 }
