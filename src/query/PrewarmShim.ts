@@ -98,6 +98,10 @@ export class PrewarmShim {
             if (typeof val === 'string') rowSize += val.length * 2;
             else if (typeof val === 'number') rowSize += 8;
             else if (val instanceof Buffer) rowSize += val.length;
+            // defensive fallback for an unexpected non-scalar value: with
+            // better-sqlite3 the only non-null shapes are string/number/Buffer,
+            // so this branch is unreachable against real SQLite data but keeps
+            // the `unknown` row-value contract total.
             else rowSize += 4;
           }
           totalSize += rowSize;
