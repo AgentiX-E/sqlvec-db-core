@@ -16,16 +16,31 @@
  * Output: INSERT INTO t (name) VALUES ('hello')
  */
 export function stripDefaultValues(sql: string): string {
-  // Only applies to INSERT ... VALUES ... statements
+  // Only applies to INSERT ... VALUES ... statements. Use balanced-paren
+  // scanning to locate the column and value lists so nested function calls
+  // (e.g. VALUES (DEFAULT, func(1,2))) are not truncated at their first `)`.
   const insertMatch = sql.match(
-    /^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(`?"?\w+"?`?(?:\s*\.\s*`?"?\w+"?`?)?)\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)\s*(.*)$/is
+    /^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(`?"?\w+"?`?(?:\s*\.\s*`?"?\w+"?`?)?)\s*\(/is
   );
   if (!insertMatch) return sql;
 
   const tableName = insertMatch[1];
-  const columnsRaw = insertMatch[2];
-  const valuesRaw = insertMatch[3];
-  const suffix = insertMatch[4]; // RETURNING clause etc.
+  const colsOpen = insertMatch[0].length; // position just after the `(` of columns
+  const colsClose = findMatchingParen(sql, colsOpen - 1);
+  if (colsClose === -1) return sql;
+
+  const columnsRaw = sql.slice(colsOpen, colsClose);
+  const afterCols = sql.slice(colsClose + 1);
+
+  const valuesMatch = afterCols.match(/^\s*VALUES\s*\(/is);
+  if (!valuesMatch) return sql;
+
+  const valsOpen = valuesMatch[0].length; // position just after the `(` of values
+  const valsClose = findMatchingParen(afterCols, valsOpen - 1);
+  if (valsClose === -1) return sql;
+
+  const valuesRaw = afterCols.slice(valsOpen, valsClose);
+  const suffix = afterCols.slice(valsClose + 1).trim(); // RETURNING clause etc.
 
   const columns = splitCSV(columnsRaw);
   const values = splitCSV(valuesRaw);
@@ -49,7 +64,45 @@ export function stripDefaultValues(sql: string): string {
   // Rebuild
   const newCols = kept.map(([c]) => c).join(', ');
   const newVals = kept.map(([, v]) => v).join(', ');
-  return `INSERT INTO ${tableName} (${newCols}) VALUES (${newVals}) ${suffix}`.trim();
+  const suffixPart = suffix.length > 0 ? ` ${suffix}` : '';
+  return `INSERT INTO ${tableName} (${newCols}) VALUES (${newVals})${suffixPart}`;
+}
+
+/**
+ * Find the closing parenthesis matching the one at `openPos`, accounting for
+ * nesting and skipping string literals and `--` line comments so a `)` inside
+ * a string or comment never terminates the scan prematurely.
+ */
+function findMatchingParen(sql: string, openPos: number): number {
+  let depth = 1;
+  let i = openPos + 1;
+  while (i < sql.length && depth > 0) {
+    const ch = sql[i];
+    if (ch === "'") {
+      // Skip a single-quoted string, including doubled '' escapes.
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === "'" && sql[i + 1] === "'") {
+          i += 2; // escaped quote
+        } else if (sql[i] === "'") {
+          i++;
+          break;
+        } else {
+          i++;
+        }
+      }
+      continue;
+    }
+    if (ch === '-' && sql[i + 1] === '-') {
+      // Skip to end of line comment.
+      while (i < sql.length && sql[i] !== '\n') i++;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    i++;
+  }
+  return depth === 0 ? i - 1 : -1;
 }
 
 /**
@@ -66,6 +119,13 @@ function splitCSV(input: string): string[] {
     const ch = input[i];
     if (inQuote) {
       current += ch;
+      // A doubled quote (`''` or `""` or ````) is an escaped quote inside the
+      // string, not the closing delimiter.
+      if (ch === quoteChar && input[i + 1] === quoteChar) {
+        current += input[i + 1];
+        i++;
+        continue;
+      }
       if (ch === quoteChar) {
         inQuote = false;
       }
