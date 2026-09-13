@@ -23,6 +23,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('LateralJoinRewriter');
 
@@ -72,7 +73,9 @@ const FROM_LATERAL_RE = /(?:FROM|,)\s+LATERAL\s+(\()/i;
  * Detect whether a SQL statement contains the LATERAL keyword.
  */
 export function detectLateral(sql: string): boolean {
-  return LATERAL_RE.test(sql);
+  // Detect only outside string literals/quoted identifiers/comments so a
+  // mention inside `'LATERAL'` or a comment is not reported.
+  return LATERAL_RE.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -86,7 +89,7 @@ export function rewriteLateral(
   sql: string,
   options?: { forceRewrite?: boolean },
 ): LateralResult {
-  if (!LATERAL_RE.test(sql)) {
+  if (!LATERAL_RE.test(protectSQL(sql).protectedSql)) {
     return { sql, rewritten: false };
   }
 
@@ -95,8 +98,9 @@ export function rewriteLateral(
     return { sql, rewritten: false };
   }
 
-  // Rewrite mode
-  let result = sql;
+  // Rewrite mode — protect literals/comments so LATERAL inside them survives.
+  const protectedSql = protectSQL(sql);
+  let result = protectedSql.protectedSql;
   let count = 0;
 
   // 1. Handle JOIN LATERAL patterns first (longer/more specific match)
@@ -111,20 +115,19 @@ export function rewriteLateral(
     return 'CROSS JOIN ' + paren;
   });
 
-  // 3. Fallback: strip any remaining standalone LATERAL keywords (edge cases)
+  // 3. Fallback: strip any remaining standalone LATERAL keywords (edge cases).
+  // Since LATERAL_RE.test(result) is true here, the replace necessarily removes
+  // at least one occurrence, so the change is unconditional.
   if (LATERAL_RE.test(result)) {
-    const before = result;
     result = result.replace(LATERAL_RE, '');
-    if (result !== before) {
-      count++;
-      logger.warn(
-        { original: sql },
-        'LATERAL keyword remained after primary rewrite patterns; stripped residual occurrence',
-      );
-    }
+    count++;
+    logger.warn(
+      { original: sql },
+      'LATERAL keyword remained after primary rewrite patterns; stripped residual occurrence',
+    );
   }
 
   const rewritten = count > 0;
 
-  return { sql: result, rewritten };
+  return { sql: restoreSQL({ ...protectedSql, protectedSql: result }), rewritten };
 }
