@@ -46,6 +46,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ExtensionShim');
 
@@ -184,8 +185,12 @@ export function detectExtension(sql: string): boolean {
   }
 
   const trimmed = sql.trim();
+  // Protect literals/quoted identifiers/comments so a `FROM pg_available_extensions`
+  // or `FROM pg_extension` token inside a string literal or comment is not
+  // misreported as a real system-catalog query.
+  const protectedSql = protectSQL(trimmed).protectedSql;
 
-  return EXTENSION_PATTERNS.some((pattern) => pattern.test(trimmed));
+  return EXTENSION_PATTERNS.some((pattern) => pattern.test(protectedSql));
 }
 
 /**
@@ -239,6 +244,9 @@ export function rewriteExtension(sql: string): ExtensionResult {
   }
 
   const trimmed = sql.trim();
+  // Protect literals/quoted identifiers/comments so a system-catalog token
+  // inside a string/comment is never detected as a real query target.
+  const protectedSql = protectSQL(trimmed).protectedSql;
 
   // ── Step 1: Is this even extension management SQL? ────────────
 
@@ -261,7 +269,7 @@ export function rewriteExtension(sql: string): ExtensionResult {
   // ── Case A: SELECT from pg_available_extensions ────────────────
   // Returns rows with the standard column schema.
 
-  if (PG_AVAILABLE_EXTENSIONS.test(trimmed)) {
+  if (PG_AVAILABLE_EXTENSIONS.test(protectedSql)) {
     logger.debug(
       { sql: trimmed },
       'pg_available_extensions query detected — returning real extension data',
@@ -288,7 +296,7 @@ UNION ALL SELECT 'plpgsql', '1.0', '', '1.0'`,
   // ── Case B: SELECT from pg_extension ───────────────────────────
   // Returns rows with the standard column schema.
 
-  if (PG_EXTENSION.test(trimmed)) {
+  if (PG_EXTENSION.test(protectedSql)) {
     logger.debug(
       { sql: trimmed },
       'pg_extension query detected — returning real extension data',
