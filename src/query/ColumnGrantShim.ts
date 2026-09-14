@@ -25,6 +25,7 @@
 
 import { PinoLogger } from '../logger/PinoLogger';
 import { ColumnGrantChecker } from '../security/ColumnGrantChecker';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ColumnGrantShim');
 
@@ -71,7 +72,10 @@ const COLUMN_GRANT_RE = /^(GRANT\s+(\w+))\s*\(([^)]*)\)\s+(ON\s+.+?)\s+TO\s+([^\
  * @returns `true` if the statement is a column-level GRANT.
  */
 export function detectColumnGrant(sql: string): boolean {
-  return COLUMN_GRANT_RE.test(sql.trim());
+  if (!sql || typeof sql !== 'string') return false;
+  // Protect literals/quoted identifiers/comments so a `GRANT ...(...)` mention
+  // inside a multiline comment is not misreported as a real column-level GRANT.
+  return COLUMN_GRANT_RE.test(protectSQL(sql).protectedSql.trim());
 }
 
 /**
@@ -102,7 +106,10 @@ export function rewriteColumnGrant(
   checker?: ColumnGrantChecker,
 ): ColumnGrantResult {
   const trimmed = sql.trim();
-  const match = COLUMN_GRANT_RE.exec(trimmed);
+  // Protect literals/quoted identifiers/comments so a GRANT pattern inside a
+  // multiline comment is never stripped (it is not executable DCL).
+  const protectedSql = protectSQL(trimmed);
+  const match = COLUMN_GRANT_RE.exec(protectedSql.protectedSql);
 
   if (!match) {
     // Not a column-level GRANT — pass through unchanged
@@ -120,8 +127,9 @@ export function rewriteColumnGrant(
   const onPart = match[4];
   const grantee = match[5];
 
-  // Record the column-level grant if a checker is available
-  if (checker && checker.isReady()) {
+  // Record the column-level grant if a checker is available and ready.
+  // `isReady` is a boolean field (not a method) on ColumnGrantChecker.
+  if (checker && checker.isReady) {
     const tableName = extractTableFromOnClause(onPart);
     const columns = columnListStr
       .split(',')
@@ -133,7 +141,13 @@ export function rewriteColumnGrant(
     }
   }
 
-  const rewritten = `${grantPrefix} ${onPart} TO ${grantee}`;
+  // Rewrite the protected SQL, then restore any literals/comments untouched.
+  const rewrittenProtected = protectedSql.protectedSql.replace(
+    COLUMN_GRANT_RE,
+    (m, gPrefix, _priv, _cols, gOnPart, gGrantee) =>
+      `${gPrefix} ${gOnPart} TO ${gGrantee}`,
+  );
+  const rewritten = restoreSQL({ ...protectedSql, protectedSql: rewrittenProtected });
 
   logger.debug('Rewritten column-level GRANT: original=%s rewritten=%s', trimmed, rewritten);
 
@@ -154,6 +168,8 @@ export function rewriteColumnGrant(
 function extractTableFromOnClause(onClause: string): string {
   // Strip leading "ON " and any schema prefix
   const trimmed = onClause.replace(/^\s*ON\s+/i, '').trim();
-  // Return everything up to the first whitespace or end
-  return trimmed.split(/\s+/)[0] || '';
+  // Return everything up to the first whitespace or end. `split(/\s+/)` always
+  // yields at least the empty string, so `[0]` is already a defined `string`; no
+  // `|| ''` fallback is needed.
+  return trimmed.split(/\s+/)[0];
 }
