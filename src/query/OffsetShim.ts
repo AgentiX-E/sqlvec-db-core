@@ -16,6 +16,8 @@
  * this handles the common case.
  */
 
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
+
 // Match OFFSET at the top level (after WHERE/HAVING/GROUP BY, but not inside subqueries)
 // We look for OFFSET that:
 // 1. Is not inside parentheses (subquery)
@@ -29,7 +31,10 @@
 const OFFSET_RE = /\bOFFSET\s+(?:\$?\d+|\?)(?!\w)/i;
 
 /**
- * Check if the SQL has a bare OFFSET clause (no preceding LIMIT at the same level)
+ * Check if the SQL has a bare OFFSET clause (no preceding LIMIT at the same level).
+ *
+ * The scan runs on literal-protected SQL so an OFFSET token inside a string
+ * literal, quoted identifier, or comment is never reported (BUG #97).
  */
 export function hasBareOffset(sql: string): boolean {
   if (typeof sql !== 'string') return false;
@@ -37,20 +42,24 @@ export function hasBareOffset(sql: string): boolean {
   // Quick check: does it have OFFSET?
   if (!OFFSET_RE.test(sql)) return false;
 
+  // Protect literals/comments so the character scan below (which only tracks
+  // parentheses depth) cannot mistake a token inside them for a real keyword.
+  const protectedSql = protectSQL(sql).protectedSql;
+
   // For each non-nested OFFSET, verify there's no preceding LIMIT
   // at the same nesting level
   let depth = 0;
   let lastLimitIndex = -1;
   let lastOffsetIndex = -1;
 
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
+  for (let i = 0; i < protectedSql.length; i++) {
+    const ch = protectedSql[i];
     if (ch === '(') depth++;
     else if (ch === ')') depth--;
-    else if (depth === 0 && ch === 'L' && /LIMIT\b/i.test(sql.slice(i, i + 5))) {
+    else if (depth === 0 && ch === 'L' && /LIMIT\b/i.test(protectedSql.slice(i, i + 5))) {
       i += 4; // skip 'LIMIT'
       lastLimitIndex = i;
-    } else if (depth === 0 && ch === 'O' && /OFFSET\b/i.test(sql.slice(i, i + 6))) {
+    } else if (depth === 0 && ch === 'O' && /OFFSET\b/i.test(protectedSql.slice(i, i + 6))) {
       i += 5; // skip 'OFFSET'
       lastOffsetIndex = i;
     }
@@ -69,29 +78,32 @@ export function hasBareOffset(sql: string): boolean {
 export function fixBareOffset(sql: string): string {
   if (!hasBareOffset(sql)) return sql;
 
-  // More precise: find the last top-level OFFSET and insert LIMIT -1 before it
-  let depth = 0;
-  let limitFound = false;
+  // Protect literals/comments so the scan never rewrites a token inside them;
+  // restoreSQL at the end maps placeholders back to the original text.
+  const protectedSql = protectSQL(sql);
 
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
+  // hasBareOffset already guarantees there is no top-level LIMIT, so the scan
+  // only needs to locate the first top-level (depth 0) OFFSET and insert
+  // `LIMIT -1` before it. A `limitFound` guard would be unreachable dead code
+  // here, because the entry guard filters out every SQL containing a top-level
+  // LIMIT before this loop ever runs.
+  let depth = 0;
+  const working = protectedSql.protectedSql;
+
+  for (let i = 0; i < working.length; i++) {
+    const ch = working[i];
     if (ch === '(') depth++;
     else if (ch === ')') depth--;
-    else if (depth === 0 && ch === 'L' && /^LIMIT\b/i.test(sql.slice(i))) {
-      limitFound = true;
-      i += 4;
-    } else if (depth === 0 && ch === 'O' && /^OFFSET\b/i.test(sql.slice(i))) {
-      if (!limitFound) {
-        // Found bare OFFSET — insert LIMIT -1 before it
-        const before = sql.slice(0, i);
-        const after = sql.slice(i);
-        return before + 'LIMIT -1 ' + after;
-      }
-      // Reset for next potential OFFSET
-      limitFound = false;
-      i += 5;
+    else if (depth === 0 && ch === 'O' && /^OFFSET\b/i.test(working.slice(i))) {
+      // Found the bare top-level OFFSET — insert LIMIT -1 before it and restore.
+      const before = working.slice(0, i);
+      const after = working.slice(i);
+      return restoreSQL({
+        ...protectedSql,
+        protectedSql: before + 'LIMIT -1 ' + after,
+      });
     }
   }
 
-  return sql;
+  return restoreSQL({ ...protectedSql, protectedSql: working });
 }
