@@ -30,6 +30,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('TextSearchShim');
 
@@ -93,7 +94,9 @@ export function detectTextSearchFunc(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return false;
   }
-  return ANY_TEXT_SEARCH_RE.test(sql.trim());
+  // Detect only outside string literals/quoted identifiers/comments so a
+  // mention inside `'setweight(v, A)'` or a comment is not reported.
+  return ANY_TEXT_SEARCH_RE.test(protectSQL(sql).protectedSql);
 }
 
 /**
@@ -135,7 +138,10 @@ export function rewriteTextSearchFunc(sql: string): TextSearchResult {
     return { sql, rewritten: false };
   }
 
-  let working = sql;
+  // Protect literals/quoted identifiers/comments so a function-like token
+  // inside a string or comment is never rewritten (BUG #95/#96).
+  const protectedSql = protectSQL(sql);
+  let working = protectedSql.protectedSql;
   let rewritten = false;
 
   // ── Phase 1: setweight(v, weight) → v (no-op) ──
@@ -166,5 +172,5 @@ export function rewriteTextSearchFunc(sql: string): TextSearchResult {
     logger.debug({ before: sql, after: working }, 'Text search function rewritten');
   }
 
-  return { sql: working, rewritten };
+  return { sql: restoreSQL({ ...protectedSql, protectedSql: working }), rewritten };
 }
