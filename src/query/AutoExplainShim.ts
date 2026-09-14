@@ -182,7 +182,12 @@ export class AutoExplainShim {
  */
 export function detectAutoExplain(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
-  const cleaned = sql.replace(/'[^']*'/g, '').replace(/--[^\n]*/g, '');
+  // Strip string literals and both line and block comments, so a token inside
+  // any of them is never reported as real auto_explain usage.
+  const cleaned = sql
+    .replace(/'(?:[^']|'')*'/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/--[^\n]*/g, '');
   return /\bauto_explain\b/i.test(cleaned);
 }
 
@@ -196,8 +201,12 @@ export function rewriteAutoExplain(sql: string): { sql: string; rewritten: boole
     return { sql: sql ?? '', rewritten: false };
   }
 
+  // Match against the raw SQL with `^` anchored to the string start (no `m`
+  // flag), so a SET/LOAD line inside a multiline comment is never treated as a
+  // real auto_explain configuration.
+
   // Detect SET statements for auto_explain configuration
-  const setMatch = /^\s*SET\s+(auto_explain\.[\w_]+)\s*=\s*('[^']*'|\S+)\s*$/im.exec(sql);
+  const setMatch = /^\s*SET\s+(auto_explain\.[\w_]+)\s*=\s*('[^']*'|\S+)\s*$/.exec(sql);
   if (setMatch) {
     const param = setMatch[1];
     const value = setMatch[2].replace(/^'|'$/g, '');
@@ -243,7 +252,7 @@ export function rewriteAutoExplain(sql: string): { sql: string; rewritten: boole
   }
 
   // LOAD 'auto_explain' → SELECT 1
-  const loadMatch = /^\s*LOAD\s+'[^']*auto_explain[^']*'\s*$/im.exec(sql);
+  const loadMatch = /^\s*LOAD\s+'[^']*auto_explain[^']*'\s*$/.exec(sql);
   if (loadMatch) {
     return { sql: 'SELECT 1', rewritten: true };
   }
@@ -259,12 +268,15 @@ export function rewriteAutoExplain(sql: string): { sql: string; rewritten: boole
  */
 function parseDuration(value: string): number {
   if (!value) return DEFAULT_CONFIG.logMinDuration;
-  const num = parseInt(value, 10);
-  if (!isNaN(num)) {
-    // If it's just a number, assume milliseconds
-    return num;
+  // A bare integer (no unit suffix) is treated as milliseconds directly.
+  // `parseInt` alone is unsafe here because parseInt('1s') === 1, which would
+  // silently drop the unit; so we only take the integer fast-path when the
+  // whole string is a number.
+  const trimmed = value.trim();
+  if (/^-?\d+$/.test(trimmed)) {
+    return parseInt(trimmed, 10);
   }
-  const match = /^(-?\d+(?:\.\d+)?)\s*(ms|s|min|h)?$/i.exec(value);
+  const match = /^(-?\d+(?:\.\d+)?)\s*(ms|s|min|h)?$/i.exec(trimmed);
   if (!match) return DEFAULT_CONFIG.logMinDuration;
   const base = parseFloat(match[1]);
   const unit = (match[2] || 'ms').toLowerCase();
