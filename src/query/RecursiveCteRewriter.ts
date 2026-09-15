@@ -23,6 +23,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 // ── Logger ────────────────────────────────────────────────────────
 
@@ -151,11 +152,14 @@ export function extractCteMaterialization(sql: string): CteMaterializationInfo[]
  * ```
  */
 export function detectCte(sql: string): boolean {
+  // Detect on literal-protected SQL so a WITH token inside a string/comment is
+  // never reported (BUG #101).
+  const protectedSql = protectSQL(sql).protectedSql;
   const pattern = new RegExp(
     `\\bWITH\\s+(?:RECURSIVE\\s+)?${IDENT}\\s+AS\\s*\\(`,
     'i',
   );
-  const result = pattern.test(sql);
+  const result = pattern.test(protectedSql);
   logger.debug({ hasCte: result }, 'detectCte');
   return result;
 }
@@ -170,11 +174,14 @@ export function detectCte(sql: string): boolean {
  * ```
  */
 export function detectRecursiveCte(sql: string): boolean {
+  // Detect on literal-protected SQL so a WITH RECURSIVE token inside a
+  // string/comment is never reported (BUG #101).
+  const protectedSql = protectSQL(sql).protectedSql;
   const pattern = new RegExp(
     `\\bWITH\\s+RECURSIVE\\s+${IDENT}\\s+AS\\s*\\(`,
     'i',
   );
-  const result = pattern.test(sql);
+  const result = pattern.test(protectedSql);
   logger.debug({ hasRecursiveCte: result }, 'detectRecursiveCte');
   return result;
 }
@@ -220,7 +227,12 @@ export function detectRecursiveCte(sql: string): boolean {
  */
 export function rewriteCte(sql: string): CteRewriteResult {
   const original = sql;
-  let current = sql;
+
+  // Protect literals/comments so the SEARCH/CYCLE/MATERIALIZED matchers never
+  // rewrite a token inside a string literal or comment (BUG #102/#103/#104).
+  // restoreSQL at the end maps placeholders back to the original text.
+  const prot = protectSQL(sql);
+  let current = prot.protectedSql;
   let modified = false;
 
   // ── Step 1: Remove MATERIALIZED / NOT MATERIALIZED ────────────────
@@ -253,6 +265,11 @@ export function rewriteCte(sql: string): CteRewriteResult {
   // These appear after the closing `)` of a CTE query body.
   // They may appear in either order: `) SEARCH ... CYCLE ...` or `) CYCLE ... SEARCH ...`
   // An iterative loop ensures both are caught regardless of order.
+  //
+  // CYCLE's `TO 'val'` / `DEFAULT 'val'` string literals are themselves part of
+  // the CYCLE statement syntax, so after protectSQL they appear as __LIT_N__
+  // placeholders; the CYCLE matcher therefore anchors on those placeholders
+  // rather than on a quoted literal.
 
   const SEARCH_RE = new RegExp(
     `\\)\\s+SEARCH\\s+(?:DEPTH|BREADTH)\\s+FIRST\\s+BY\\s+[\\s\\S]+?\\s+SET\\s+${IDENT}`,
@@ -260,7 +277,7 @@ export function rewriteCte(sql: string): CteRewriteResult {
   );
 
   const CYCLE_RE = new RegExp(
-    `\\)\\s+CYCLE\\s+${IDENT}\\s+SET\\s+${IDENT}\\s+TO\\s+'[^']*'(?:\\s+DEFAULT\\s+'[^']*')?`,
+    `\\)\\s+CYCLE\\s+${IDENT}\\s+SET\\s+${IDENT}\\s+TO\\s+__LIT_\\d+__(?:\\s+DEFAULT\\s+__LIT_\\d+__)?`,
     'gi',
   );
 
@@ -306,7 +323,7 @@ export function rewriteCte(sql: string): CteRewriteResult {
   }
 
   return {
-    sql: current,
+    sql: restoreSQL({ ...prot, protectedSql: current }),
     rewritten: modified,
   };
 }
