@@ -24,6 +24,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('DistinctOnRewriter');
 
@@ -380,6 +381,14 @@ function extractOrderBy(rest: string): {
     i++;
   }
 
+  // No ORDER BY keyword found. LIMIT/OFFSET may still be present (DISTINCT ON
+  // without ORDER BY is legal, though unusual); separate them so they land on
+  // the outer query rather than the inner subquery (BUG #108).
+  const { limitOffset, body } = extractLimitOffset(rest);
+  if (limitOffset.length > 0) {
+    return { orderByCols: '', beforeOrderBy: body, afterOrderBy: limitOffset };
+  }
+
   return { orderByCols: '', beforeOrderBy: rest.trim(), afterOrderBy: '' };
 }
 
@@ -525,7 +534,11 @@ function extractLimitOffset(clauses: string): { limitOffset: string; body: strin
  * ```
  */
 export function detectDistinctOn(sql: string): boolean {
-  return /\bDISTINCT\s+ON\s*\(/i.test(sql);
+  // Detect on literal-protected SQL so a DISTINCT ON token inside a string
+  // literal or comment is never reported (BUG #105/#106). This also guards
+  // rewriteDistinctOn, which returns the original SQL unchanged for such inputs.
+  const protectedSql = protectSQL(sql).protectedSql;
+  return /\bDISTINCT\s+ON\s*\(/i.test(protectedSql);
 }
 
 /**
@@ -585,22 +598,24 @@ export function rewriteDistinctOn(sql: string): DistinctOnResult {
   const { orderByCols, beforeOrderBy, afterOrderBy } = extractOrderBy(restQuery);
 
   // ── 5. Extract LIMIT/OFFSET from afterOrderBy ──────────────────
-  const { limitOffset, body: afterOrderByBody } = extractLimitOffset(afterOrderBy);
+  const { limitOffset } = extractLimitOffset(afterOrderBy);
 
   // ── 6. Build the main body (FROM + WHERE + GROUP BY + HAVING + WINDOW) ──
-  //    This is everything before ORDER BY, combined with any remaining
-  //    clauses that were after ORDER BY (unlikely but handle gracefully).
-  let innerBody = beforeOrderBy;
-  if (afterOrderByBody.length > 0) {
-    innerBody += ' ' + afterOrderByBody;
-  }
+  //    This is everything before ORDER BY. afterOrderByBody is always empty in
+  //    the current data flow: extractLimitOffset is fed from afterOrderBy which
+  //    only ever carries LIMIT/OFFSET (any trailing FOR UPDATE etc. is consumed
+  //    by extractOrderByColumns), so its body is the empty string.
+  const innerBody = beforeOrderBy;
 
   // ── 7. Build PARTITION BY and window ORDER BY ──────────────────
   const doColsJoined = doExpressions.join(', ');
   const windowOrderBy = orderByCols.length > 0 ? orderByCols : doColsJoined;
 
   const partitionBy = `PARTITION BY ${doColsJoined}`;
-  const orderByPart = windowOrderBy.length > 0 ? ` ORDER BY ${windowOrderBy}` : '';
+  // windowOrderBy is always non-empty: it falls back to doColsJoined (which is
+  // guaranteed non-empty by the empty-expression guard above) when ORDER BY is
+  // absent, so the empty-string arm of the original ternary was unreachable.
+  const orderByPart = ` ORDER BY ${windowOrderBy}`;
   const windowFn = `ROW_NUMBER() OVER (${partitionBy}${orderByPart})`;
 
   // ── 8. Build the rewritten query ───────────────────────────────
