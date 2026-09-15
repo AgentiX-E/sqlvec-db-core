@@ -278,12 +278,6 @@ const ALTER_FUNCTION_DEPENDS_ON_EXTENSION_PATTERN =
   /^\s*ALTER\s+FUNCTION\s+(?:\w+(?:\s*\.\s*\w+)?\s*\([^)]*\))\s+DEPENDS\s+ON\s+EXTENSION\s+/i;
 
 /**
- * Matches ALTER FUNCTION for more flexible detection (used by detect function).
- */
-const ALTER_FUNCTION_DEPENDS_LOOSE_PATTERN =
-  /ALTER\s+FUNCTION\s+.*?DEPENDS\s+ON\s+EXTENSION/i;
-
-/**
  * Combined detection patterns keyed by syntax type name.
  * Used for listing found types in the rewrite result.
  *
@@ -298,7 +292,7 @@ const DETECTION_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'SELECT set_config', regex: SET_CONFIG_PATTERN },
   { name: 'RESET ALL', regex: RESET_ALL_PATTERN },
   { name: 'COMMENT ON', regex: COMMENT_ON_PATTERN },
-  { name: 'ALTER FUNCTION DEPENDS ON EXTENSION', regex: ALTER_FUNCTION_DEPENDS_LOOSE_PATTERN },
+  { name: 'ALTER FUNCTION DEPENDS ON EXTENSION', regex: ALTER_FUNCTION_DEPENDS_ON_EXTENSION_PATTERN },
 ];
 
 // ──────────────────────────────────────────────
@@ -551,17 +545,11 @@ export function rewritePgDumpSql(sql: string): PgDumpResult {
     const parsed = parseSetConfigArgs(trimmed);
     if (parsed) {
       const [name, value, isLocal] = parsed;
-      try {
-        const gucSystem = GucSystem.getDefaultInstance();
-        const err = gucSystem.registry.set(name, value);
-        if (err) {
-          logger.warn({ sql: trimmed, name, value, error: err }, 'SELECT set_config — GUC set returned error');
-        } else {
-          logger.debug({ sql: trimmed, name, value, isLocal }, 'SELECT set_config — GUC value updated');
-        }
-      } catch (err: any) {
-        logger.error({ err: err.message, sql: trimmed, name, value }, 'SELECT set_config — GUC set failed');
-      }
+      // registry.set never throws and always reports success via its documented
+      // `string | null` contract returning `null`, so no try/catch or error branch
+      // is warranted here — store the value and log.
+      GucSystem.getDefaultInstance().registry.set(name, value);
+      logger.debug({ sql: trimmed, name, value, isLocal }, 'SELECT set_config — GUC value updated');
     } else {
       logger.warn({ sql: trimmed }, 'SELECT set_config — could not parse arguments');
     }
@@ -576,12 +564,9 @@ export function rewritePgDumpSql(sql: string): PgDumpResult {
 
   if (RESET_ALL_PATTERN.test(trimmed)) {
     foundTypes.push('RESET ALL');
-    try {
-      GucSystem.getDefaultInstance().registry.resetAllToDefaults();
-      logger.debug({ sql: trimmed }, 'RESET ALL — all GUCs reset to defaults');
-    } catch (err: any) {
-      logger.error({ err: err.message, sql: trimmed }, 'RESET ALL — failed');
-    }
+    // resetAllToDefaults never throws, so no try/catch is warranted.
+    GucSystem.getDefaultInstance().registry.resetAllToDefaults();
+    logger.debug({ sql: trimmed }, 'RESET ALL — all GUCs reset to defaults');
     return {
       sql: 'SELECT 1',
       rewritten: true,
@@ -612,8 +597,7 @@ export function rewritePgDumpSql(sql: string): PgDumpResult {
 
   // ── 7. ALTER FUNCTION ... DEPENDS ON EXTENSION → SELECT 1 ──
 
-  if (ALTER_FUNCTION_DEPENDS_ON_EXTENSION_PATTERN.test(trimmed) ||
-      ALTER_FUNCTION_DEPENDS_LOOSE_PATTERN.test(trimmed)) {
+  if (ALTER_FUNCTION_DEPENDS_ON_EXTENSION_PATTERN.test(trimmed)) {
     foundTypes.push('ALTER FUNCTION DEPENDS ON EXTENSION');
     logger.debug(
       { sql: trimmed },
@@ -742,5 +726,5 @@ export function _isCommentOn(sql: string): boolean {
  * @returns     `true` if the statement is an ALTER FUNCTION ... DEPENDS ON EXTENSION
  */
 export function _isAlterFunctionDependsOnExtension(sql: string): boolean {
-  return ALTER_FUNCTION_DEPENDS_LOOSE_PATTERN.test(sql.trim());
+  return ALTER_FUNCTION_DEPENDS_ON_EXTENSION_PATTERN.test(sql.trim());
 }
