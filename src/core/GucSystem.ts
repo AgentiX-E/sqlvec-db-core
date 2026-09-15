@@ -117,8 +117,15 @@ export interface GucRegistryEntry {
 export class GucSystem {
   private static _instance: GucSystem | null = null;
 
-  private readonly values = new Map<string, string>();
-
+  /**
+   * Single source of truth for all runtime GUC state.
+   *
+   * Every write path (`set`, `handleSet`, `registry.set`) funnels values into this
+   * one map, and every read path (`get`, `handleShow`, `registry.get`) reads from
+   * it. A previous split into `values` and `registryMap` let `set`/`handleSet`
+   * record into one map while `current_setting`/`registry.get` read the other, so
+   * a runtime `SET` became invisible to `current_setting(name)` and `SHOW`.
+   */
   private readonly registryMap = new Map<string, GucRegistryEntry>();
 
   static getDefaultInstance(): GucSystem {
@@ -133,33 +140,35 @@ export class GucSystem {
   }
 
   /**
-   * Record a runtime GUC value. Mirrors the value into the registry entry when one
-   * already exists so that `handleShow`/`current_setting` observe the newest value.
+   * Record a runtime GUC value, upserting the registry entry and preserving any
+   * metadata (description/vartype/unit/context/default) already registered.
    */
   set(k: string, v: string): void {
-    this.values.set(k, v);
     const existing = this.registryMap.get(k);
     if (existing) {
       existing.value = v;
+    } else {
+      this.registryMap.set(k, { name: k, value: v });
     }
   }
 
   /**
-   * Look up a runtime GUC value. Returns the registry entry when present, else a
-   * minimal `{ value }` shape for a bare `set()` value, else an empty object when
-   * the parameter was never set.
+   * Look up a runtime GUC value as a `{ value }` shape, or an empty object when the
+   * parameter was never set.
    */
   get(k: string): { value?: string } {
     const entry = this.registryMap.get(k);
-    if (entry) return entry;
-    const value = this.values.get(k);
-    if (value !== undefined) return { value };
+    if (entry) return { value: entry.value };
     return {};
   }
 
   /** Return a shallow snapshot of all runtime-set values. */
   getAll(): Record<string, string> {
-    return Object.fromEntries(this.values);
+    const out: Record<string, string> = {};
+    for (const [k, entry] of this.registryMap) {
+      out[k] = entry.value;
+    }
+    return out;
   }
 
   /**
@@ -181,10 +190,6 @@ export class GucSystem {
     if (entry && entry.value !== undefined) {
       return { ok: true, value: entry.value };
     }
-    const value = this.values.get(name);
-    if (value !== undefined) {
-      return { ok: true, value };
-    }
     return { ok: false, value: '' };
   }
 
@@ -194,7 +199,7 @@ export class GucSystem {
    * Several shims (QueryHintShim, PgDumpCompatibilityShim) and the
    * `current_setting` system functions access the registry through a `.registry`
    * property rather than the top-level `set`/`get` methods. This getter exposes a
-   * stable object that delegates to the same underlying maps, so both access styles
+   * stable object that delegates to the same underlying map, so both access styles
    * observe identical state.
    */
   get registry() {
@@ -207,10 +212,10 @@ export class GucSystem {
         return null;
       },
       register: (entry: GucRegistryEntry): void => {
-        self.registryMap.set(entry.name, { ...entry });
+        const existing = self.registryMap.get(entry.name);
+        self.registryMap.set(entry.name, existing ? { ...existing, ...entry } : { ...entry });
       },
       resetAllToDefaults: (): void => {
-        self.values.clear();
         self.registryMap.clear();
       },
     };

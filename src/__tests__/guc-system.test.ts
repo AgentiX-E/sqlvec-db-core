@@ -20,13 +20,29 @@ describe('GucSystem — dynamic registry and singleton', () => {
     expect(guc.get('statement_timeout')).toEqual({ value: '1000' });
   });
 
-  it('get() falls back from registry to the bare values map', () => {
-    // No registry entry — get() must consult the values map (its `if (entry)` false arm).
+  it('set() writes the single registry map so registry.get() observes it (BUG #116)', () => {
+    // A bare set()/handleSet() must also be visible via registry.get(), which
+    // current_setting()/SHOW use; previously set() wrote a separate `values` map that
+    // registry.get() never read.
     guc.set('bare_value', '42');
-    expect(guc.get('bare_value')).toEqual({ value: '42' });
-    // And a registered entry takes precedence over the values map.
-    guc.registry.register({ name: 'bare_value', value: 'registered' });
-    expect(guc.get('bare_value')).toEqual(expect.objectContaining({ value: 'registered' }));
+    expect(guc.registry.get('bare_value')).toEqual({ name: 'bare_value', value: '42' });
+    guc.handleSet('another_value', 'x');
+    expect(guc.registry.get('another_value')?.value).toBe('x');
+  });
+
+  it('get() returns a minimal { value } shape, not the raw registry entry', () => {
+    guc.registry.register({ name: 'v', value: '1', vartype: 'string' });
+    expect(guc.get('v')).toEqual({ value: '1' });
+  });
+
+  it('registry.register() preserves metadata while set() updates only the value', () => {
+    guc.registry.register({ name: 'enable_hashjoin', value: 'on', vartype: 'string' });
+    guc.set('enable_hashjoin', 'off');
+    expect(guc.registry.get('enable_hashjoin')).toEqual({
+      name: 'enable_hashjoin',
+      value: 'off',
+      vartype: 'string',
+    });
   });
 
   it('get() returns an empty object for an unset parameter', () => {
@@ -64,6 +80,12 @@ describe('GucSystem — dynamic registry and singleton', () => {
     guc.registry.register({ name: 'enable_hashjoin', value: 'off', vartype: 'string' });
     const entry = guc.registry.get('enable_hashjoin');
     expect(entry).toMatchObject({ name: 'enable_hashjoin', value: 'off', vartype: 'string' });
+  });
+
+  it('registry.register() merges into an existing entry of the same name', () => {
+    guc.registry.register({ name: 'g', value: 'v1', vartype: 'string' });
+    guc.registry.register({ name: 'g', value: 'v2', unit: 'ms' });
+    expect(guc.registry.get('g')).toEqual({ name: 'g', value: 'v2', vartype: 'string', unit: 'ms' });
   });
 
   it('registry.get() returns undefined for an unregistered parameter', () => {
