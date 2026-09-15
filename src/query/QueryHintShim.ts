@@ -96,7 +96,13 @@ export function detectQueryHint(sql: string): boolean {
     logger.warn({ sql }, 'detectQueryHint: received non-string input');
     return false;
   }
-  return HINT_COMMENT_RE.test(sql);
+  // Use a fresh, non-global instance. The shared `HINT_COMMENT_RE` carries the `g`
+  // flag for `rewriteQueryHint`'s global replace, and reusing a `g`-flag RegExp for
+  // `test()` would leak `lastIndex` across calls (the same trap documented in
+  // MacAddrShim): a hint positioned before the stale cursor would be silently missed.
+  // A one-shot `test()` needs no `g` flag.
+  // eslint-disable-next-line require-unicode-regexp
+  return /\/\*\+.*?\*\//s.test(sql);
 }
 
 /**
