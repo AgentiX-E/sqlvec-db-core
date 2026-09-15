@@ -20,6 +20,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('NullsFirstLastShim');
 
@@ -73,14 +74,16 @@ const ORDER_BY_CLAUSE_RE =
 export function detectNullsFirstLast(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
 
-  const trimmed = sql.trim();
+  // Detect on literal-protected SQL so an ORDER BY / NULLS token inside a
+  // string literal, quoted identifier, or comment is never reported (BUG #98).
+  const protectedSql = protectSQL(sql).protectedSql;
 
   // Must have ORDER BY first
-  if (!ORDER_BY_RE.test(trimmed)) return false;
+  if (!ORDER_BY_RE.test(protectedSql)) return false;
 
   // Then check for NULLS FIRST/LAST
   NULLS_CLAUSE_RE.lastIndex = 0;
-  return NULLS_CLAUSE_RE.test(trimmed);
+  return NULLS_CLAUSE_RE.test(protectedSql);
 }
 
 /**
@@ -90,35 +93,16 @@ export function detectNullsFirstLast(sql: string): boolean {
  * Output: `['col1 ASC', 'col2 DESC NULLS LAST', 'col3 NULLS FIRST']`
  */
 function splitOrderByClause(orderByContent: string): string[] {
-  // Split by commas, respecting nested parentheses
+  // Split by commas, respecting nested parentheses. Strings/quoted identifiers
+  // and comments are already protected (replaced by __LIT_N__ placeholders)
+  // upstream, so only parenthesis depth needs tracking here — there is no
+  // quotation or comment token left to skip.
   const parts: string[] = [];
   let current = '';
   let depth = 0;
-  let inString = false;
-  let stringChar: string | null = null;
 
   for (let i = 0; i < orderByContent.length; i++) {
     const ch = orderByContent[i];
-
-    if (inString) {
-      if (ch === '\\') {
-        current += ch + (orderByContent[i + 1] || '');
-        i++;
-        continue;
-      }
-      if (ch === stringChar) {
-        inString = false;
-      }
-      current += ch;
-      continue;
-    }
-
-    if (ch === "'" || ch === '"') {
-      inString = true;
-      stringChar = ch;
-      current += ch;
-      continue;
-    }
 
     if (ch === '(') {
       depth++;
@@ -261,8 +245,14 @@ export function rewriteNullsFirstLast(sql: string): NullsFirstLastResult {
     return { sql: trimmed, rewritten: false, count: 0 };
   }
 
+  // Protect literals/comments so the ORDER BY extraction never rewrites a token
+  // inside a string literal, quoted identifier, or comment (BUG #99); restoreSQL
+  // at the end maps placeholders back to the original text.
+  const prot = protectSQL(trimmed);
+  const working = prot.protectedSql;
+
   // Find the ORDER BY clause
-  const orderByMatch = trimmed.match(ORDER_BY_CLAUSE_RE);
+  const orderByMatch = working.match(ORDER_BY_CLAUSE_RE);
   if (!orderByMatch) {
     return { sql: trimmed, rewritten: false, count: 0 };
   }
@@ -286,13 +276,23 @@ export function rewriteNullsFirstLast(sql: string): NullsFirstLastResult {
 
   // Rewrite each sort item
   const rewrittenSortItems = sortItems.map(rewriteSortItem);
-  const rewrittenOrderBy = `ORDER BY ${rewrittenSortItems.join(', ')}`;
+
+  // The ORDER_BY_CLAUSE_RE lookahead consumes the separating whitespace before
+  // a trailing clause (LIMIT/OFFSET/...) as part of orderByMatch[0], but the
+  // rebuilt expression drops it. Restore a single separator space when SQL text
+  // follows the ORDER BY block, so the trailing clause is not glued onto the
+  // last rewritten sort key (BUG #100: `name ASCLIMIT 5`).
+  const remainder = working.substring(orderByStart + orderByFullLen);
+  const separator = remainder.length > 0 ? ' ' : '';
+  const rewrittenOrderBy = `ORDER BY ${rewrittenSortItems.join(', ')}${separator}`;
 
   // Reconstruct the SQL
   const resultSql =
-    trimmed.substring(0, orderByStart) +
+    working.substring(0, orderByStart) +
     rewrittenOrderBy +
-    trimmed.substring(orderByStart + orderByFullLen);
+    remainder;
+
+  const restored = restoreSQL({ ...prot, protectedSql: resultSql });
 
   logger.debug(
     { count: nullsCount, original: orderByContent, rewritten: rewrittenSortItems.join(', ') },
@@ -300,7 +300,7 @@ export function rewriteNullsFirstLast(sql: string): NullsFirstLastResult {
   );
 
   return {
-    sql: resultSql,
+    sql: restored,
     rewritten: true,
     count: nullsCount,
   };
