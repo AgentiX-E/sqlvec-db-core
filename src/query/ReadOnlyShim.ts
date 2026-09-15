@@ -120,29 +120,15 @@ function toGucBool(value: boolean): string {
 }
 
 /**
- * Get the GucSystem singleton (lazy, safe).
- */
-function getGuc(): GucSystem | null {
-  try {
-    return GucSystem.getDefaultInstance();
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Store read-only state in GucSystem.
+ *
+ * `GucSystem.getDefaultInstance()` is a guaranteed non-throwing singleton and
+ * `handleSet` reports success via a `null` error return that this best-effort store
+ * deliberately ignores, so no defensive try/catch or null/error check is warranted
+ * here.
  */
 function storeReadOnlyInGuc(gucName: string, value: string): void {
-  const guc = getGuc();
-  if (!guc) {
-    logger.warn('GucSystem not available — read-only state not persisted');
-    return;
-  }
-  const error = guc.handleSet(gucName, value);
-  if (error) {
-    logger.warn({ gucName, value, error }, 'Failed to store read-only state in GucSystem');
-  }
+  GucSystem.getDefaultInstance().handleSet(gucName, value);
 }
 
 // ── Public API ─────────────────────────────────────────────────
@@ -322,12 +308,10 @@ export function rewriteReadOnly(sql: string): ReadOnlyResult {
 
     // Read from GucSystem, fallback to 'off' if not available
     let displayValue = 'off';
-    const guc = getGuc();
-    if (guc) {
-      const result = guc.handleShow(gucName);
-      if (result.ok) {
-        displayValue = result.value;
-      }
+
+    const result = GucSystem.getDefaultInstance().handleShow(gucName);
+    if (result.ok) {
+      displayValue = result.value;
     }
 
     logger.debug(
@@ -363,8 +347,7 @@ export function rewriteReadOnly(sql: string): ReadOnlyResult {
  * ```
  */
 export function isReadOnlyMode(): boolean {
-  const guc = getGuc();
-  if (!guc) return false;
+  const guc = GucSystem.getDefaultInstance();
 
   // Check both default_transaction_read_only (session default) and
   // transaction_read_only (current transaction) for completeness
