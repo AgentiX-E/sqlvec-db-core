@@ -78,12 +78,143 @@ const DEFAULT_PG_SETTINGS: GucSetting[] = [
   },
 ];
 
+/**
+ * A single dynamically-registered GUC entry in the in-memory registry.
+ *
+ * The dynamic registry is layered on top of the static {@link DEFAULT_PG_SETTINGS}
+ * snapshot. A value that has been SET at runtime is recorded here so that
+ * `current_setting(name)`, `SHOW`, and the read-only/serializable/query-hint shims
+ * can observe it.
+ */
+export interface GucRegistryEntry {
+  name: string;
+  value: string;
+  description?: string;
+  vartype?: string;
+  unit?: string;
+  context?: string;
+  default?: string;
+}
+
+/**
+ * In-memory runtime configuration store.
+ *
+ * GucSystem serves two roles:
+ *
+ * 1. A static snapshot of the standard PostgreSQL `pg_settings` catalog rows
+ *    (via {@link getPgSettingsView}), so that `pg_settings` catalog queries resolve.
+ * 2. A dynamic registry layered on top (SET/RESET/current_setting/query-hint), so
+ *    that runtime `SET` statements are observable through `current_setting(name)`,
+ *    `SHOW`, and the read-only / serializable / query-hint shims.
+ *
+ * The dynamic registry is intentionally minimal: it records the last value of any
+ * `SET` parameter and exposes it through a small, stable API surface
+ * (`set`/`get`/`handleSet`/`handleShow`/`registry`) that several shims consume.
+ * `getDefaultInstance()` and `getInstance()` return a shared singleton so that
+ * values survive across independent call sites (previously each call constructed a
+ * fresh, state-less instance, which silently dropped every runtime setting).
+ */
 export class GucSystem {
-  static getDefaultInstance() { return new GucSystem(); }
-  static getInstance() { return new GucSystem(); }
-  get(_k: string) { return {}; }
-  set(_k: string, _v: string) {}
-  getAll() { return {}; }
+  private static _instance: GucSystem | null = null;
+
+  private readonly values = new Map<string, string>();
+
+  private readonly registryMap = new Map<string, GucRegistryEntry>();
+
+  static getDefaultInstance(): GucSystem {
+    return GucSystem.getInstance();
+  }
+
+  static getInstance(): GucSystem {
+    if (!GucSystem._instance) {
+      GucSystem._instance = new GucSystem();
+    }
+    return GucSystem._instance;
+  }
+
+  /**
+   * Record a runtime GUC value. Mirrors the value into the registry entry when one
+   * already exists so that `handleShow`/`current_setting` observe the newest value.
+   */
+  set(k: string, v: string): void {
+    this.values.set(k, v);
+    const existing = this.registryMap.get(k);
+    if (existing) {
+      existing.value = v;
+    }
+  }
+
+  /**
+   * Look up a runtime GUC value. Returns the registry entry when present, else a
+   * minimal `{ value }` shape for a bare `set()` value, else an empty object when
+   * the parameter was never set.
+   */
+  get(k: string): { value?: string } {
+    const entry = this.registryMap.get(k);
+    if (entry) return entry;
+    const value = this.values.get(k);
+    if (value !== undefined) return { value };
+    return {};
+  }
+
+  /** Return a shallow snapshot of all runtime-set values. */
+  getAll(): Record<string, string> {
+    return Object.fromEntries(this.values);
+  }
+
+  /**
+   * Set a runtime GUC and report success. Returns `null` when the value was stored
+   * (the {@link set} path never fails), preserving the `string | null` contract that
+   * callers such as `GucPersistence` / `PgDumpCompatibilityShim` already rely on.
+   */
+  handleSet(name: string, value: string): string | null {
+    this.set(name, value);
+    return null;
+  }
+
+  /**
+   * Read a runtime GUC for `SHOW`. Returns `{ ok: true, value }` when the parameter
+   * has a recorded value, otherwise `{ ok: false, value: '' }`.
+   */
+  handleShow(name: string): { ok: boolean; value: string } {
+    const entry = this.registryMap.get(name);
+    if (entry && entry.value !== undefined) {
+      return { ok: true, value: entry.value };
+    }
+    const value = this.values.get(name);
+    if (value !== undefined) {
+      return { ok: true, value };
+    }
+    return { ok: false, value: '' };
+  }
+
+  /**
+   * Dynamic registry facade.
+   *
+   * Several shims (QueryHintShim, PgDumpCompatibilityShim) and the
+   * `current_setting` system functions access the registry through a `.registry`
+   * property rather than the top-level `set`/`get` methods. This getter exposes a
+   * stable object that delegates to the same underlying maps, so both access styles
+   * observe identical state.
+   */
+  get registry() {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const self = this;
+    return {
+      get: (name: string): GucRegistryEntry | undefined => self.registryMap.get(name),
+      set: (name: string, value: string): string | null => {
+        self.set(name, value);
+        return null;
+      },
+      register: (entry: GucRegistryEntry): void => {
+        self.registryMap.set(entry.name, { ...entry });
+      },
+      resetAllToDefaults: (): void => {
+        self.values.clear();
+        self.registryMap.clear();
+      },
+    };
+  }
 
   /**
    * Return the standard pg_settings catalog rows.
