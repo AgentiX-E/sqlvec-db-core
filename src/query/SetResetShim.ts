@@ -259,7 +259,7 @@ export function handleSetReset(sql: string): SetResetResult {
     // Wire statement_timeout reset into GucSystem — it's actively handled, not a no-op
     if (paramLower === 'statement_timeout') {
       try {
-        GucSystem.getDefaultInstance().registry.reset('statement_timeout');
+        GucSystem.getDefaultInstance().set('statement_timeout', '');
       } catch {
         // GucSystem not available, silently ignore
       }
@@ -277,7 +277,7 @@ export function handleSetReset(sql: string): SetResetResult {
     // Store in GucSystem for known parameters
     if (paramLower === 'client_encoding') {
       try {
-        GucSystem.getDefaultInstance().registry.reset('client_encoding');
+        GucSystem.getDefaultInstance().set('client_encoding', '');
       } catch {
         // GucSystem not available, silently ignore
       }
@@ -296,7 +296,7 @@ export function handleSetReset(sql: string): SetResetResult {
   // SET TIME ZONE (special syntax: SET TIME ZONE value)
   const tzMatch = trimmed.match(SET_TIMEZONE_PATTERN);
   if (tzMatch) {
-    const value = tzMatch[1].trim();
+    const value = stripTrailingClause(tzMatch[1]);
     logger.debug({ sql: trimmed, value }, 'SET TIME ZONE detected — treating as no-op');
     return {
       sql: '',
@@ -310,11 +310,11 @@ export function handleSetReset(sql: string): SetResetResult {
   // SET NAMES 'encoding' (special syntax — per PG spec, equivalent to SET client_encoding)
   const namesMatch = trimmed.match(SET_NAMES_PATTERN);
   if (namesMatch) {
-    const rawValue = namesMatch[1].trim();
+    const rawValue = stripTrailingClause(namesMatch[1]);
     const cleanedValue = rawValue.replace(/^['"]|['"]$/g, '');
     logger.debug({ sql: trimmed, value: cleanedValue }, 'SET NAMES detected — storing as client_encoding in GucSystem');
     try {
-      GucSystem.getDefaultInstance().registry.set('client_encoding', cleanedValue);
+      GucSystem.getDefaultInstance().set('client_encoding', cleanedValue);
     } catch {
       // GucSystem not available, silently ignore
     }
@@ -331,7 +331,7 @@ export function handleSetReset(sql: string): SetResetResult {
   const setMatch = trimmed.match(SET_PATTERN);
   if (setMatch) {
     const paramName = setMatch[1] ?? null;
-    const value = setMatch[2]?.trim() ?? '';
+    const value = setMatch[2] != null ? stripTrailingClause(setMatch[2]) : '';
 
     // Wire known GUC parameters that require active handling (not just no-op storage)
 
@@ -340,7 +340,7 @@ export function handleSetReset(sql: string): SetResetResult {
       const msValue = parsePgTimeInterval(value);
       if (!isNaN(msValue)) {
         try {
-          GucSystem.getDefaultInstance().handleSet('statement_timeout', String(msValue));
+          GucSystem.getDefaultInstance().set('statement_timeout', String(msValue));
         } catch {
           // GucSystem not available, silently ignore
         }
@@ -369,7 +369,7 @@ export function handleSetReset(sql: string): SetResetResult {
       if (paramLower === 'client_encoding' && value) {
         const cleanedValue = value.replace(/^['"]|['"]$/g, '');
         try {
-          GucSystem.getDefaultInstance().registry.set('client_encoding', cleanedValue);
+          GucSystem.getDefaultInstance().set('client_encoding', cleanedValue);
         } catch {
           // GucSystem not available, silently ignore
         }
@@ -604,6 +604,54 @@ function stripQuotes(s: string): string {
   return s;
 }
 
+/**
+ * Trim a captured SET/RESET value down to its meaningful content.
+ *
+ * The shared `(.+?)\s*;?\s*$` tail of the SET-family patterns is deliberately
+ * loose so it can swallow a trailing semicolon and an inline comment, which would
+ * otherwise end up glued onto the extracted value (e.g. `SET a = 'x'; -- note`
+ * yields a value of `'x'; -- note`). This helper walks the value forward while
+ * tracking quote state and cuts at the first top-level `;`, `--`, or `/*` — the
+ * statement terminator / comment opener — so string contents and `''` escapes are
+ * never truncated.
+ */
+function stripTrailingClause(value: string): string {
+  let i = 0;
+  let quote: '' | "'" | '"' = '';
+
+  while (i < value.length) {
+    const c = value[i];
+    const next = value[i + 1];
+
+    if (quote) {
+      if (c === quote) {
+        // Escaped quote ('') inside the literal — skip both characters.
+        if (next === quote) {
+          i += 2;
+          continue;
+        }
+        quote = '';
+      }
+      i++;
+      continue;
+    }
+
+    if (c === "'" || c === '"') {
+      quote = c;
+      i++;
+      continue;
+    }
+
+    if (c === ';') break;
+    if (c === '-' && next === '-') break;
+    if (c === '/' && next === '*') break;
+
+    i++;
+  }
+
+  return value.slice(0, i).trimEnd();
+}
+
 // ══════════════════════════════════════════════
 //  ALTER SYSTEM SET detection
 // ══════════════════════════════════════════════
@@ -637,7 +685,7 @@ export function handleAlterSystemSet(sql: string): SetResetResult {
     const param = match[1].toLowerCase();
     let value = match[2].trim().replace(/';?\s*$/, '').replace(/^'/, '').trim();
     try {
-      GucSystem.getDefaultInstance().registry.set(param, value);
+      GucSystem.getDefaultInstance().set(param, value);
     } catch {
       // GucSystem not available, silently ignore
     }
