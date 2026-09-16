@@ -11,6 +11,7 @@
 
 import * as os from 'os';
 import * as fs from 'fs';
+import * as path from 'path';
 import * as crypto from 'crypto';
 
 import { SystemTypeRegistry } from './SystemTypes';
@@ -228,7 +229,7 @@ handlers['pg_conf_load_time'] = () => START_TIME.toISOString().replace('T', ' ')
 // pg_encoding_to_char(id: number) → string
 handlers['pg_encoding_to_char'] = (id: number) => {
   const encodings: Record<number, string> = {
-    0: '', // SQL_ASCII
+    0: 'SQL_ASCII', // SQL_ASCII
     1: 'UTF8',
     2: 'LATIN1',
     3: 'LATIN2',
@@ -437,9 +438,9 @@ handlers['pg_size_pretty'] = (bytes: number) => {
   if (typeof bytes !== 'number' || isNaN(bytes)) return '0 bytes';
   const units = ['bytes', 'kB', 'MB', 'GB', 'TB', 'PB'];
   let unitIdx = 0;
-  let value = bytes;
+  const neg = bytes < 0;
+  let value = neg ? Math.abs(bytes) : bytes;
   if (value === 0) return '0 bytes';
-  if (value < 0) value = Math.abs(value);
 
   // PG-compatible: round to nearest integer
   while (Math.abs(value) >= 1024 && unitIdx < units.length - 1) {
@@ -447,12 +448,13 @@ handlers['pg_size_pretty'] = (bytes: number) => {
     unitIdx++;
   }
 
-  if (unitIdx === 0) return `${Math.round(value)} ${units[unitIdx]}`;
+  const sign = neg ? '-' : '';
+  if (unitIdx === 0) return `${sign}${Math.round(value)} ${units[unitIdx]}`;
   // PG rounds: 1024 → 1 kB, 1048576 → 1 MB, etc.
   if (Number.isInteger(value) || value === Math.round(value)) {
-    return `${Math.round(value)} ${units[unitIdx]}`;
+    return `${sign}${Math.round(value)} ${units[unitIdx]}`;
   }
-  return `${value.toFixed(1)} ${units[unitIdx]}`;
+  return `${sign}${value.toFixed(1)} ${units[unitIdx]}`;
 };
 
 // pg_size_bytes(text) → number
@@ -492,10 +494,10 @@ handlers['pg_get_userbyid'] = (roleOid: number) => {
 // ── pg_get_* metadata functions (real sqlite_master queries) ─────────
 
 /**
- * OID ↔ name cache (lazy, populated by oidToName on first query).
- * Maps relname → oid (forward) and oid → relname (reverse).
+ * OID → name cache (lazy, populated by oidToName on first query).
+ * Maps relname → oid; a synthetic monotonic oid is assigned per sqlite_master
+ * row so that callers can resolve either OID or name.
  */
-let oidForwardCache: Map<string, number> | null = null;
 let oidReverseCache: Map<number, string> | null = null;
 
 function buildOidCache(): void {
@@ -505,12 +507,9 @@ function buildOidCache(): void {
     const rows = db.prepare(
       `SELECT name, type FROM sqlite_master WHERE type IN ('table','index','view','trigger') AND name NOT LIKE 'sqlite_%' ORDER BY name`
     ).all() as { name: string; type: string }[];
-    oidForwardCache = new Map();
     oidReverseCache = new Map();
     let oid = 10000;
     for (const r of rows) {
-      if (r.type === 'table') { oid = Math.max(oid, 10000); } // tables: 10000+
-      oidForwardCache.set(r.name, oid);
       oidReverseCache.set(oid, r.name);
       oid++;
     }
@@ -522,11 +521,6 @@ function buildOidCache(): void {
 function oidToName(oid: number): string | undefined {
   if (!oidReverseCache) buildOidCache();
   return oidReverseCache?.get(oid);
-}
-
-function nameToOid(name: string): number | undefined {
-  if (!oidForwardCache) buildOidCache();
-  return oidForwardCache?.get(name);
 }
 
 /** Query sqlite_master for a single object's SQL. */
@@ -1127,7 +1121,8 @@ function formatTimestamp(ts: Date, fmt: string): string {
   result = result.replace(/YYYY/g, pad4(year));
   result = result.replace(/YY(?=\D|$)/g, pad2(year % 100));
   result = result.replace(/Month/g, MONTHS[month] || '');
-  result = result.replace(/mon\b/g, (MONTHS[month] || '').slice(0, 3));
+  result = result.replace(/Mon\b/g, (MONTHS[month] || '').slice(0, 3));
+  result = result.replace(/mon\b/g, (MONTHS[month] || '').slice(0, 3).toLowerCase());
   result = result.replace(/\bMM\b/g, pad2(month));
   result = result.replace(/DAY/g, DAYS[ts.getDay()].toUpperCase());
   result = result.replace(/\bDay\b/g, DAYS[ts.getDay()]);
@@ -1153,6 +1148,8 @@ function formatTimestamp(ts: Date, fmt: string): string {
   result = result.replace(/\bTZ\b/g, '+08');
 
   if (hasFM) {
+    // FM (fill mode) suppresses padding and must not leak as a literal.
+    result = result.replace(/FM/g, '');
     result = result.trim();
     result = result.replace(/\s+/g, ' ');
   }
@@ -1168,7 +1165,13 @@ function formatNumeric(val: number, fmt: string): string {
   const absVal = Math.abs(val);
 
   const hasPR = fmt.includes('PR');
-  const cleanFmt = fmt.replace(/PR/g, '');
+  // FM (fill mode) suppresses leading blanks/zero-padding — strip it so it
+  // does not leak into the output as a literal.
+  const hasFM = fmt.includes('FM');
+  // Control tokens (PR, FM, S) must not leak as literal chars; their effect
+  // is applied separately below (parentheses for PR, explicit sign for S).
+  const hasS = fmt.includes('S');
+  const cleanFmt = fmt.replace(/PR/g, '').replace(/FM/g, '').replace(/S/g, '');
 
   const parts = cleanFmt.split('.');
   const intPart = parts[0] || '';
@@ -1189,18 +1192,22 @@ function formatNumeric(val: number, fmt: string): string {
   for (const ch of intPart) {
     if (ch === '9' || ch === '0') {
       if (di < leadingZeroCount) {
-        // Leading zone: 0 shows '0', 9 shows blank
-        formattedInt += ch === '0' ? padded[di] : ' ';
+        // Leading zone: 0 shows '0', 9 shows blank; FM suppresses both.
+        formattedInt += hasFM ? '' : (ch === '0' ? padded[di] : ' ');
       } else {
         formattedInt += padded[di];
       }
       di++;
     } else if (ch === ',') {
-      const remainingDigits = intDigits.slice(di);
-      if (isNegative || remainingDigits.replace(/0/g, '').length > 0 || intStr.length > remainingDigits.length) {
+      // A group separator only renders when there is at least one
+      // significant (non-zero) digit to its left; otherwise the format
+      // position is leading padding and the comma must be suppressed
+      // (e.g. to_char(123, '999,999') → '123', not ',123').
+      const leftDigits = padded.slice(0, di);
+      if (/[1-9]/.test(leftDigits)) {
         formattedInt += ',';
       } else {
-        formattedInt += ' ';
+        formattedInt += hasFM ? '' : ' ';
       }
     } else {
       formattedInt += ch;
@@ -1217,7 +1224,7 @@ function formatNumeric(val: number, fmt: string): string {
 
   // S: sign anchor
   let signStr = '';
-  if (cleanFmt.includes('S')) {
+  if (hasS) {
     signStr = isNegative ? '-' : '+';
   } else if (isNegative) {
     signStr = '-';
@@ -1393,15 +1400,15 @@ handlers['to_timestamp'] = (text: string, fmt: string) => {
 
 // ── FS access functions (pg_read_file, pg_ls_dir, pg_stat_file) ──────────
 
-// pg_read_file(path, offset?, length?) → text
-handlers['pg_read_file'] = (path: string, offset?: number, length?: number) => {
-  if (!path || typeof path !== 'string') return null;
-  const dataDir = process.env.DATA_DIR || '/tmp';
-  const fullPath = path.startsWith('/') ? path : `${dataDir}/${path}`;
-  // 安全检查:不能越界到 dataDir 外
-  if (!fullPath.startsWith(dataDir)) return null;
+// pg_read_file(filePath, offset?, length?) → text
+handlers['pg_read_file'] = (filePath: string, offset?: number, length?: number) => {
+  if (!filePath || typeof filePath !== 'string') return null;
+  const dataDir = path.resolve(process.env.DATA_DIR || '/tmp');
+  const resolved = path.resolve(filePath.startsWith('/') ? filePath : path.join(dataDir, filePath));
+  // Security: resolve `..` and reject any path escaping dataDir.
+  if (resolved !== dataDir && !resolved.startsWith(dataDir + path.sep)) return null;
   try {
-    const buf = fs.readFileSync(fullPath);
+    const buf = fs.readFileSync(resolved);
     const off = (offset && typeof offset === 'number') ? Math.max(0, offset) : 0;
     const len = (length && typeof length === 'number') ? length : buf.length - off;
     if (off >= buf.length) return '';
@@ -1412,22 +1419,22 @@ handlers['pg_read_file'] = (path: string, offset?: number, length?: number) => {
 // pg_ls_dir(dirname) → setof text
 handlers['pg_ls_dir'] = (dirname: string) => {
   if (!dirname || typeof dirname !== 'string') return [];
-  const dataDir = process.env.DATA_DIR || '/tmp';
-  const fullPath = dirname.startsWith('/') ? dirname : `${dataDir}/${dirname}`;
-  if (!fullPath.startsWith(dataDir)) return [];
+  const dataDir = path.resolve(process.env.DATA_DIR || '/tmp');
+  const resolved = path.resolve(dirname.startsWith('/') ? dirname : path.join(dataDir, dirname));
+  if (resolved !== dataDir && !resolved.startsWith(dataDir + path.sep)) return [];
   try {
-    return fs.readdirSync(fullPath);
+    return fs.readdirSync(resolved);
   } catch { return []; }
 };
 
 // pg_stat_file(filename) → record
 handlers['pg_stat_file'] = (filename: string) => {
   if (!filename || typeof filename !== 'string') return null;
-  const dataDir = process.env.DATA_DIR || '/tmp';
-  const fullPath = filename.startsWith('/') ? filename : `${dataDir}/${filename}`;
-  if (!fullPath.startsWith(dataDir)) return null;
+  const dataDir = path.resolve(process.env.DATA_DIR || '/tmp');
+  const resolved = path.resolve(filename.startsWith('/') ? filename : path.join(dataDir, filename));
+  if (resolved !== dataDir && !resolved.startsWith(dataDir + path.sep)) return null;
   try {
-    const stat = fs.statSync(fullPath);
+    const stat = fs.statSync(resolved);
     return {
       size: stat.size,
       access: stat.atime.toISOString(),
@@ -1465,6 +1472,17 @@ handlers['pg_has_role'] = (role: any, privilege: string) => {
   return true;
 };
 
+/**
+ * Safely format a possibly-missing/invalid timestamp for pg_stat_get_activity.
+ * Registry records may omit `queryStart` or carry non-date values; fall back to
+ * the current instant instead of throwing `Invalid time value`.
+ */
+function safeIsoTimestamp(v: any): string {
+  if (v === null || v === undefined || v === '') return new Date().toISOString();
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? new Date().toISOString() : d.toISOString();
+}
+
 // pg_stat_get_activity(pid?) → array of activity records
 handlers['pg_stat_get_activity'] = (pid?: number) => {
   const reg = currentActiveQueryRegistry;
@@ -1487,7 +1505,7 @@ handlers['pg_stat_get_activity'] = (pid?: number) => {
         client_port: -1,
         backend_start: new Date().toISOString(),
         xact_start: null,
-        query_start: new Date(q.queryStart).toISOString(),
+        query_start: safeIsoTimestamp(q.queryStart),
         state_change: new Date().toISOString(),
         wait_event_type: null,
         wait_event: null,
@@ -1734,18 +1752,27 @@ handlers['regexp_like'] = (str: string, pattern: string) => {
 // similar_to_escape(string, pattern) → text
 handlers['similar_to_escape'] = (str: string, pattern: string) => {
   if (str === null || pattern === null) return null;
-  // SIMILAR TO uses SQL standard regex patterns.
-  // We convert PG SIMILAR TO patterns to a JavaScript regex-compatible form.
-  let escaped = String(pattern);
-  // Escape JS regex special chars that have different meaning in SIMILAR TO
-  escaped = escaped.replace(/[.+*?^${}()|[\]\\]/g, '\\$&');
-  // PG SIMILAR TO: % → .* (match any seq), _ → . (single char)
-  // But they need to NOT be escaped in the context they appear.
-  // Since we already escaped everything, restore % and _ unescaped
-  escaped = escaped.replace(/\\%/g, '.*');
-  escaped = escaped.replace(/\\_/g, '.');
-  // | is alternation in SIMILAR TO
-  return escaped;
+  // Convert a PostgreSQL SIMILAR TO pattern into a POSIX ERE pattern (the
+  // dialect understood by SQLite/REGEXP). SIMILAR TO reuses the LIKE
+  // wildcards `%` (any sequence) and `_` (single char) on top of regex-like
+  // alternation / grouping / repetition operators.
+  //
+  // Semantics (mirrors PatternRewriter.similarToRegex):
+  //   % → .*        _ → .         | * + ? ( )  → passed through untouched
+  //   . ^ $ { } \ [ ] → backslash-escaped as literals
+  const s = String(pattern);
+  const meta = new Set(['|', '*', '+', '?', '(', ')']);
+  const literalMeta = new Set(['.', '^', '$', '{', '}', '\\', '[', ']']);
+  let out = '';
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '%') { out += '.*'; continue; }
+    if (ch === '_') { out += '.'; continue; }
+    if (meta.has(ch)) { out += ch; continue; }
+    if (literalMeta.has(ch)) { out += '\\' + ch; continue; }
+    out += ch;
+  }
+  return out;
 };
 
 // ── Network functions (wrappers to InetShim) ────────────────────────
@@ -1913,33 +1940,43 @@ handlers['pg_trigger_depth'] = () => 0;
 // ── Admin functions ─────────────────────────────────────────────
 
 // pg_sleep_for(interval) → void — sleep for the given interval
-handlers['pg_sleep_for'] = (_interval: string) => {
-  // Parse interval like '1 second', '1000 microseconds', '500 milliseconds'
-  // For simplicity, use a short microsecond sleep (minimal duration)
-  const interval = String(_interval ?? '').toLowerCase();
-  let ms = 0;
-  const microMatch = interval.match(/(\d+)\s*microseconds?/);
-  const milliMatch = interval.match(/(\d+)\s*milliseconds?/);
-  const secondMatch = interval.match(/(\d+)\s*(seconds?|s\b)/);
-  const minuteMatch = interval.match(/(\d+)\s*minutes?/);
+/**
+ * Parse a PostgreSQL interval literal ('1 second', '500 milliseconds',
+ * ISO 8601 'PT1H30M15.5S', …) into a non-negative millisecond duration.
+ * Pure computation — extracted so the parser is independently testable
+ * and the sleep side-effect in pg_sleep_for stays trivial.
+ */
+export function parseIntervalToMs(interval: any): number {
+  const s = String(interval ?? '').toLowerCase().trim();
+  if (!s) return 0;
+  const microMatch = s.match(/(\d+(?:\.\d+)?)\s*microseconds?/);
+  const milliMatch = s.match(/(\d+(?:\.\d+)?)\s*milliseconds?/);
+  const secondMatch = s.match(/(\d+(?:\.\d+)?)\s*(seconds?|\bs\b)/);
+  const minuteMatch = s.match(/(\d+(?:\.\d+)?)\s*minutes?/);
+  const hourMatch = s.match(/(\d+(?:\.\d+)?)\s*hours?/);
 
-  if (microMatch) ms = parseFloat(microMatch[1]) / 1000;
-  else if (milliMatch) ms = parseFloat(milliMatch[1]);
-  else if (secondMatch) ms = parseFloat(secondMatch[1]) * 1000;
-  else if (minuteMatch) ms = parseFloat(minuteMatch[1]) * 60 * 1000;
-  else {
-    // Try ISO 8601 duration: PT1S, PT500M, etc.
-    const isoMatch = interval.match(/pt?(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?/i);
-    if (isoMatch) {
-      const h = parseInt(isoMatch[1] || '0', 10);
-      const m = parseInt(isoMatch[2] || '0', 10);
-      const s = parseFloat(isoMatch[3] || '0');
-      ms = h * 3600000 + m * 60000 + s * 1000;
-    }
+  if (microMatch) return parseFloat(microMatch[1]) / 1000;
+  if (milliMatch) return parseFloat(milliMatch[1]);
+  if (secondMatch) return parseFloat(secondMatch[1]) * 1000;
+  if (minuteMatch) return parseFloat(minuteMatch[1]) * 60 * 1000;
+  if (hourMatch) return parseFloat(hourMatch[1]) * 3600 * 1000;
+
+  // ISO 8601 duration: PT1S, PT500M, PT1H30M15.5S, …
+  const isoMatch = s.match(/^pt?(?:(\d+(?:\.\d+)?)h)?(?:(\d+(?:\.\d+)?)m)?(?:(\d+(?:\.\d+)?)s)?$/i);
+  if (isoMatch && (isoMatch[1] || isoMatch[2] || isoMatch[3])) {
+    const h = parseFloat(isoMatch[1] || '0');
+    const m = parseFloat(isoMatch[2] || '0');
+    const sec = parseFloat(isoMatch[3] || '0');
+    return h * 3600000 + m * 60000 + sec * 1000;
   }
+  return 0;
+}
 
+// pg_sleep_for(interval) → void — sleep for the given interval
+handlers['pg_sleep_for'] = (_interval: string) => {
+  const ms = parseIntervalToMs(_interval);
   if (ms > 0) {
-    // PG sleep is synchronous — use Atomics.wait for short waits
+    // PG sleep is synchronous — busy-wait for the parsed duration.
     const start = Date.now();
     while (Date.now() - start < ms) {
       // Busy-wait for very short intervals (microseconds)
