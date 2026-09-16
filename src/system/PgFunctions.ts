@@ -164,14 +164,6 @@ const VALID_DATE_PARTS: Set<string> = new Set([
   'timezone', 'timezone_hour', 'timezone_minute',
 ]);
 
-/** Check if a value looks like a date string */
-function looksLikeDate(v: any): boolean {
-  if (v === null || v === undefined) return false;
-  if (v instanceof Date) return true;
-  const s = toString(v);
-  return /^\d{4}-\d{2}-\d{2}/.test(s);
-}
-
 // ──────────────────────────────────────────────
 //  All Function Definitions
 // ──────────────────────────────────────────────
@@ -687,8 +679,9 @@ export function buildPgFunctions(): PgFunctionMap {
     const s = toString(str);
     const count = toInt(n);
     if (isNaN(count)) return null;
-    if (count >= 0) return s.slice(-count) || s;
-    return s.slice(-Math.max(0, s.length + count));
+    // Mirror `left`: n >= 0 takes the last n chars; n < 0 drops the last |n| chars.
+    if (count >= 0) return s.slice(Math.max(0, s.length - count));
+    return s.slice(0, Math.max(0, s.length + count));
   });
 
   reg('rpad', 2, 3, 'text', (str: any, len: any, fill?: any) => {
@@ -760,9 +753,9 @@ export function buildPgFunctions(): PgFunctionMap {
 
     // Detect regex variant: FROM is a string (pattern), not a number (position)
     if (typeof from === 'string' || from instanceof String || typeof from === 'bigint') {
-      // Also check if from is purely numeric — if so treat as position variant
+      // Also check if from is purely numeric (optionally signed) — if so treat as position variant
       const fromStr = toString(from);
-      if (/^\d+$/.test(fromStr)) {
+      if (/^-?\d+$/.test(fromStr)) {
         return doSubstringByPos(s, parseInt(fromStr, 10), third);
       }
       // Regex variant: SUBSTRING(str FROM pattern) or SUBSTRING(str FROM pattern FOR escape)
@@ -1124,8 +1117,11 @@ export function buildPgFunctions(): PgFunctionMap {
     const s = toNumber(sec);
     if (isNaN(h) || isNaN(m) || isNaN(s)) return null;
     if (h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s >= 60) return null;
-    const secStr = s === Math.floor(s) ? String(Math.floor(s)).padStart(2, '0') : s.toFixed(6);
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${secStr.length === 2 ? secStr : secStr}`;
+    // Whole seconds pad to "05"; fractional seconds pad the integer part to
+    // "03.500000" so the seconds field is always two digits wide.
+    const secInt = Math.floor(s).toString().padStart(2, '0');
+    const secStr = s === Math.floor(s) ? secInt : `${secInt}.${s.toFixed(6).split('.')[1]}`;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${secStr}`;
   });
 
   reg('make_timestamp', 6, 6, 'timestamp', (year: any, month: any, day: any, hour: any, min: any, sec: any) => {
@@ -1440,27 +1436,6 @@ export function buildPgFunctions(): PgFunctionMap {
     const tb = gb / 1024;
     return `${+tb.toFixed(tb < 10 ? 2 : 0)} TB`;
   });
-
-  // Helper: get total DB file size in bytes
-  function getDbSizeBytes(): number {
-    try {
-      const fs = require('fs');
-      const { getCurrentDbRef } = require('./SystemFunctions');
-      const dbRef = getCurrentDbRef();
-      if (dbRef && typeof dbRef === 'object' && 'name' in dbRef) {
-        const path = (dbRef as Record<string, unknown>).name as string ?? '';
-        if (path && fs.existsSync(path)) {
-          const stat = fs.statSync(path);
-          return stat.size;
-        }
-      }
-      // Fallback: try common paths
-      for (const p of ['data.sqlite', './data.sqlite', '/tmp/data.sqlite']) {
-        if (fs.existsSync(p)) return fs.statSync(p).size;
-      }
-    } catch { /* fallthrough */ }
-    return 0;
-  }
 
   // Helper: estimate relation size based on SQLite b-tree pages
   function getRelationSize(rel: string): number {
