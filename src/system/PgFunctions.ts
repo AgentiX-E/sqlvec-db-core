@@ -15,6 +15,7 @@
 import * as crypto from 'node:crypto';
 import { GucSystem } from '../core/GucSystem';
 import type { RowLockManager } from '../consensus/RowLockManager';
+import { getCurrentDbRef } from './SystemFunctions';
 
 /** Global lock manager for pg_blocking_pids */
 let blockingPidsLockMgr: RowLockManager | null = null;
@@ -1440,12 +1441,7 @@ export function buildPgFunctions(): PgFunctionMap {
   // Helper: estimate relation size based on SQLite b-tree pages
   function getRelationSize(rel: string): number {
     try {
-      const db = (() => {
-        try {
-          const { getCurrentDbRef } = require('./SystemFunctions');
-          return getCurrentDbRef();
-        } catch { return null; }
-      })();
+      const db = getCurrentDbRef();
       if (!db) return 0;
       // For SQLite databases, query approximate page count for this table
       // Use PRAGMA schema.page_count as base, proportionally allocate
