@@ -250,7 +250,7 @@ export class PlanExecutorSecurity {
       if (columns.length === 1 && columns[0] === '*') {
         // SELECT * — check if user has per-column restrictions
         // If any column-level grants exist for this user+table, restrict access
-        if (this.columnGrantChecker.isReady()) {
+        if (this.columnGrantChecker.isReady) {
           // The ColumnGrantChecker handles SELECT * via its checkColumnPrivilege logic
           // If the user has ANY column grants on this table, SELECT * is restricted
           // We rewrite SELECT * to explicitly list allowed columns
@@ -297,7 +297,7 @@ export class PlanExecutorSecurity {
    * Returns null if no restrictions (open access).
    */
   private getAllowedColumns(user: string, tableName: string, privilege: string): string[] | null {
-    if (!this.columnGrantChecker || !this.columnGrantChecker.isReady()) {
+    if (!this.columnGrantChecker || !this.columnGrantChecker.isReady) {
       return null;
     }
 
