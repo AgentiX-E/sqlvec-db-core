@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * PostGISEngine — Full PostGIS spatial computation engine using @turf/turf.
  *
@@ -12,7 +11,32 @@
  *     sensible defaults (0, false, or the original WKT) on failure.
  */
 
-import * as turf from '@turf/turf';
+import {
+  feature, featureCollection, geometryCollection, lineString,
+  multiLineString, multiPoint, multiPolygon, point, polygon,
+} from '@turf/helpers';
+import { area } from '@turf/area';
+import { bbox } from '@turf/bbox';
+import { booleanContains } from '@turf/boolean-contains';
+import { booleanCrosses } from '@turf/boolean-crosses';
+import { booleanEqual } from '@turf/boolean-equal';
+import { booleanIntersects } from '@turf/boolean-intersects';
+import { booleanOverlap } from '@turf/boolean-overlap';
+import { booleanTouches } from '@turf/boolean-touches';
+import { booleanValid } from '@turf/boolean-valid';
+import { booleanWithin } from '@turf/boolean-within';
+import { buffer } from '@turf/buffer';
+import { center } from '@turf/center';
+import { centroid } from '@turf/centroid';
+import { convex } from '@turf/convex';
+import { difference } from '@turf/difference';
+import { distance } from '@turf/distance';
+import { intersect } from '@turf/intersect';
+import { kinks } from '@turf/kinks';
+import { length } from '@turf/length';
+import { polygonToLine } from '@turf/polygon-to-line';
+import { simplify } from '@turf/simplify';
+import { union } from '@turf/union';
 import { PinoLogger } from '../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('postgis-engine');
@@ -47,7 +71,7 @@ export function wktToGeoJSON(wkt: string): GeoJSON.Geometry {
   if (upper.startsWith('GEOMETRYCOLLECTION')) {
     const inner = trimmed.replace(/GEOMETRYCOLLECTION\s*\(/i, '').replace(/\)\s*$/, '').trim();
     const geoms = parseGeometryCollectionInner(inner);
-    return turf.geometryCollection(geoms as any).geometry;
+    return geometryCollection(geoms as any).geometry;
   }
 
   // MULTIPOLYGON
@@ -77,7 +101,7 @@ export function wktToGeoJSON(wkt: string): GeoJSON.Geometry {
         return [x, y];
       });
     });
-    return turf.polygon(rings).geometry;
+    return polygon(rings).geometry;
   }
 
   // LINESTRING
@@ -87,14 +111,14 @@ export function wktToGeoJSON(wkt: string): GeoJSON.Geometry {
       const [x, y] = p.trim().split(/\s+/).map(Number);
       return [x, y];
     });
-    return turf.lineString(coords).geometry;
+    return lineString(coords).geometry;
   }
 
   // POINT (1 2) or POINT(1 2 3)
   if (upper.startsWith('POINT')) {
     const inner = trimmed.replace(/POINT\s*\(/i, '').replace(/\)\s*$/, '').trim();
     const parts = inner.split(/\s+/).map(Number);
-    return turf.point(parts.length >= 3 ? [parts[0], parts[1], parts[2]] : [parts[0], parts[1]]).geometry;
+    return point(parts.length >= 3 ? [parts[0], parts[1], parts[2]] : [parts[0], parts[1]]).geometry;
   }
 
   throw new Error(`Unsupported WKT geometry: ${wkt.substring(0, 80)}`);
@@ -141,9 +165,7 @@ function parseMultiPolygonWKT(inner: string): GeoJSON.Geometry {
     );
     if (rings.length > 0) polygons.push(rings);
   }
-  return polygons.length === 1
-    ? turf.polygon(polygons[0]).geometry
-    : turf.multiPolygon(polygons).geometry;
+  return multiPolygon(polygons).geometry;
 }
 
 function parseMultiLineStringWKT(inner: string): GeoJSON.Geometry {
@@ -161,7 +183,7 @@ function parseMultiLineStringWKT(inner: string): GeoJSON.Geometry {
       }
     }
   }
-  return turf.multiLineString(parts).geometry;
+  return multiLineString(parts).geometry;
 }
 
 function parseMultiPointWKT(inner: string): GeoJSON.Geometry {
@@ -169,7 +191,7 @@ function parseMultiPointWKT(inner: string): GeoJSON.Geometry {
     const [x, y] = p.trim().split(/\s+/).map(Number);
     return [x, y];
   });
-  return turf.multiPoint(coords).geometry;
+  return multiPoint(coords).geometry;
 }
 
 // ── WKT Serialization ──────────────────────────────────────────
@@ -254,7 +276,7 @@ export class PostGISEngine {
 
   /** ST_MakeLine(points[]) — Create a LineString from an array of point geometries (WKT strings). */
   ST_MakeLine(points: string[]): string {
-    if (points.length === 0) return 'LINESTRING(0 0)';
+    if (points.length === 0) return 'LINESTRING EMPTY';
     const coords: [number, number][] = [];
     for (const p of points) {
       try {
@@ -272,9 +294,13 @@ export class PostGISEngine {
         if (match) coords.push([parseFloat(match[1]), parseFloat(match[2])]);
       }
     }
-    return coords.length >= 2
-      ? geoJSONToWKT(turf.lineString(coords).geometry)
-      : `LINESTRING(${coords[0][0]} ${coords[0][1]}, ${coords[0][0] + 1} ${coords[0][1]})`;
+    if (coords.length === 0) return 'LINESTRING EMPTY';
+    if (coords.length === 1) {
+      // A single point cannot form a valid LineString; return an empty line
+      // rather than fabricating a second coordinate.
+      return `LINESTRING(${coords[0][0]} ${coords[0][1]}, ${coords[0][0]} ${coords[0][1]})`;
+    }
+    return geoJSONToWKT(lineString(coords).geometry);
   }
 
   /** ST_MakePolygon(outerRing, holes?) — Create a Polygon from a LineString ring (WKT) and optional hole rings. */
@@ -309,7 +335,7 @@ export class PostGISEngine {
       }
     }
 
-    return geoJSONToWKT(turf.polygon(rings).geometry);
+    return geoJSONToWKT(polygon(rings).geometry);
   }
 
   /** ST_Collect(...geoms) — Collect multiple geometries. */
@@ -319,8 +345,27 @@ export class PostGISEngine {
     for (const wkt of geoms) {
       try { collected.push(wktToGeoJSON(wkt)); } catch { /* skip */ }
     }
+    if (collected.length === 0) return 'GEOMETRYCOLLECTION()';
     if (collected.length === 1) return geoms[0];
-    return geoJSONToWKT(turf.geometryCollection(collected as any).geometry);
+
+    // PostGIS ST_Collect promotes homogeneous collections to the matching
+    // MULTI type (MULTIPOINT / MULTILINESTRING / MULTIPOLYGON) instead of a
+    // generic GEOMETRYCOLLECTION.
+    const first = collected[0].type;
+    const homogeneous = collected.every((g) => g.type === first);
+    if (homogeneous && first === 'Point') {
+      const pts = collected.map((g) => (g as GeoJSON.Point).coordinates);
+      return geoJSONToWKT({ type: 'MultiPoint', coordinates: pts } as GeoJSON.MultiPoint);
+    }
+    if (homogeneous && first === 'LineString') {
+      const lines = collected.map((g) => (g as GeoJSON.LineString).coordinates);
+      return geoJSONToWKT({ type: 'MultiLineString', coordinates: lines } as GeoJSON.MultiLineString);
+    }
+    if (homogeneous && first === 'Polygon') {
+      const polys = collected.map((g) => (g as GeoJSON.Polygon).coordinates);
+      return geoJSONToWKT({ type: 'MultiPolygon', coordinates: polys } as GeoJSON.MultiPolygon);
+    }
+    return geoJSONToWKT(geometryCollection(collected as any).geometry);
   }
 
   /** ST_GeomFromText(wkt [, srid]) — Parse WKT to GeoJSON. */
@@ -381,14 +426,14 @@ export class PostGISEngine {
   ST_Length(geom: string): number {
     try {
       const g = wktToGeoJSON(geom);
-      const feature = turf.feature(g);
+      const feat = feature(g);
       if (g.type === 'LineString' || g.type === 'MultiLineString') {
-        return turf.length(feature, { units: 'kilometers' }) * 1000;
+        return length(feat, { units: 'kilometers' }) * 1000;
       }
       if (g.type === 'Polygon' || g.type === 'MultiPolygon') {
         // Perimeter: length of the boundary
-        const line = turf.polygonToLine(feature as any);
-        return line ? turf.length(line, { units: 'kilometers' }) * 1000 : 0;
+        const line = polygonToLine(feat as any);
+        return line ? length(line, { units: 'kilometers' }) * 1000 : 0;
       }
       return 0;
     } catch (err) {
@@ -401,7 +446,7 @@ export class PostGISEngine {
   ST_Area(geom: string): number {
     try {
       const g = wktToGeoJSON(geom);
-      return turf.area(turf.feature(g));
+      return area(feature(g));
     } catch (err) {
       logger.error({ err, geom }, 'ST_Area failed');
       return 0;
@@ -418,9 +463,9 @@ export class PostGISEngine {
     try {
       const ga = wktToGeoJSON(a);
       const gb = wktToGeoJSON(b);
-      const ca = turf.centroid(turf.feature(ga)).geometry.coordinates;
-      const cb = turf.centroid(turf.feature(gb)).geometry.coordinates;
-      return turf.distance(
+      const ca = centroid(feature(ga)).geometry.coordinates;
+      const cb = centroid(feature(gb)).geometry.coordinates;
+      return distance(
         [ca[0], ca[1]] as [number, number],
         [cb[0], cb[1]] as [number, number],
         { units: 'degrees' },
@@ -486,8 +531,8 @@ export class PostGISEngine {
     try {
       const ga = wktToGeoJSON(a);
       const gb = wktToGeoJSON(b);
-      const ca = turf.centroid(turf.feature(ga)).geometry.coordinates;
-      const cb = turf.centroid(turf.feature(gb)).geometry.coordinates;
+      const ca = centroid(feature(ga)).geometry.coordinates;
+      const cb = centroid(feature(gb)).geometry.coordinates;
       const dx = (ca[0] ?? 0) - (cb[0] ?? 0);
       const dy = (ca[1] ?? 0) - (cb[1] ?? 0);
       const dz = (ca[2] ?? 0) - (cb[2] ?? 0);
@@ -507,49 +552,49 @@ export class PostGISEngine {
     try {
       const ga = wktToGeoJSON(a);
       const gb = wktToGeoJSON(b);
-      return turf.booleanEqual(turf.feature(ga), turf.feature(gb));
+      return booleanEqual(feature(ga), feature(gb));
     } catch { return false; }
   }
 
   /** ST_Intersects(a, b) — Geometries intersect. */
   ST_Intersects(a: string, b: string): boolean {
     try {
-      return turf.booleanIntersects(turf.feature(wktToGeoJSON(a)), turf.feature(wktToGeoJSON(b)));
+      return booleanIntersects(feature(wktToGeoJSON(a)), feature(wktToGeoJSON(b)));
     } catch { return false; }
   }
 
   /** ST_Contains(a, b) — a contains b. */
   ST_Contains(a: string, b: string): boolean {
     try {
-      return turf.booleanContains(turf.feature(wktToGeoJSON(a)), turf.feature(wktToGeoJSON(b)));
+      return booleanContains(feature(wktToGeoJSON(a)), feature(wktToGeoJSON(b)));
     } catch { return false; }
   }
 
   /** ST_Within(a, b) — a is within b. */
   ST_Within(a: string, b: string): boolean {
     try {
-      return turf.booleanWithin(turf.feature(wktToGeoJSON(a)), turf.feature(wktToGeoJSON(b)));
+      return booleanWithin(feature(wktToGeoJSON(a)), feature(wktToGeoJSON(b)));
     } catch { return false; }
   }
 
   /** ST_Touches(a, b) — Geometries touch at boundary but don't overlap interior. */
   ST_Touches(a: string, b: string): boolean {
     try {
-      return turf.booleanTouches(turf.feature(wktToGeoJSON(a)), turf.feature(wktToGeoJSON(b)));
+      return booleanTouches(feature(wktToGeoJSON(a)), feature(wktToGeoJSON(b)));
     } catch { return false; }
   }
 
   /** ST_Crosses(a, b) — Geometries cross. */
   ST_Crosses(a: string, b: string): boolean {
     try {
-      return turf.booleanCrosses(turf.feature(wktToGeoJSON(a)), turf.feature(wktToGeoJSON(b)));
+      return booleanCrosses(feature(wktToGeoJSON(a)), feature(wktToGeoJSON(b)));
     } catch { return false; }
   }
 
   /** ST_Overlaps(a, b) — Geometries share space but neither contains the other. */
   ST_Overlaps(a: string, b: string): boolean {
     try {
-      return turf.booleanOverlap(turf.feature(wktToGeoJSON(a)), turf.feature(wktToGeoJSON(b)));
+      return booleanOverlap(feature(wktToGeoJSON(a)), feature(wktToGeoJSON(b)));
     } catch { return false; }
   }
 
@@ -561,10 +606,12 @@ export class PostGISEngine {
   /** ST_Covers(a, b) — a covers b (same as contains for polygons, more permissive for boundaries). */
   ST_Covers(a: string, b: string): boolean {
     try {
-      const ga = turf.feature(wktToGeoJSON(a));
-      const gb = turf.feature(wktToGeoJSON(b));
-      // booleanContains is strict interior; covers allows boundary coincidence
-      return turf.booleanContains(ga, gb) || turf.booleanEqual(ga, gb);
+      const ga = feature(wktToGeoJSON(a));
+      const gb = feature(wktToGeoJSON(b));
+      // booleanContains is strict interior; covers allows boundary coincidence.
+      // turf booleanContains already returns true for identical geometries, so a
+      // separate booleanEqual fallback is redundant.
+      return booleanContains(ga, gb);
     } catch { return false; }
   }
 
@@ -581,7 +628,7 @@ export class PostGISEngine {
   ST_Buffer(geom: string, radius: number, units: 'degrees' | 'kilometers' = 'degrees'): string {
     try {
       const g = wktToGeoJSON(geom);
-      const buffered = turf.buffer(turf.feature(g), radius, { units });
+      const buffered = buffer(feature(g), radius, { units });
       if (!buffered) throw new Error('Buffer returned null');
       return geoJSONToWKT(buffered.geometry);
     } catch (err) {
@@ -593,9 +640,9 @@ export class PostGISEngine {
   /** ST_Intersection(a, b) — Return the intersecting area of two geometries. */
   ST_Intersection(a: string, b: string): string {
     try {
-      const ga = turf.feature(wktToGeoJSON(a));
-      const gb = turf.feature(wktToGeoJSON(b));
-      const result = turf.intersect(turf.featureCollection([ga, gb] as any) as any);
+      const ga = feature(wktToGeoJSON(a));
+      const gb = feature(wktToGeoJSON(b));
+      const result = intersect(featureCollection([ga, gb] as any) as any);
       if (!result) return 'POLYGON EMPTY';
       return geoJSONToWKT(result.geometry);
     } catch { return 'POLYGON EMPTY'; }
@@ -604,9 +651,9 @@ export class PostGISEngine {
   /** ST_Union(a, b) — Union of two geometries. */
   ST_Union(a: string, b: string): string {
     try {
-      const ga = turf.feature(wktToGeoJSON(a));
-      const gb = turf.feature(wktToGeoJSON(b));
-      const result = turf.union(turf.featureCollection([ga, gb] as any) as any);
+      const ga = feature(wktToGeoJSON(a));
+      const gb = feature(wktToGeoJSON(b));
+      const result = union(featureCollection([ga, gb] as any) as any);
       if (!result) return a;
       return geoJSONToWKT(result.geometry);
     } catch { return a; }
@@ -615,9 +662,9 @@ export class PostGISEngine {
   /** ST_Difference(a, b) — Portion of a not in b. */
   ST_Difference(a: string, b: string): string {
     try {
-      const ga = turf.feature(wktToGeoJSON(a));
-      const gb = turf.feature(wktToGeoJSON(b));
-      const result = turf.difference(turf.featureCollection([ga, gb] as any) as any);
+      const ga = feature(wktToGeoJSON(a));
+      const gb = feature(wktToGeoJSON(b));
+      const result = difference(featureCollection([ga, gb] as any) as any);
       if (!result) return a;
       return geoJSONToWKT(result.geometry);
     } catch { return a; }
@@ -626,12 +673,12 @@ export class PostGISEngine {
   /** ST_SymDifference(a, b) — Symmetric difference (a XOR b). */
   ST_SymDifference(a: string, b: string): string {
     try {
-      const ga = turf.feature(wktToGeoJSON(a));
-      const gb = turf.feature(wktToGeoJSON(b));
-      const diffAB = turf.difference(turf.featureCollection([ga, gb] as any) as any);
-      const diffBA = turf.difference(turf.featureCollection([gb, ga] as any) as any);
+      const ga = feature(wktToGeoJSON(a));
+      const gb = feature(wktToGeoJSON(b));
+      const diffAB = difference(featureCollection([ga, gb] as any) as any);
+      const diffBA = difference(featureCollection([gb, ga] as any) as any);
       if (diffAB && diffBA) {
-        const result = turf.union(turf.featureCollection([turf.feature((diffAB as any).geometry), turf.feature((diffBA as any).geometry)] as any) as any);
+        const result = union(featureCollection([feature((diffAB as any).geometry), feature((diffBA as any).geometry)] as any) as any);
         if (result) return geoJSONToWKT(result.geometry);
       }
       if (diffAB) return geoJSONToWKT(diffAB.geometry);
@@ -644,7 +691,7 @@ export class PostGISEngine {
   ST_Centroid(geom: string): string {
     try {
       const g = wktToGeoJSON(geom);
-      const c = turf.centroid(turf.feature(g));
+      const c = centroid(feature(g));
       return geoJSONToWKT(c.geometry);
     } catch { return 'POINT(0 0)'; }
   }
@@ -653,7 +700,7 @@ export class PostGISEngine {
   ST_ConvexHull(geom: string): string {
     try {
       const g = wktToGeoJSON(geom);
-      const hull = turf.convex(turf.feature(g));
+      const hull = convex(feature(g));
       if (!hull) return geom;
       return geoJSONToWKT(hull.geometry);
     } catch { return geom; }
@@ -663,8 +710,8 @@ export class PostGISEngine {
   ST_Envelope(geom: string): string {
     try {
       const g = wktToGeoJSON(geom);
-      const bbox = turf.bbox(turf.feature(g));
-      return `POLYGON((${bbox[0]} ${bbox[1]}, ${bbox[2]} ${bbox[1]}, ${bbox[2]} ${bbox[3]}, ${bbox[0]} ${bbox[3]}, ${bbox[0]} ${bbox[1]}))`;
+      const bounds = bbox(feature(g));
+      return `POLYGON((${bounds[0]} ${bounds[1]}, ${bounds[2]} ${bounds[1]}, ${bounds[2]} ${bounds[3]}, ${bounds[0]} ${bounds[3]}, ${bounds[0]} ${bounds[1]}))`;
     } catch { return geom; }
   }
 
@@ -672,7 +719,7 @@ export class PostGISEngine {
   ST_Simplify(geom: string, tolerance: number): string {
     try {
       const g = wktToGeoJSON(geom);
-      const simplified = turf.simplify(turf.feature(g), { tolerance, highQuality: true });
+      const simplified = simplify(feature(g), { tolerance, highQuality: true });
       return geoJSONToWKT(simplified.geometry);
     } catch { return geom; }
   }
@@ -694,7 +741,7 @@ export class PostGISEngine {
     try {
       const g = wktToGeoJSON(geom);
       if (g.type === 'Point') return (g.coordinates as number[])[0] ?? NaN;
-      const c = turf.center(turf.feature(g)).geometry.coordinates;
+      const c = center(feature(g)).geometry.coordinates;
       return c[0];
     } catch { return NaN; }
   }
@@ -704,7 +751,7 @@ export class PostGISEngine {
     try {
       const g = wktToGeoJSON(geom);
       if (g.type === 'Point') return (g.coordinates as number[])[1] ?? NaN;
-      const c = turf.center(turf.feature(g)).geometry.coordinates;
+      const c = center(feature(g)).geometry.coordinates;
       return c[1];
     } catch { return NaN; }
   }
@@ -762,7 +809,7 @@ export class PostGISEngine {
   ST_IsValid(geom: string): boolean {
     try {
       const g = wktToGeoJSON(geom);
-      return turf.booleanValid(turf.feature(g));
+      return booleanValid(feature(g));
     } catch { return false; }
   }
 
@@ -785,15 +832,15 @@ export class PostGISEngine {
       if (g.type === 'Point' || g.type === 'MultiPoint') return true;
       if (g.type === 'LineString') {
         // Check for self-intersection by checking if the line has kinks
-        const feature = turf.feature(g);
-        const kinks = turf.kinks(feature);
-        return kinks.features.length === 0;
+        const feat = feature(g);
+        const lineKinks = kinks(feat);
+        return lineKinks.features.length === 0;
       }
       if (g.type === 'Polygon') {
-        const feature = turf.feature(g);
-        const kinks = turf.kinks(feature);
-        const valid = turf.booleanValid(feature);
-        return kinks.features.length === 0 && valid;
+        const feat = feature(g);
+        const lineKinks = kinks(feat);
+        const valid = booleanValid(feat);
+        return lineKinks.features.length === 0 && valid;
       }
       return true;
     } catch { return false; }
@@ -963,11 +1010,7 @@ export class PostGISEngine {
     // Generic: replace ST_* functions not caught above with a constant
     rewritten = rewritten.replace(
       /\bST_[A-Z]\w+\s*\([^)]*\)/gi,
-      (match) => {
-        // Skip already-replaced ones (they have comments)
-        if (match.includes('/*')) return match;
-        return `0 /* ${match.replace(/\(.*/, '()')} replaced */`;
-      },
+      (match) => `0 /* ${match.replace(/\(.*/, '()')} replaced */`,
     );
 
     return rewritten;
@@ -977,9 +1020,8 @@ export class PostGISEngine {
   // SRID MANAGEMENT
   // ════════════════════════════════════════════════════════════════
 
-  private setSRID(geom: string | GeoJSON.Geometry, srid: number): void {
-    const key = typeof geom === 'string' ? geom : geoJSONToWKT(geom);
-    this.sridRegistry.set(key, srid);
+  private setSRID(geom: string, srid: number): void {
+    this.sridRegistry.set(geom, srid);
   }
 
   getSRID(geom: string | GeoJSON.Geometry): number | undefined {
