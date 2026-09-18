@@ -182,7 +182,7 @@ import { detectPgCrypto, rewritePgCrypto } from './PgCryptoShim';
 import { detectFdw, rewriteFdw } from './FdwShim';
 import { detectReplSlot, rewriteReplSlot } from './ReplicationSlotShim';
 import { detectPoolSql, rewritePoolSql } from './ConnectionPoolShim';
-import { ConnectionPoolManager } from '../pg-pool/ConnectionPool';
+import { ConnectionPoolManager } from '../pg-pool/ConnectionPoolManager';
 import type Database from 'better-sqlite3';
 
 // Step 1r: PG index advisor / query cache / query hints / snapshot compatibility
