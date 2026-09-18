@@ -156,7 +156,7 @@ export function collectActivityData(): PgStatActivityRow[] {
           client_addr: q.clientAddr === 'unknown' ? null : q.clientAddr,
           client_hostname: null,
           client_port: -1,
-          backend_start: new Date(q.queryStart - 5000).toISOString(),
+          backend_start: new Date(q.backendStart ?? q.queryStart).toISOString(),
           xact_start: q.state === 'idle in transaction' ? queryStart : null,
           query_start: queryStart,
           state_change: now,
