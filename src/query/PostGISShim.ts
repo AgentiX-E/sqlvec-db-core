@@ -118,12 +118,45 @@ const SPATIAL_DDL_RE =
   /^\s*(CREATE\s+(SPATIAL|GIST)\s+INDEX|AddGeometryColumn|DropGeometryColumn|Populate_Geometry_Columns)\b/i;
 
 /**
- * Regex to match an ST_ function call: ST_FuncName(...) — case-insensitive.
- * Group 1: full function name
- * Group 2: arguments inside parentheses
+ * Regex to locate an ST_ function name (the `ST_\w+` prefix), case-insensitive.
+ * The arguments are extracted separately with balanced-paren scanning so WKT
+ * literals like `ST_GeomFromText('POINT(1 2)', 4326)` are parsed correctly.
  */
-const ST_FUNC_CALL_RE = /\b(ST_\w+)\s*\(([^)]*)\)\s*/i;
+const ST_FUNC_NAME_RE = /\b(ST_\w+)\s*\(/i;
 const ST_FUNC_CALL_GLOBAL_RE = /\b(ST_\w+)\s*\(([^)]*)\)\s*/gi;
+
+/**
+ * Locate the first `ST_x(...)` call in `sql` using balanced-paren scanning.
+ *
+ * Returns the parsed call, or `null` when no `ST_` function call is present.
+ * Unlike a naive `[^)]*` regex, this correctly handles nested parentheses
+ * inside arguments (e.g. WKT `'POINT(1 2)'` or `ST_Transform(..., ...)`).
+ */
+function findStCall(sql: string): {
+  funcName: string;
+  args: string;
+  fullMatch: string;
+} | null {
+  const head = ST_FUNC_NAME_RE.exec(sql);
+  if (!head) return null;
+
+  const funcName = head[1];
+  // Index just after the opening parenthesis of the call.
+  const openParen = head.index + head[0].length - 1;
+  let depth = 1;
+  let i = openParen + 1;
+  for (; i < sql.length && depth > 0; i++) {
+    if (sql[i] === '(') depth++;
+    else if (sql[i] === ')') depth--;
+  }
+  if (depth !== 0) return null; // unbalanced — treat as no match
+
+  return {
+    funcName,
+    args: sql.slice(openParen + 1, i - 1),
+    fullMatch: sql.slice(head.index, i),
+  };
+}
 
 // ── Public API ─────────────────────────────────────────────────
 
@@ -208,14 +241,14 @@ export function rewritePostGIS(sql: string): PostGISResult {
   }
 
   // ── Replace the first ST_ function call ───────────────────────
-  const match = trimmed.match(ST_FUNC_CALL_RE);
-  if (!match) {
+  const call = findStCall(trimmed);
+  if (!call) {
     return { sql: trimmed.replace(/;+\s*$/, '') + ';', rewritten: false };
   }
 
-  const fullMatch = match[0];
-  const funcName = match[1].toLowerCase();
-  const args = match[2].trim();
+  const fullMatch = call.fullMatch;
+  const funcName = call.funcName.toLowerCase();
+  const args = call.args.trim();
 
   if (MOCK_NUMERIC_FUNCS.has(funcName)) {
     // Replace the function call with "0"
