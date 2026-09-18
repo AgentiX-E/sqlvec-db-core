@@ -236,21 +236,13 @@ export function rewriteCertMap(sql: string): CertMapResult {
     'ims',
   );
 
-  const match = trimmed.match(PREFIX_PATTERN);
-  if (!match) {
-    logger.debug(
-      { sql: trimmed },
-      'User mapping DDL detected by initial scan but prefix not confirmed — passing through unchanged',
-    );
-    return {
-      sql: trimmed,
-      rewritten: false,
-    };
-  }
-
+  // Step 1 (`USER_MAPPING_STMT`) guarantees the statement starts with one of the
+  // known prefixes followed by whitespace/end-of-line.  Because `\s` always forms
+  // a word boundary after the trailing `G`, `PREFIX_PATTERN` (which uses `\b`)
+  // necessarily matches too, so `match` can never be null here.
+  const match = trimmed.match(PREFIX_PATTERN)!;
   const prefix = match[1].toUpperCase();
   const isCreateOrAlter = prefix.startsWith('CREATE') || prefix.startsWith('ALTER');
-  const isDrop = prefix.startsWith('DROP');
 
   // ── Step 3: Parse cert mapping and update the store ───────────
 
@@ -269,7 +261,9 @@ export function rewriteCertMap(sql: string): CertMapResult {
         'CREATE/ALTER USER MAPPING detected but no cert option found — storing skipped',
       );
     }
-  } else if (isDrop) {
+  } else {
+    // Reaching this branch implies `isCreateOrAlter` is false; since `prefix` is
+    // necessarily one of CREATE/ALTER/DROP USER MAPPING, it must be DROP.
     const parsed = parseDropCertMapping(trimmed);
     if (parsed) {
       const store = getCertStore();
