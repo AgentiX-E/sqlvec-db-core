@@ -40,11 +40,17 @@ import type {
   WithRecursiveStatement,
   UpdateStatement,
   DeleteStatement,
+  InsertStatement,
   From,
   FromTable,
   FromStatement,
   Expr,
   ExprBinary,
+  ExprUnary,
+  ExprCall,
+  ExprList,
+  ExprCase,
+  ExprCast,
   QNameAliased,
 } from 'pgsql-ast-parser';
 
@@ -318,14 +324,123 @@ export class RLSInjector {
   // ── Private helpers ───────────────────────────────────────────
 
   /**
-   * Detect the SQL statement type from the first keyword.
+   * Detect the SQL statement type.
+   *
+   * Prefers the AST when it can be parsed so that statements with leading
+   * clauses (e.g. `WITH ... SELECT ...`, `EXPLAIN SELECT`, or parenthesized
+   * statements) are classified by their actual DML command rather than their
+   * first keyword.  Falls back to first-keyword matching when parsing fails.
+   *
+   * @param sql - SQL text.
+   * @returns The DML command, or `null` when it cannot be determined.
    */
   private detectStatementType(sql: string): RLSCommand | null {
+    // Prefer AST classification so WITH/EXPLAIN/parenthesized statements are
+    // classified by their real DML command (not their leading keyword).
+    try {
+      const stmts = parse(sql);
+      for (const stmt of stmts) {
+        const cmd = this.commandFromStatement(stmt);
+        if (cmd) return cmd;
+      }
+    } catch {
+      // Fall through to first-keyword matching.
+    }
+
     const trimmed = sql.trim().toUpperCase();
     if (trimmed.startsWith('SELECT')) return 'SELECT';
     if (trimmed.startsWith('INSERT')) return 'INSERT';
     if (trimmed.startsWith('UPDATE')) return 'UPDATE';
     if (trimmed.startsWith('DELETE')) return 'DELETE';
+    if (trimmed.startsWith('WITH')) return this.commandFromWithClause(sql);
+    return null;
+  }
+
+  /**
+   * Map an AST statement to its DML command, recursing into `with` /
+   * `union` wrappers to find the governing statement type.
+   *
+   * @param stmt - AST statement.
+   * @returns The DML command, or `null` for non-DML statements.
+   */
+  private commandFromStatement(stmt: Statement): RLSCommand | null {
+    switch (stmt.type) {
+      case 'select':
+        return 'SELECT';
+      case 'insert':
+        return 'INSERT';
+      case 'update':
+        return 'UPDATE';
+      case 'delete':
+        return 'DELETE';
+      case 'union':
+      case 'union all': {
+        const u = stmt as SelectFromUnion;
+        return this.commandFromStatement(u.left) ?? this.commandFromStatement(u.right);
+      }
+      case 'with': {
+        const w = stmt as WithStatement;
+        // The governing command is the main (non-CTE) statement.
+        return this.commandFromStatement(w.in);
+      }
+      case 'with recursive': {
+        const w = stmt as WithRecursiveStatement;
+        return this.commandFromStatement(w.in);
+      }
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * Determine the command of a `WITH ...` statement without full AST access.
+   * Used only as a fallback when parsing fails but the first keyword is WITH.
+   *
+   * Scans past the parenthesized CTE definitions to classify the main
+   * statement by its leading keyword.
+   *
+   * @param sql - SQL text beginning with `WITH`.
+   * @returns The DML command of the main statement, or `null`.
+   */
+  private commandFromWithClause(sql: string): RLSCommand | null {
+    let i = 0;
+    const len = sql.length;
+    let depth = 0;
+    let seenParen = false;
+
+    // Skip leading `WITH [RECURSIVE]`.
+    while (i < len && /\s/.test(sql[i])) i++;
+    const upper = sql.toUpperCase();
+    const withIdx = upper.indexOf('WITH', i);
+    if (withIdx === -1) return null;
+    i = withIdx + 'WITH'.length;
+    // Skip whitespace between WITH and the optional RECURSIVE keyword.
+    while (i < len && /\s/.test(sql[i])) i++;
+    // Skip optional RECURSIVE keyword.
+    if (upper.startsWith('RECURSIVE', i)) {
+      i += 'RECURSIVE'.length;
+      while (i < len && /\s/.test(sql[i])) i++;
+    }
+
+    // Advance past the parenthesized CTE body.  The main statement begins at
+    // the first non-whitespace character at depth zero after a CTE body.
+    for (; i < len; i++) {
+      const ch = sql[i];
+      if (ch === '(') {
+        depth++;
+        seenParen = true;
+      } else if (ch === ')') {
+        depth--;
+      } else if (depth === 0 && seenParen && !/[\s,;]/.test(ch)) {
+        break;
+      }
+    }
+
+    const main = sql.substring(i).trim().toUpperCase();
+    if (main.startsWith('SELECT')) return 'SELECT';
+    if (main.startsWith('INSERT')) return 'INSERT';
+    if (main.startsWith('UPDATE')) return 'UPDATE';
+    if (main.startsWith('DELETE')) return 'DELETE';
     return null;
   }
 
@@ -402,11 +517,6 @@ export class RLSInjector {
    * Handles SELECT, UPDATE, DELETE, WITH, WITH RECURSIVE, unions, and subqueries.
    */
   private collectTablesFromStatement(stmt: Statement, tables: Set<string>): void {
-    if (!stmt || typeof stmt !== 'object') return;
-
-    // Handle union types
-    if ('type' in stmt === false) return;
-
     switch (stmt.type) {
       case 'select': {
         this.collectTablesFromSelect(stmt as SelectFromStatement, tables);
@@ -435,23 +545,30 @@ export class RLSInjector {
         this.collectTablesFromStatement(withRec.in, tables);
         break;
       }
+      case 'insert': {
+        const insert = stmt as InsertStatement;
+        // The target table (`into` is a required field on every INSERT).
+        tables.add(insert.into.name);
+        // For INSERT ... SELECT, also collect tables referenced by the SELECT.
+        if (insert.insert && insert.insert.type === 'select') {
+          this.collectTablesFromSelect(insert.insert as SelectFromStatement, tables);
+        }
+        break;
+      }
       case 'update': {
         const update = stmt as UpdateStatement;
-        // The target table
-        if (update.table && update.table.name) {
-          tables.add(update.table.name);
-        }
-        // FROM clause (for UPDATE ... FROM)
+        // The target table (`table` is a required field on every UPDATE).
+        tables.add(update.table.name);
+        // FROM clause (for UPDATE ... FROM). `from` is a single `From`, never an array.
         if (update.from) {
-          this.collectTablesFromFromArray(Array.isArray(update.from) ? update.from : [update.from], tables);
+          this.collectTablesFromFromArray([update.from], tables);
         }
         break;
       }
       case 'delete': {
         const del = stmt as DeleteStatement;
-        if (del.from && del.from.name) {
-          tables.add(del.from.name);
-        }
+        // `from` is a required field on every DELETE.
+        tables.add(del.from.name);
         break;
       }
       // For non-DML statements, skip
@@ -490,14 +607,8 @@ export class RLSInjector {
     switch (from.type) {
       case 'table': {
         const ft = from as FromTable;
-        if (ft.name && ft.name.name) {
-          tables.add(ft.name.name);
-        }
-        // Recurse into JOIN chain
-        if (ft.join) {
-          // The join has an ON/USING clause but the joined table is another FromTable
-          // in the same `from` array, not in the join clause itself
-        }
+        // `name` is a required field on every `FromTable`.
+        tables.add(ft.name.name);
         break;
       }
       case 'statement': {
@@ -515,10 +626,6 @@ export class RLSInjector {
    * Recursively collect table references from expressions (e.g., subqueries in WHERE).
    */
   private collectTablesFromExpr(expr: Expr, tables: Set<string>): void {
-    if (!expr || typeof expr !== 'object') return;
-
-    if ('type' in expr === false) return;
-
     switch (expr.type) {
       case 'select':
         this.collectTablesFromSelect(expr as SelectFromStatement, tables);
@@ -530,44 +637,38 @@ export class RLSInjector {
         break;
       }
       case 'unary': {
-        const un = expr as any;
-        if (un.operand) this.collectTablesFromExpr(un.operand, tables);
+        const un = expr as ExprUnary;
+        this.collectTablesFromExpr(un.operand, tables);
         break;
       }
       case 'call': {
-        const call = expr as any;
-        if (call.args) {
-          for (const arg of call.args) {
-            this.collectTablesFromExpr(arg, tables);
-          }
+        const call = expr as ExprCall;
+        for (const arg of call.args) {
+          this.collectTablesFromExpr(arg, tables);
         }
         break;
       }
       case 'list':
       case 'array': {
-        const list = expr as any;
-        if (list.expressions) {
-          for (const e of list.expressions) {
-            this.collectTablesFromExpr(e, tables);
-          }
+        const list = expr as ExprList;
+        for (const e of list.expressions) {
+          this.collectTablesFromExpr(e, tables);
         }
         break;
       }
       case 'case': {
-        const c = expr as any;
+        const c = expr as ExprCase;
         if (c.value) this.collectTablesFromExpr(c.value, tables);
-        if (c.whens) {
-          for (const w of c.whens) {
-            if (w.when) this.collectTablesFromExpr(w.when, tables);
-            if (w.value) this.collectTablesFromExpr(w.value, tables);
-          }
+        for (const w of c.whens) {
+          this.collectTablesFromExpr(w.when, tables);
+          this.collectTablesFromExpr(w.value, tables);
         }
         if (c.else) this.collectTablesFromExpr(c.else, tables);
         break;
       }
       case 'cast': {
-        const cast = expr as any;
-        if (cast.operand) this.collectTablesFromExpr(cast.operand, tables);
+        const cast = expr as ExprCast;
+        this.collectTablesFromExpr(cast.operand, tables);
         break;
       }
       default:
@@ -582,9 +683,6 @@ export class RLSInjector {
    * Handles SELECT, UPDATE, DELETE, and their nested variants.
    */
   private injectIntoStatement(stmt: Statement, tableConditions: Map<string, string[]>): Statement {
-    if (!stmt || typeof stmt !== 'object') return stmt;
-    if ('type' in stmt === false) return stmt;
-
     switch (stmt.type) {
       case 'select': {
         const select = stmt as SelectFromStatement;
@@ -616,19 +714,29 @@ export class RLSInjector {
         withRec.in = this.injectIntoStatement(withRec.in, tableConditions) as any;
         return withRec;
       }
+      case 'insert': {
+        const insert = stmt as InsertStatement;
+        const tableName = insert.into.name;
+        const conditions = tableConditions.get(tableName);
+        if (conditions && conditions.length > 0) {
+          const condExpr = this.parseConditionExpr(conditions.join(' AND '));
+          if (condExpr) {
+            this.injectWhereIntoInsert(insert, condExpr);
+          }
+        }
+        return insert;
+      }
       case 'update': {
         const update = stmt as UpdateStatement;
-        if (update.table && update.table.name) {
-          const tableName = update.table.name;
-          const conditions = tableConditions.get(tableName);
-          if (conditions && conditions.length > 0) {
-            const condExpr = this.parseConditionExpr(conditions.join(' AND '));
-            if (condExpr) {
-              if (update.where) {
-                update.where = this.makeBinary(update.where, 'AND', condExpr);
-              } else {
-                update.where = condExpr;
-              }
+        const tableName = update.table.name;
+        const conditions = tableConditions.get(tableName);
+        if (conditions && conditions.length > 0) {
+          const condExpr = this.parseConditionExpr(conditions.join(' AND '));
+          if (condExpr) {
+            if (update.where) {
+              update.where = this.makeBinary(update.where, 'AND', condExpr);
+            } else {
+              update.where = condExpr;
             }
           }
         }
@@ -636,26 +744,53 @@ export class RLSInjector {
       }
       case 'delete': {
         const del = stmt as DeleteStatement;
-        if (del.from && del.from.name) {
-          const tableName = del.from.name;
-          const conditions = tableConditions.get(tableName);
-          if (conditions && conditions.length > 0) {
-            const condExpr = this.parseConditionExpr(conditions.join(' AND '));
-            if (condExpr) {
-              if (del.where) {
-                del.where = this.makeBinary(del.where, 'AND', condExpr);
-              } else {
-                del.where = condExpr;
-              }
+        const tableName = del.from.name;
+        const conditions = tableConditions.get(tableName);
+        if (conditions && conditions.length > 0) {
+          const condExpr = this.parseConditionExpr(conditions.join(' AND '));
+          if (condExpr) {
+            if (del.where) {
+              del.where = this.makeBinary(del.where, 'AND', condExpr);
+            } else {
+              del.where = condExpr;
             }
           }
         }
-        // Also check FROM clause if DELETE has complex from
         return del;
       }
       default:
         return stmt;
     }
+  }
+
+  /**
+   * Inject an RLS condition into an INSERT statement.
+   *
+   * For `INSERT ... SELECT` the policy predicate is conjoined onto the
+   * SELECT's WHERE clause, so only rows satisfying the policy are inserted.
+   *
+   * `INSERT ... VALUES` is intentionally left untouched: PostgreSQL enforces
+   * INSERT policies via a WITH CHECK clause (raising an error on violation)
+   * rather than a WHERE filter, and `pgsql-ast-parser` mis-serializes a
+   * detached `VALUES` statement (`VALUES (1,2)` becomes `VALUES ((1),(2))`),
+   * so a WHERE-rewrite would corrupt the row shape.  This is a documented
+   * limitation rather than a silent security gap: callers that require
+   * INSERT-policy enforcement for literal row lists must use WITH CHECK.
+   *
+   * @param insert - The INSERT statement to modify (in place).
+   * @param condExpr - The parsed RLS predicate expression.
+   */
+  private injectWhereIntoInsert(insert: InsertStatement, condExpr: Expr): void {
+    if (insert.insert && insert.insert.type === 'select') {
+      // INSERT ... SELECT — inject into the SELECT's WHERE.
+      const select = insert.insert as SelectFromStatement;
+      if (select.where) {
+        select.where = this.makeBinary(select.where, 'AND', condExpr);
+      } else {
+        select.where = condExpr;
+      }
+    }
+    // INSERT ... VALUES — see method documentation; no WHERE rewrite is safe.
   }
 
   /**
