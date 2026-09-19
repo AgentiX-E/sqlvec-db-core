@@ -724,8 +724,10 @@ export class QueryRouter {
       } catch (err: any) { logger.debug({ err: err.message }, 'fallback: PgStatCollector init failed') }
       this.pgStatCollector = statDb ? new PgStatCollector(statDb) : null;
     }
-    // Initialize pg_stat_statements-equivalent query statistics tracker
-    this.pgStatStatements = new PgStatStatements();
+    // Initialize pg_stat_statements-equivalent query statistics tracker and
+    // publish it to PgCatalog so the pg_stat_statements view can read it.
+    this.pgStatStatements = PgStatStatements.getInstance();
+    PgCatalog.pgStatStatements = this.pgStatStatements;
     // Initialize WAL logger (MUST be before MVCCExecutor construction)
     this.initWalLogger();
     // Run crash recovery from WAL segments (reads + replays WAL on startup)
