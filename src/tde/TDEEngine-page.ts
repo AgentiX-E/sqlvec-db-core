@@ -290,7 +290,6 @@ export class TDEEngine {
     }
 
     const newPwd = newPassword ?? password;
-    const oldKey = this.masterKey;
 
     // Generate new master key
     this.masterKey = crypto.randomBytes(KEY_SIZE);
@@ -303,8 +302,9 @@ export class TDEEngine {
 
     logger.info({ newVersion: this._keyVersion }, 'TDE master key rotated');
 
-    // Note: old data encrypted with old key cannot be read with new key.
-    // In production, you would re-encrypt all pages or keep old key versions.
+    // Note: old data encrypted with the previous key cannot be read with the
+    // new key. In production, you would re-encrypt all pages or retain key
+    // history so older pages remain decryptable.
   }
 
   /**
