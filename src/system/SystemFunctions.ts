@@ -73,7 +73,7 @@ export function getCurrentDbRef(): DatabaseRef | null {
 
 import type { RoleManager as RoleMgrType } from '../auth/RoleManager';
 import type { ActiveQueryRegistry as ActiveQryRegType } from '../monitoring/ActiveQueryRegistry';
-import type { PITRManager as PitrMgrType } from '../pitr/PITRManager';
+import type { PitrMgrType } from '../pitr/PITRManager';
 
 let currentRoleManager: RoleMgrType | null = null;
 let currentActiveQueryRegistry: ActiveQryRegType | null = null;
