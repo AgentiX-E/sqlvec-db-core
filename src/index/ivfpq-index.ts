@@ -97,17 +97,20 @@ export class IVFPQIndex {
     if (!this.trained) throw new Error('Must train() before add()');
     const K = this.params.K;
     const M = this.params.M;
-    const codebookSize = this.params.codebookSize;
 
     // Pre‑compute L2 distance tables for PQ encoding
     // For each subspace m, we already have the codebook centroids.
     // Encoding a vector: for each subspace, find nearest codebook entry.
 
-    const inverted: InvertedListEntry[][] = Array.from({ length: K }, () => []);
+    // Lazily initialize inverted lists once; subsequent add() calls append
+    // (incremental indexing) rather than replacing the whole structure.
+    if (this.invertedLists.length === 0) {
+      this.invertedLists = Array.from({ length: K }, () => []);
+    }
 
     for (let i = 0; i < vectors.length; i++) {
       const vec = vectors[i];
-      const id = ids?.[i] ?? this.count + i;
+      const id = ids?.[i] ?? this.count;
 
       // Find nearest coarse centroid
       const ci = closestCentroid(vec, this.coarseCentroids);
@@ -117,7 +120,10 @@ export class IVFPQIndex {
       const c = this.coarseCentroids[ci];
       for (let d = 0; d < this.dim; d++) res[d] = vec[d] - c[d];
 
-      // PQ encode residual: per subspace, find nearest codebook entry
+      // PQ encode residual: per subspace, find nearest codebook entry.
+      // Iterate over the ACTUAL codebook length — training may produce fewer
+      // codebook entries than params.codebookSize when there are fewer
+      // training vectors than the requested codebook size.
       const pqCode = new Uint8Array(M);
       for (let m = 0; m < M; m++) {
         const start = m * this.subDim;
@@ -127,7 +133,7 @@ export class IVFPQIndex {
 
         let bestJ = 0;
         let bestDist = Infinity;
-        for (let j = 0; j < codebookSize; j++) {
+        for (let j = 0; j < codebook.length; j++) {
           let dist = 0;
           const cb = codebook[j];
           for (let s = 0; s < this.subDim; s++) {
@@ -142,12 +148,11 @@ export class IVFPQIndex {
         pqCode[m] = bestJ;
       }
 
-      // Lazy‑init inverted lists
-      inverted[ci].push({ id, pqCode });
+      // Append to the inverted list (incremental indexing).
+      this.invertedLists[ci].push({ id, pqCode });
+      this.count++;
     }
 
-    this.invertedLists = inverted;
-    this.count += vectors.length;
     this.built = true;
   }
 
@@ -157,7 +162,7 @@ export class IVFPQIndex {
    */
   search(query: Float64Array, topK: number): IVFPQSearchResult[] {
     if (!this.built) throw new Error('Must add() before search()');
-    const { M, codebookSize, nprobe } = this.params;
+    const { M, nprobe } = this.params;
 
     // 1. Find nearest nprobe centroids
     const probeIds = nearestCentroids(query, this.coarseCentroids, nprobe);
@@ -178,9 +183,10 @@ export class IVFPQIndex {
         const start = m * this.subDim;
         const end = start + this.subDim;
         const qSub = queryResidual.subarray(start, end);
-        const table = new Float64Array(codebookSize);
-        for (let j = 0; j < codebookSize; j++) {
-          const cb = this.pqCodebook[m][j];
+        const codebook = this.pqCodebook[m];
+        const table = new Float64Array(codebook.length);
+        for (let j = 0; j < codebook.length; j++) {
+          const cb = codebook[j];
           let s = 0;
           for (let sIdx = 0; sIdx < this.subDim; sIdx++) {
             const d = qSub[sIdx] - cb[sIdx];

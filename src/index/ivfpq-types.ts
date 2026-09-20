@@ -83,11 +83,13 @@ export function kmeans(
   if (data.length === 0) throw new Error('kmeans: empty data');
   if (K > data.length) K = data.length;
 
-  // Use a working subset for k-means (2000 is plenty for centroid training)
+  // Use a working subset for k-means (2000 is plenty for centroid training).
+  // Clamp K to the working-set size (never recurse): a recursive re-entry would
+  // infinitely retry when K > 2000, since the sub-sampled set can never reach it.
   const workingSet = data.length > 2000
     ? data.filter(() => Math.random() < 2000 / data.length)
     : data;
-  if (workingSet.length < K) return kmeans(data.slice(0, K * 2), K, dim, maxIters);
+  if (K > workingSet.length) K = workingSet.length;
 
   // Random init: pick K distinct vectors
   const centroids: Float64Array[] = [];
