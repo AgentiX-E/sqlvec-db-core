@@ -8,10 +8,15 @@
  */
 
 import { parentPort, workerData } from 'worker_threads';
-import { HierarchicalNSW } from 'hnswlib-node';
+import hnswlib from 'hnswlib-node';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+
+// hnswlib-node is CommonJS. Under a native ESM loader (worker threads) the
+// named export cannot be statically resolved, so we go through the default
+// interop and destructure the constructor.
+const { HierarchicalNSW } = hnswlib as unknown as typeof import('hnswlib-node');
 
 interface ShardWorkerData {
   /** Worker index (0-based) */

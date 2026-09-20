@@ -23,8 +23,14 @@
  *   - Near-linear speedup on multi-core machines
  */
 
-import { HierarchicalNSW } from 'hnswlib-node';
+import hnswlib from 'hnswlib-node';
 import { Worker } from 'worker_threads';
+
+// hnswlib-node is CommonJS; under a native ESM loader its named export is not
+// statically resolvable, so we go through the default interop. This keeps the
+// module usable under both tsx (dev) and native ESM (production/workers).
+const { HierarchicalNSW } = hnswlib as unknown as typeof import('hnswlib-node');
+type HierarchicalNSWInstance = InstanceType<typeof HierarchicalNSW>;
 import * as path from 'path';
 import * as os from 'os';
 import { HnswConfig, ProductQuantizationConfig, DEFAULT_PQ_CONFIG } from '../types';
@@ -32,7 +38,7 @@ import { ProductQuantizer } from './ProductQuantizer';
 
 /** Internal structure for a single shard */
 interface ShardState {
-  index: HierarchicalNSW;
+  index: HierarchicalNSWInstance;
   idMap: Map<number, number>;       // sqlite rowid → shard-local position
   reverseIdMap: Map<number, number>; // shard-local position → sqlite rowid
   nextPos: number;
@@ -67,7 +73,7 @@ export interface SegmentInfo {
 export type MergeCallback = () => Promise<void>;
 
 export class HnswIndexManager {
-  private index: HierarchicalNSW;
+  private index: HierarchicalNSWInstance;
   private idMap: Map<number, number>;        // sqlite rowid → hnsw index position
   private reverseIdMap: Map<number, number>;  // hnsw index position → sqlite rowid
   private nextPos: number = 0;
@@ -583,13 +589,10 @@ export class HnswIndexManager {
       this.pq.train(vectors);
     }
 
-    // Encode all existing vectors
+    // Encode all vectors. `vectors` must be in the same insertion order as
+    // the entries were added via addPoints(); each idMap key is matched to
+    // vectors[vecIdx] positionally.
     this.pq.enableCodes();
-    for (const [sqliteId] of this.idMap) {
-      // We need the vector to encode — passed in as `vectors`
-    }
-
-    // Encode all vectors
     let vecIdx = 0;
     for (const [sqliteId] of this.idMap) {
       if (vecIdx < vectors.length) {
