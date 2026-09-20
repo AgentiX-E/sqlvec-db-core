@@ -14,6 +14,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 import { PinoLogger } from '../logger/PinoLogger';
 import { v4 as uuidv4 } from 'uuid';
 import { WAL_CONFIGS, type WALConfig } from './WALConfig';
@@ -565,10 +566,13 @@ export class ShardManager {
         ).run(id, ...vals);
       }
 
-      // Insert into vec0 virtual table
+      // Insert into vec0 virtual table. The vec0 primary key column is a
+      // strict INTEGER, so bind the id as a BigInt; binding a plain JS number
+      // coerces to REAL and sqlite-vec rejects it with
+      // "Only integers are allows for primary key values".
       shard.db.prepare(
         `INSERT OR REPLACE INTO vec_${tableName} (id, embedding) VALUES (?, ?)`,
-      ).run(id, embBlob);
+      ).run(BigInt(id), embBlob);
     })();
   }
 
@@ -720,7 +724,12 @@ export class ShardManager {
 
   private enableVectorExtension(db: Database.Database): void {
     try {
-      db.loadExtension('vec0');
+      // Resolve the platform-specific sqlite-vec loadable module via the
+      // official `sqlite-vec` package helper, which picks the correct
+      // native `.so`/`.dylib`/`.dll` for the current platform. Passing a bare
+      // name ('vec0') fails because SQLite resolves it as a relative file
+      // path; the loadable module must be an absolute path to `vec0.so`.
+      sqliteVec.load(db);
     } catch {
       // sqlite-vec may not be available — log and continue
     }

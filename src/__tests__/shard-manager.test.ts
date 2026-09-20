@@ -585,6 +585,57 @@ describe('ShardManager — branch coverage', () => {
     fs.rmSync(d, { recursive: true, force: true });
   });
 
+  describe('real sqlite-vec (native extension)', () => {
+    it('loads vec0 and round-trips insert + search through a real vec0 table', async () => {
+      const d = makeDir();
+      const VEC_L2 = { enabled: true, dimension: 4, metric: VectorMetric.L2, mode: VectorMode.INDEXED, bruteForceThreshold: 1000, indexType: VectorIndexType.FLAT, indexParams: {} };
+      const mgr = new ShardManager(d, VEC_L2);
+      mgr.setWALConfig({ ...WAL_CONFIGS.STANDALONE_SAFE, checkpointIntervalMs: 0 });
+      await mgr.initialize(1, "CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT);");
+
+      // Create a real vec0 virtual table via the DDL path.
+      await mgr.execAll("CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(id INTEGER PRIMARY KEY, embedding FLOAT[4] distance_metric=l2)");
+
+      // Insert vectors with strictly-typed INTEGER primary keys.
+      mgr.vectorInsert(0, 'items', 1, new Float32Array([1, 2, 3, 4]), { label: 'a' });
+      mgr.vectorInsert(0, 'items', 2, new Float32Array([5, 6, 7, 8]), { label: 'b' });
+      mgr.vectorInsert(0, 'items', 3, new Float32Array([9, 10, 11, 12]), { label: 'c' });
+
+      // Search: nearest to [1,2,3,4] should be id 1 (distance 0).
+      const hits = mgr.vectorSearch(0, 'items', new Float32Array([1, 2, 3, 4]), 2);
+      expect(hits).toHaveLength(2);
+      expect(hits[0].id).toBe(1);
+      expect(hits[0].distance).toBeCloseTo(0);
+
+      // Global search across shards merges and orders by distance.
+      const all = await mgr.vectorSearchAll('items', new Float32Array([1, 2, 3, 4]), 3);
+      expect(all[0].id).toBe(1);
+      expect(all[0].distance).toBeCloseTo(0);
+      await mgr.close();
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    it('createVectorIndex builds a real vec0 table usable by vectorInsert', async () => {
+      const d = makeDir();
+      const VEC_L2 = { enabled: true, dimension: 4, metric: VectorMetric.L2, mode: VectorMode.INDEXED, bruteForceThreshold: 1000, indexType: VectorIndexType.FLAT, indexParams: {} };
+      const mgr = new ShardManager(d, VEC_L2);
+      mgr.setWALConfig({ ...WAL_CONFIGS.STANDALONE_SAFE, checkpointIntervalMs: 0 });
+      await mgr.initialize(1, "CREATE TABLE items (id INTEGER PRIMARY KEY);");
+
+      // createVectorIndex is fire-and-forget (void); await a tick so the DDL
+      // actually lands before we depend on the virtual table.
+      mgr.createVectorIndex('items', 4, 'l2');
+      await new Promise((r) => setTimeout(r, 20));
+
+      mgr.vectorInsert(0, 'items', 10, new Float32Array([2, 2, 2, 2]));
+      const hits = mgr.vectorSearch(0, 'items', new Float32Array([2, 2, 2, 2]), 1);
+      expect(hits[0].id).toBe(10);
+      expect(hits[0].distance).toBeCloseTo(0);
+      await mgr.close();
+      fs.rmSync(d, { recursive: true, force: true });
+    });
+  });
+
   it('setWALConfig restarts an existing checkpointer on interval change', async () => {
     const d = makeDir();
     const mgr = makeManager(d);

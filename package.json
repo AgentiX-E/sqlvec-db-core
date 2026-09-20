@@ -30,7 +30,8 @@
     "rbush": "^4.0.1",
     "safe-eval": "^0.4.1",
     "simple-statistics": "^7.9.2",
-    "zod": "^4.4.3"
+    "zod": "^4.4.3",
+    "sqlite-vec": "^0.1.9"
   },
   "optionalDependencies": {
     "hnswlib-node": "^3.0.0"
