@@ -34,10 +34,12 @@ const CACHE_MAX = 10000;
 export class ClogManager {
   private logger = PinoLogger.forComponent('ClogManager');
   private db: Database.Database;
-  /** LRU cache: Map<XID, ClogEntry>. Access order tracked via cacheOrder[] */
+  /**
+   * LRU cache: Map<XID, ClogEntry>. JavaScript Maps preserve insertion order,
+   * and re-inserting an existing key moves it to the end (most-recently-used).
+   * The least-recently-used entry is therefore always the first key.
+   */
   private cache: Map<number, ClogEntry> = new Map();
-  /** XID order for LRU eviction (most-recently-used at end) */
-  private cacheOrder: number[] = [];
   private xidCounter: number;
   private initialized = false;
 
@@ -129,7 +131,7 @@ export class ClogManager {
   getStatus(xid: number): XidStatus {
     const cached = this.cache.get(xid);
     if (cached) {
-      this.touchLru(xid);
+      this.touchLru(xid, cached);
       return cached.status;
     }
 
@@ -161,23 +163,32 @@ export class ClogManager {
     return this.xidCounter;
   }
 
-  /** LRU: move XID to end of order (most-recently-used) */
-  private touchLru(xid: number): void {
-    const idx = this.cacheOrder.indexOf(xid);
-    if (idx >= 0) {
-      this.cacheOrder.splice(idx, 1);
-      this.cacheOrder.push(xid);
-    }
+  /**
+   * LRU: move an already-cached XID to the most-recently-used position.
+   * Re-inserting an existing key into a Map moves it to the end while
+   * preserving its value. The caller guarantees the entry is present.
+   */
+  private touchLru(xid: number, entry: ClogEntry): void {
+    this.cache.delete(xid);
+    this.cache.set(xid, entry);
   }
 
   private setCache(xid: number, entry: ClogEntry): void {
+    if (this.cache.delete(xid)) {
+      // Re-insert an existing XID to move it to the MRU end without
+      // disturbing the entry count.
+      this.cache.set(xid, entry);
+      return;
+    }
+
     if (this.cache.size >= CACHE_MAX) {
-      // Evict least-recently-used (front of cacheOrder)
-      const oldest = this.cacheOrder.shift();
-      if (oldest !== undefined) this.cache.delete(oldest);
+      // Evict the least-recently-used entry (the first key in insertion
+      // order). `cache.size >= CACHE_MAX` guarantees the cache is non-empty,
+      // so the first key always exists.
+      const oldestKey = this.cache.keys().next().value!;
+      this.cache.delete(oldestKey);
     }
     this.cache.set(xid, entry);
-    this.cacheOrder.push(xid);
   }
 
   /** Reset for testing */
