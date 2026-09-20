@@ -1115,12 +1115,13 @@ export class ShardManager {
       return {};
     }
 
-    const oldKey = TDEConfig.loadFromEnv().key;
-    if (!oldKey) {
+    const oldKeyBase64 = TDEConfig.loadFromEnv().key;
+    if (!oldKeyBase64) {
       const msg = 'TDE key rotation failed: no old key available (SQLVEC_TDE_KEY not set)';
       logger.error(msg);
       throw new Error(msg);
     }
+    const oldKey = Buffer.from(oldKeyBase64, 'base64');
 
     // Validate new key
     if (!TDEConfig.validateKey(newKeyBase64)) {
@@ -1134,7 +1135,16 @@ export class ShardManager {
 
     for (const [shardId, shard] of this.shards) {
       const errors: string[] = [];
-            const filesToRotate = [shard.path];
+      const filesToRotate = [shard.path];
+
+      // Flush the WAL into the main DB file before rotating. The shard file is
+      // about to be rewritten on disk; without a checkpoint any uncommitted
+      // frames still sitting in the -wal file would be silently dropped.
+      try {
+        if (shard.db?.open) shard.db.pragma('wal_checkpoint(TRUNCATE)');
+      } catch {
+        // Non-fatal — rotation proceeds and reports any file-level failure.
+      }
 
       for (const filePath of filesToRotate) {
         // Companion files (-wal, -shm) are encrypted on close/checkpoint,
