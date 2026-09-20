@@ -54,6 +54,12 @@ describe('DedupRing', () => {
     expect(ring.add('x')).toBe(true);
     expect(ring.size).toBe(1);
   });
+
+  it('exposes the configured capacity via maxSize', () => {
+    expect(new DedupRing(10).maxSize).toBe(10);
+    expect(new DedupRing(0).maxSize).toBe(1); // normalized to a positive integer
+    expect(new DedupRing().maxSize).toBe(10000); // default
+  });
 });
 
 // ─────────────────────────────────────────────────────────────

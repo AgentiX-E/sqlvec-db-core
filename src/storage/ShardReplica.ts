@@ -244,12 +244,13 @@ export class ShardReplica {
     const visited = new Set<string>();
 
     const traverse = (table: string): void => {
-      if (visited.has(table)) return;
       visited.add(table);
       const rows = this.db.prepare(
         `SELECT child_table FROM _sqlvec_inheritance WHERE parent_table = ?`,
       ).all(table) as Array<{ child_table: string }>;
       for (const row of rows) {
+        // Guard against revisiting a child that was already expanded (breaks
+        // inheritance cycles and prevents duplicate entries in `results`).
         if (!visited.has(row.child_table)) {
           results.push(row.child_table);
           traverse(row.child_table);
@@ -363,12 +364,20 @@ export class ShardReplica {
           return this.applyDelete(entry.data);
         case 'ddl': {
           const sql = entry.data.sql || entry.data;
-          this.db.exec(sql);
-          // Detect INHERITS clause for table inheritance tracking
-          const inheritsMatch = /^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s*\(.*?\)\s*INHERITS\s*\((\S+)\)\s*;?\s*$/is.exec(sql);
+          // Detect an INHERITS clause before execution. SQLite has no native
+          // INHERITS syntax, so we strip the clause, run the plain CREATE
+          // TABLE, and record the inheritance relationship in our tracking
+          // table instead. Doing this AFTER db.exec() would be unreachable
+          // because SQLite would reject the INHERITS keyword first.
+          const inheritsMatch = /^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s*\((.*)\)\s*INHERITS\s*\((\S+)\)\s*;?\s*$/is.exec(sql);
           if (inheritsMatch) {
-            this.registerInheritance(inheritsMatch[1], inheritsMatch[2]);
+            const [, tableName, , parentName] = inheritsMatch;
+            const stripped = sql.replace(/\s*INHERITS\s*\((\S+)\)\s*;?\s*$/i, '');
+            this.db.exec(stripped);
+            this.registerInheritance(tableName, parentName);
+            return true;
           }
+          this.db.exec(sql);
           // Detect DROP TABLE for inheritance cleanup
           const dropMatch = /^\s*DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\S+)/i.exec(sql);
           if (dropMatch) {
@@ -598,7 +607,9 @@ export class ShardReplica {
    * Checkpoint is performed in TRUNCATE mode to minimize overhead.
    */
   private checkDedupRingCapacity(): void {
-    const capacity = 10_000; // matches the capacity passed to DedupRing constructor
+    // Read the capacity from the ring itself so this threshold can never drift
+    // out of sync with the value passed to the DedupRing constructor.
+    const capacity = this.applyDedup.maxSize;
     const current = this.applyDedup.size;
     const ratio = current / capacity;
 
@@ -625,7 +636,9 @@ export class ShardReplica {
   checkpoint(): { ok: boolean; pagesCheckpointed: number } {
     try {
       const row = this.db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get() as any;
-      const pagesCheckpointed = row ? (row[1] ?? row.pages_checkpointed ?? 0) : 0;
+      // better-sqlite3 returns `{ busy, log, checkpointed }` for this pragma.
+      // The number of pages moved into the main DB is `checkpointed`.
+      const pagesCheckpointed = row ? (row.checkpointed ?? 0) : 0;
       return { ok: true, pagesCheckpointed };
     } catch (err: any) {
       return { ok: false, pagesCheckpointed: 0 };

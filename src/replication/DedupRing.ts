@@ -29,6 +29,11 @@ export class DedupRing {
     return this.keys.size;
   }
 
+  /** The configured capacity (max distinct keys retained). */
+  get maxSize(): number {
+    return this.capacity;
+  }
+
   /**
    * Record a key.
    *
