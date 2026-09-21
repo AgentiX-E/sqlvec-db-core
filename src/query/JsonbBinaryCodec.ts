@@ -72,7 +72,10 @@ export function decodeJsonb(buffer: Buffer): unknown {
 }
 
 export function jsonbTypeof(buffer: Buffer): string {
-  if (buffer.length < 9) return 'null';
+  // A minimal JSONB is a 4-byte container header (empty object / empty array).
+  // Only lengths below 4 are invalid/degenerate; treating `< 9` as null would
+  // misreport the empty container `{}` / `[]` as 'null'.
+  if (buffer.length < 4) return 'null';
   const header = buffer.readUInt32BE(0);
   if (header & JSONB_SCALAR) {
     const entryDataLen = buffer.readUInt32BE(4);
@@ -257,8 +260,13 @@ function decodeJentry(buf: Buffer, off: number): unknown {
     case JSONB_TAG_FALSE:        return false;
     case JSONB_TAG_NUMBER: {
       const s = buf.toString('utf-8', off + 4, off + 4 + dataLen);
+      // Round-trip faithfully: `encodeScalarNumber` / `encodeJentry` store the
+      // value as `String(n)`, and `Number(String(n))` reproduces n — including
+      // NaN ("NaN") and Infinity ("Infinity"). The previous `Number.isNaN(n) ? 0`
+      // silently corrupted NaN into 0. Guard only against a NON-numeric string
+      // (corrupt data) by falling back to NaN rather than a misleading 0.
       const n = Number(s);
-      return Number.isNaN(n) ? 0 : n;
+      return s === '' || s.trim() === '' ? NaN : n;
     }
     case JSONB_TAG_STRING:
       return buf.toString('utf-8', off + 4, off + 4 + dataLen);
@@ -307,13 +315,6 @@ function decodeObjectContainer(buf: Buffer, off: number): Record<string, unknown
     pos += 5 + dataLen; // len(4) + data + tag(1)
   }
   return obj;
-}
-
-function computeJentryPayloadSize(tag: number, dataLen: number): number {
-  if (tag === JSONB_TAG_NULL || tag === JSONB_TAG_TRUE || tag === JSONB_TAG_FALSE) {
-    return 0;
-  }
-  return dataLen;
 }
 
 // ── Query helpers ─────────────────────────────────────────────────────
