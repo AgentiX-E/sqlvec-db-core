@@ -115,6 +115,12 @@ export class HybridSearch {
   }
 
   getStats(): { indexedDocs: number } {
-    return { indexedDocs: this.miniSearch.documentCount };
+    // MiniSearch exposes `documentCount` as a runtime getter. The project's
+    // legacy `moduleResolution: "node"` resolves the minisearch 7.x exports
+    // map loosely and drops that getter (along with toJSON) from the visible
+    // type, so read it through a narrow cast rather than the internal
+    // property count (which was the previous, incorrect behavior).
+    const mini = this.miniSearch as unknown as { documentCount: number };
+    return { indexedDocs: mini.documentCount };
   }
 }
