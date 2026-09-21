@@ -32,6 +32,19 @@ import { WriteWorkerPool } from './WriteWorkerPool';
 
 const logger = PinoLogger.forComponent('ShardManager');
 
+/**
+ * Serialize a Float32Array vector to its exact little-endian byte range.
+ *
+ * `Buffer.from(vec.buffer)` alone is WRONG for a view: it copies the entire
+ * underlying ArrayBuffer (including bytes before `byteOffset` and after
+ * `byteOffset + byteLength`). A caller passing `new Float32Array(bigBuf, off, n)`
+ * or `arr.subarray(...)` would then persist corrupted / wrong-length blobs.
+ * Bound the copy to the view's actual byte range.
+ */
+function float32ToBlob(vec: Float32Array): Buffer {
+  return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
+}
+
 /** Default number of reader connections per shard (WAL-mode concurrent readers) */
 const DEFAULT_READER_POOL_SIZE = 4;
 
@@ -553,7 +566,7 @@ export class ShardManager {
       );
     }
 
-    const embBlob = Buffer.from(embedding.buffer);
+    const embBlob = float32ToBlob(embedding);
 
     shard.db.transaction(() => {
       // Insert into main table
@@ -588,7 +601,7 @@ export class ShardManager {
     const shard = this.shards.get(shardId);
     if (!shard) return [];
 
-    const embBlob = Buffer.from(queryVector.buffer);
+    const embBlob = float32ToBlob(queryVector);
     const rows = shard.db.prepare(
       `SELECT id, distance
        FROM vec_${tableName}
@@ -615,7 +628,7 @@ export class ShardManager {
 
     const promises = Array.from(this.shards.entries()).map(async ([shardId, shard]) => {
       try {
-        const embBlob = Buffer.from(queryVector.buffer);
+        const embBlob = float32ToBlob(queryVector);
         const rows = shard.db.prepare(
           `SELECT id, distance
            FROM vec_${tableName}

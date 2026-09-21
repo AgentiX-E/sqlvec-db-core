@@ -635,6 +635,37 @@ describe('ShardManager — branch coverage', () => {
       await mgr.close();
       fs.rmSync(d, { recursive: true, force: true });
     });
+
+    it('serializes a non-zero-byteOffset Float32Array view to the exact byte range (#188)', async () => {
+      const d = makeDir();
+      const VEC_L2 = { enabled: true, dimension: 4, metric: VectorMetric.L2, mode: VectorMode.INDEXED, bruteForceThreshold: 1000, indexType: VectorIndexType.FLAT, indexParams: {} };
+      const mgr = new ShardManager(d, VEC_L2);
+      mgr.setWALConfig({ ...WAL_CONFIGS.STANDALONE_SAFE, checkpointIntervalMs: 0 });
+      await mgr.initialize(1, "CREATE TABLE items (id INTEGER PRIMARY KEY);");
+      mgr.createVectorIndex('items', 4, 'l2');
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Build a Float32Array VIEW into a larger buffer with garbage bytes both
+      // before and after the actual 4-float vector. `Buffer.from(view.buffer)`
+      // (the old code) would copy the whole 8-float buffer — including the
+      // junk — producing a wrong-length / corrupted blob. The fixed code must
+      // copy exactly the view's byte range.
+      const padded = new Float32Array([99, 99, 2, 4, 6, 8, 88, 88]);
+      const view = new Float32Array(padded.buffer, 2 * 4, 4); // [2,4,6,8], byteOffset=8, byteLength=16
+      expect(Array.from(view)).toEqual([2, 4, 6, 8]);
+
+      mgr.vectorInsert(0, 'items', 42, view);
+
+      // Searching with the exact vector must hit id 42 at distance ~0. If the
+      // blob had been padded/corrupted, the match would miss or rank wrong.
+      const hits = mgr.vectorSearch(0, 'items', new Float32Array([2, 4, 6, 8]), 1);
+      expect(hits).toHaveLength(1);
+      expect(hits[0].id).toBe(42);
+      expect(hits[0].distance).toBeCloseTo(0, 5);
+
+      await mgr.close();
+      fs.rmSync(d, { recursive: true, force: true });
+    });
   });
 
   it('setWALConfig restarts an existing checkpointer on interval change', async () => {
