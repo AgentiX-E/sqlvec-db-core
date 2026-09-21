@@ -163,6 +163,7 @@ export class VectorEngine {
     try {
       await this.duckDBExec(conn, 'INSTALL sqlite_scanner;');
       await this.duckDBExec(conn, 'LOAD sqlite_scanner;');
+      this.registerFloatDecodeUdf(conn);
       this.duckDBAvailable = true;
     } catch (err: any) {
       logger.warn(`[VectorEngine] DuckDB sqlite_scanner extension unavailable, falling back to indexed search: ${err.message || err}`);
@@ -180,6 +181,24 @@ export class VectorEngine {
       spaceName: spaceName || 'l2',
     };
     this.hnswIndex = new HnswIndexManager(this.config.dimension, hnswCfg);
+  }
+
+  /**
+   * Register a scalar UDF that decodes the i-th float32 from a BLOB.
+   *
+   * sqlite-vec persists embeddings as raw little-endian float32 BLOBs. DuckDB
+   * cannot natively cast a BLOB to FLOAT[] (issue #186: `Unimplemented type
+   * for cast (BLOB -> FLOAT[4])`), so we expose a scalar accessor and assemble
+   * the FLOAT[] in SQL via list_value(...). Reading with readFloatLE fixes the
+   * byte order explicitly instead of relying on host endianness.
+   */
+  private registerFloatDecodeUdf(conn: duckdb.Connection): void {
+    conn.register_udf('f32_at', 'DOUBLE', (blob: Buffer, index: number): number => {
+      const buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+      const offset = index * 4;
+      if (offset < 0 || offset + 4 > buf.length) return 0;
+      return buf.readFloatLE(offset);
+    });
   }
 
   /** Execute a DuckDB statement via callback-based API wrapped in Promise. */
@@ -340,10 +359,15 @@ export class VectorEngine {
     // Build the query vector literal
     const vecLiteral = `CAST([${Array.from(query.queryVector).join(',')}] AS FLOAT[${dim}])`;
 
+    // sqlite-vec stores embeddings as raw little-endian float32 BLOBs, which
+    // DuckDB cannot cast to FLOAT[] directly (#186). Decode the BLOB into a
+    // FLOAT[dim] list via the f32_at scalar UDF and DuckDB's list_value.
+    const decode = `list_value(${Array.from({ length: dim }, (_, i) => `f32_at(embedding, ${i})`).join(', ')})`;
+
     // Build SQL: Union all shards, compute similarity, ORDER BY + LIMIT
     const shardQueries = shardPaths.map(shardPath => {
       const alias = `shard_${path.basename(shardPath!, '.db')}`;
-      return `SELECT id, ${metricFn}(CAST(embedding AS FLOAT[${dim}]), ${vecLiteral}) AS score
+      return `SELECT id, ${metricFn}(${decode}, ${vecLiteral}) AS score
               FROM "${alias}".${query.collection}
               WHERE embedding IS NOT NULL`;
     });
@@ -366,7 +390,10 @@ export class VectorEngine {
     });
 
     const results: VectorSearchResult[] = rows.map(r => ({
-      id: r.id,
+      // sqlite_scanner surfaces sqlite INTEGER primary keys as DuckDB BIGINT
+      // (JS BigInt); normalize back to number to keep the vector API's id type
+      // consistent with the sqlite-vec / IVFPQ / HNSW modes.
+      id: typeof r.id === 'bigint' ? Number(r.id) : r.id,
       distance: this.config.metric === VectorMetric.L2 ? r.distance : (1 - r.distance),
     }));
 

@@ -596,29 +596,81 @@ describe('VectorEngine', () => {
       return p;
     }
 
-    it('runs DuckDB brute-force attach + SQL generation (exposes BLOB cast)', async () => {
+    it('brute-force decodes sqlite-vec BLOBs via f32_at and returns exact L2 results', async () => {
       const cfg = {
         enabled: true, dimension: DIM, metric: VectorMetric.L2, mode: VectorMode.BRUTEFORCE,
         bruteForceThreshold: 100, indexType: VectorIndexType.FLAT, indexParams: {},
       };
       const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-bf-'));
       cleanups.push(dataDir);
-      const shardPath = makeRealShard(dataDir, 'shard_0.db', [[1, vec(1, 2, 3, 4)]]);
+      // Two rows: [1,2,3,4] and [5,6,7,8]. Query [1,2,3,4] → row 1 distance 0, row 2 distance sqrt(16+16+16+16)=8.
+      const shardPath = makeRealShard(dataDir, 'shard_0.db', [[1, vec(1, 2, 3, 4)], [2, vec(5, 6, 7, 8)]]);
 
       const shardManager = new StubShardManager();
       shardManager.shardIds = [0];
       shardManager.shardPaths = [shardPath];
-      shardManager.vectorSearchResults = [{ id: 1, distance: 0, shardId: 0 }];
 
       const engine = new VectorEngine(shardManager as any, cfg, dataDir);
       await engine.initialize();
       expect((engine as any).duckDBAvailable).toBe(true);
 
-      // The BLOB -> FLOAT[] cast is unsupported by DuckDB (#186), so the query
-      // rejects. This still covers attach loop + SQL generation + metric fn.
-      await expect(
-        engine.search({ collection: 'articles', queryVector: vec(1, 2, 3, 4), topK: 3 }),
-      ).rejects.toThrow();
+      // The BLOB is now decoded through the f32_at UDF, so the exact brute-force
+      // L2 search succeeds (issue #186 resolved).
+      const res = await engine.search({ collection: 'articles', queryVector: vec(1, 2, 3, 4), topK: 2 });
+      expect(res.results.length).toBe(2);
+      expect(res.results[0].id).toBe(1);
+      expect(res.results[0].distance).toBeCloseTo(0, 5);
+      expect(res.results[1].id).toBe(2);
+      expect(res.results[1].distance).toBeCloseTo(8, 5);
+      await engine.close();
+    });
+
+    it('brute-force returns correct cosine + inner-product rankings over BLOBs', async () => {
+      const cfg = {
+        enabled: true, dimension: DIM, metric: VectorMetric.IP, mode: VectorMode.BRUTEFORCE,
+        bruteForceThreshold: 100, indexType: VectorIndexType.FLAT, indexParams: {},
+      };
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-bf-ip-'));
+      cleanups.push(dataDir);
+      const shardPath = makeRealShard(dataDir, 'shard_0.db', [[1, vec(1, 0, 0, 0)], [2, vec(2, 0, 0, 0)]]);
+
+      const shardManager = new StubShardManager();
+      shardManager.shardIds = [0];
+      shardManager.shardPaths = [shardPath];
+
+      const engine = new VectorEngine(shardManager as any, cfg, dataDir);
+      await engine.initialize();
+      // IP ranking: query [1,0,0,0] → id 2 has dot 2.0 (rank 1), id 1 has dot 1.0.
+      const res = await engine.search({ collection: 'articles', queryVector: vec(1, 0, 0, 0), topK: 2 });
+      expect(res.results.length).toBe(2);
+      expect(res.results[0].id).toBe(2); // highest inner product first (DESC)
+      expect(res.results[1].id).toBe(1);
+      await engine.close();
+    });
+
+    it('brute-force decodes across multiple attached shards (UNION ALL merge)', async () => {
+      const cfg = {
+        enabled: true, dimension: DIM, metric: VectorMetric.L2, mode: VectorMode.BRUTEFORCE,
+        bruteForceThreshold: 100, indexType: VectorIndexType.FLAT, indexParams: {},
+      };
+      const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vec-bf-multi-'));
+      cleanups.push(dataDir);
+      const p0 = makeRealShard(dataDir, 'shard_0.db', [[1, vec(1, 0, 0, 0)]]);
+      const p1 = makeRealShard(dataDir, 'shard_1.db', [[2, vec(0, 1, 0, 0)]]);
+
+      const shardManager = new StubShardManager();
+      shardManager.shardIds = [0, 1];
+      shardManager.shardPaths = [p0, p1];
+
+      const engine = new VectorEngine(shardManager as any, cfg, dataDir);
+      await engine.initialize();
+      const res = await engine.search({ collection: 'articles', queryVector: vec(1, 0, 0, 0), topK: 2 });
+      expect(res.results.length).toBe(2);
+      // id 1 distance 0 ranks first; id 2 distance sqrt(2) ranks second.
+      expect(res.results[0].id).toBe(1);
+      expect(res.results[0].distance).toBeCloseTo(0, 5);
+      expect(res.results[1].id).toBe(2);
+      expect(res.results[1].distance).toBeCloseTo(Math.sqrt(2), 5);
       await engine.close();
     });
 
