@@ -2,11 +2,11 @@
  * HnswVectorIndex — Lightweight HNSW vector index wrapper
  *
  * A simpler API layer over hnswlib-node that uses cosine distance by default
- * (auto-normalizing for cosine when using L2 internally) and provides
- * convenient save/load/persistence semantics.
+ * and provides convenient save/load/persistence semantics.
  *
  * Design:
- *   - Uses cosine distance internally (normalizes vectors to unit length)
+ *   - Delegates to hnswlib's `cosine` space, which normalizes vectors
+ *     internally and reports cosine distance (1 - similarity)
  *   - Maps external (user) IDs to internal HNSW positions
  *   - Full persistence: binary index file + JSON metadata for ID mappings
  *   - Thread-safe for sequential read/write operations
