@@ -280,7 +280,10 @@ function boxOutput(value: { x1: number; y1: number; x2: number; y2: number } | s
 function pathOutput(value: { points: Array<{ x: number; y: number }>; closed?: boolean } | string): string {
   if (typeof value === 'string') return value;
   const pts = value.points.map(p => `(${p.x},${p.y})`).join(',');
-  return value.closed ? `[(${pts})]` : `[(${pts})]`;
+  // PostgreSQL distinguishes closed paths `((...))` from open paths `[ ... ]`;
+  // each point is already parenthesized `(x,y)`, so a single outer `(...)` for
+  // closed paths yields `((x,y),(x,y))`, while open paths use square brackets.
+  return value.closed ? `(${pts})` : `[${pts}]`;
 }
 
 function polygonOutput(value: { points: Array<{ x: number; y: number }> } | string): string {
