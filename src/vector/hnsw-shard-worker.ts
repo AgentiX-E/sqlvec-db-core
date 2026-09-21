@@ -5,20 +5,23 @@
  * saves it to a temp file, and signals completion.
  *
  * Used by HnswIndexManager.shardBuild() for parallel build.
+ *
+ * The pure build logic is exported as `buildShard` so it can be unit-tested
+ * directly in the main thread; the worker entry-point only runs when the file
+ * is loaded as a real worker thread (`!isMainThread`).
  */
 
-import { parentPort, workerData } from 'worker_threads';
+import { isMainThread, parentPort, workerData } from 'worker_threads';
 import hnswlib from 'hnswlib-node';
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 
 // hnswlib-node is CommonJS. Under a native ESM loader (worker threads) the
 // named export cannot be statically resolved, so we go through the default
 // interop and destructure the constructor.
 const { HierarchicalNSW } = hnswlib as unknown as typeof import('hnswlib-node');
 
-interface ShardWorkerData {
+export interface ShardWorkerData {
   /** Worker index (0-based) */
   shardIndex: number;
   /** Total number of shards */
@@ -40,7 +43,7 @@ interface ShardWorkerData {
   spaceName: 'l2' | 'ip';
 }
 
-interface ShardWorkerResult {
+export interface ShardWorkerResult {
   shardIndex: number;
   count: number;
   buildTimeMs: number;
@@ -49,7 +52,11 @@ interface ShardWorkerResult {
   error?: string;
 }
 
-function normalizeL2(v: Float32Array): Float32Array {
+/**
+ * L2-normalize a vector. Returns the input unnormalized when its norm is (near)
+ * zero, to avoid dividing by zero / producing NaN.
+ */
+export function normalizeL2(v: Float32Array): Float32Array {
   let sumSq = 0;
   for (let i = 0; i < v.length; i++) sumSq += v[i] * v[i];
   const norm = Math.sqrt(sumSq);
@@ -59,26 +66,43 @@ function normalizeL2(v: Float32Array): Float32Array {
   return out;
 }
 
-async function main(): Promise<void> {
-  const data = workerData as ShardWorkerData;
-
+/**
+ * Deserialize the flat vector buffers, build the HNSW index, and write it to
+ * `<outputDir>/shard-<shardIndex>.hnsw`.
+ *
+ * Returns a ShardWorkerResult without throwing: failures are reported via
+ * `success: false` + `error`, mirroring the worker IPC contract.
+ */
+export function buildShard(data: ShardWorkerData): ShardWorkerResult {
   try {
+    // Validate HNSW parameters BEFORE entering the native layer. hnswlib
+    // segfaults (rather than throwing) on invalid construction params — e.g.
+    // m = 0 — and a C++ segfault cannot be caught by this try/catch, so a
+    // single bad parameter would crash the whole worker process. Guard here.
+    if (!Number.isInteger(data.m) || data.m < 1) {
+      return { shardIndex: data.shardIndex, count: data.count, buildTimeMs: 0, indexPath: '', success: false, error: `invalid m parameter: ${data.m} (must be a positive integer)` };
+    }
+    if (!Number.isInteger(data.efConstruction) || data.efConstruction < 1) {
+      return { shardIndex: data.shardIndex, count: data.count, buildTimeMs: 0, indexPath: '', success: false, error: `invalid efConstruction parameter: ${data.efConstruction} (must be a positive integer)` };
+    }
+    if (!Number.isInteger(data.dimension) || data.dimension < 1) {
+      return { shardIndex: data.shardIndex, count: data.count, buildTimeMs: 0, indexPath: '', success: false, error: `invalid dimension parameter: ${data.dimension} (must be a positive integer)` };
+    }
+    if (data.spaceName !== 'l2' && data.spaceName !== 'ip') {
+      return { shardIndex: data.shardIndex, count: data.count, buildTimeMs: 0, indexPath: '', success: false, error: `invalid spaceName parameter: ${data.spaceName} (must be 'l2' or 'ip')` };
+    }
+
     // Ensure output dir exists
     fs.mkdirSync(data.outputDir, { recursive: true });
 
     // Deserialize vectors from flat buffer
-    const vectors: Float32Array[] = [];
     const floatView = new Float32Array(
       data.vectorsBuffer.buffer,
       data.vectorsBuffer.byteOffset,
       data.vectorsBuffer.byteLength / 4,
     );
-    const ids = new Int32Array(
-      data.idsBuffer.buffer,
-      data.idsBuffer.byteOffset,
-      data.idsBuffer.byteLength / 4,
-    );
 
+    const vectors: Float32Array[] = [];
     for (let i = 0; i < data.count; i++) {
       const start = i * data.dimension;
       const vec = new Float32Array(data.dimension);
@@ -104,28 +128,33 @@ async function main(): Promise<void> {
     const indexPath = path.join(data.outputDir, `shard-${data.shardIndex}.hnsw`);
     index.writeIndexSync(indexPath);
 
-    // Report success back to main thread
-    const result: ShardWorkerResult = {
+    return {
       shardIndex: data.shardIndex,
       count: data.count,
       buildTimeMs,
       indexPath,
       success: true,
     };
-
-    parentPort!.postMessage(result);
-
   } catch (err: any) {
-    const result: ShardWorkerResult = {
+    return {
       shardIndex: data.shardIndex,
       count: data.count,
       buildTimeMs: 0,
       indexPath: '',
       success: false,
-      error: err.message ?? String(err),
+      // Use an instanceof check so a non-Error thrown value is stringified
+      // safely (e.g. String(null) === "null") instead of dereferencing
+      // `.message` on null and throwing a secondary TypeError.
+      error: err instanceof Error ? err.message : String(err),
     };
-    parentPort!.postMessage(result);
   }
 }
 
-main();
+/**
+ * Worker entry-point: only executes when loaded as a real worker thread.
+ */
+if (!isMainThread) {
+  const data = workerData as ShardWorkerData;
+  const result = buildShard(data);
+  parentPort!.postMessage(result);
+}
