@@ -115,6 +115,6 @@ export class HybridSearch {
   }
 
   getStats(): { indexedDocs: number } {
-    return { indexedDocs: Object.keys(this.miniSearch as any).length };
+    return { indexedDocs: this.miniSearch.documentCount };
   }
 }
