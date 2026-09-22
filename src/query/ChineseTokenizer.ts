@@ -1,47 +1,52 @@
 /**
- * ChineseTokenizer — 中文文本分词器
+ * ChineseTokenizer — Chinese text tokenizer.
  *
- * 优先使用 jieba-wasm 进行中文分词，如果 jieba-wasm 不可用则使用
- * 基于 CJK Unicode 范围的最简字符拆分作为 fallback。
+ * Prefer jieba-wasm for Chinese word segmentation; fall back to a minimal
+ * per-character split over the CJK Unicode ranges when jieba-wasm is
+ * unavailable. Pure-ASCII input (no CJK ideographs) is short-circuited to a
+ * fast whitespace/punctuation tokenizer so that English words, apostrophes and
+ * hyphens are never shredded by jieba.
  *
- * 集成了 FTS 字典系统：
- *   - Unaccent（去除变音符号）通过 NFKD 标准化
- *   - 支持与 FtsTranslator 的字典链集成
+ * Integrates the FTS dictionary system:
+ *   - Unaccent (diacritic removal) via NFKD normalization
+ *   - Composable with the FtsTranslator dictionary chain
  *
  * @module query/ChineseTokenizer
  */
 
-// ── CJK Unicode 范围 ────────────────────────────────────────────
-// 常用中文字符、中文标点、全角符号等 Unicode 范围
+// ── CJK Unicode ranges ───────────────────────────────────────────
+// Common Han ideographs, CJK punctuation, and fullwidth symbols.
 const CJK_RANGES = [
-  [0x2e80, 0x2eff],   // CJK 部首补充
-  [0x2f00, 0x2fdf],   // 康熙部首
-  [0x3000, 0x303f],   // CJK 符号和标点
-  [0x3400, 0x4dbf],   // CJK 统一表意文字扩展 A
-  [0x4e00, 0x9fff],   // CJK 统一表意文字
-  [0xf900, 0xfaff],   // CJK 兼容表意文字
-  [0xff00, 0xffef],   // 全角 ASCII、全角标点
+  [0x2e80, 0x2eff],   // CJK Radicals Supplement
+  [0x2f00, 0x2fdf],   // Kangxi Radicals
+  [0x3000, 0x303f],   // CJK Symbols and Punctuation
+  [0x3400, 0x4dbf],   // CJK Unified Ideographs Extension A
+  [0x4e00, 0x9fff],   // CJK Unified Ideographs
+  [0xf900, 0xfaff],   // CJK Compatibility Ideographs
+  [0xff00, 0xffef],   // Fullwidth ASCII and fullwidth punctuation
 ] as const;
 
+/** True when the given codepoint falls inside any CJK range. */
+function isCJKCode(code: number): boolean {
+  return CJK_RANGES.some(([start, end]) => code >= start && code <= end);
+}
+
 /**
- * 检测文本中是否包含 CJK 统一表意文字（中文）。
+ * Return true if the text contains any CJK ideograph (Chinese character).
  *
- * @param text - 要检测的文本
- * @returns 如果包含中文字符返回 true，否则返回 false
+ * @param text - text to inspect
+ * @returns true when a CJK character is present, false otherwise
  */
 export function isChinese(text: string): boolean {
   for (const char of text) {
-    const code = char.charCodeAt(0);
-    for (const [start, end] of CJK_RANGES) {
-      if (code >= start && code <= end) {
-        return true;
-      }
+    if (isCJKCode(char.charCodeAt(0))) {
+      return true;
     }
   }
   return false;
 }
 
-// ── jieba-wasm 加载 ─────────────────────────────────────────────
+// ── jieba-wasm loading ──────────────────────────────────────────
 
 let _jieba: typeof import('jieba-wasm') | null = null;
 let _jiebaLoadError: Error | null = null;
@@ -61,24 +66,33 @@ function getJieba(): typeof import('jieba-wasm') | null {
 }
 
 /**
- * 使用 jieba-wasm 对中文文本进行分词。
+ * Tokenize text for FTS indexing.
  *
- * 分词模式：使用 `cut()` 的精确模式（默认），适用于 FTS5 索引。
- * 如果 jieba-wasm 无法加载，回退到最简分词（按字符拆分）。
+ * Pure-ASCII input (no CJK ideographs) is handled by a fast tokenizer that
+ * preserves apostrophes and hyphens, so words like `O'Brien`, `don't` and
+ * `hello-world` remain single tokens. Mixed or pure-Chinese input is segmented
+ * with jieba-wasm (precise mode, HMM disabled); if jieba cannot be loaded or
+ * throws at runtime, it degrades to a per-character CJK fallback.
  *
- * @param text - 待分词的中文文本
- * @returns 分词结果数组
+ * @param text - text to tokenize
+ * @returns an array of tokens
  */
 export function tokenize(text: string): string[] {
+  // Short-circuit pure-ASCII input to avoid jieba shredding English words,
+  // apostrophes, numbers and emails into punctuation fragments.
+  if (!isChinese(text)) {
+    return tokenizeAscii(text);
+  }
+
   const jieba = getJieba();
 
   if (jieba !== null) {
     try {
-      // 使用 cut 默认模式（精确模式），不启用 HMM
-      // 过滤掉纯空白符 token，消除 jieba 将单词间空格作为独立 token 的行为
+      // cut() in precise mode (HMM disabled). Drop whitespace-only tokens so
+      // jieba never emits an empty token for inter-word spaces.
       return jieba.cut(text, false).filter((t: string) => t.trim().length > 0);
     } catch {
-      // jieba 运行时失败，降级到 fallback
+      // Runtime failure → degrade to fallback tokenization.
     }
   }
 
@@ -86,67 +100,79 @@ export function tokenize(text: string): string[] {
 }
 
 /**
- * 对中文文本进行分词，返回空格分隔的字符串，可直接插入 FTS5 表。
+ * Tokenize text and return a space-separated string ready for FTS5 insertion.
  *
- * 对于混合中英文内容，中文部分使用 jieba 分词，英文部分保留原样
- * （英文会在自动被空格分隔）。
+ * For mixed Chinese/English content, the Chinese portion is segmented via
+ * jieba while ASCII runs are kept intact (English words are space-delimited).
  *
- * @param text - 待分词的文本
- * @returns 空格分隔的分词结果字符串
+ * @param text - text to tokenize
+ * @returns space-delimited token string
  */
 export function tokenizeForFTS(text: string): string {
-  const tokens = tokenize(text);
-  return tokens.join(' ');
+  return tokenize(text).join(' ');
 }
 
-// ── Unaccent (去除变音符号) ──────────────────────────────────────
+// ── Unaccent (diacritic removal) ────────────────────────────────
 
 /**
- * 去除文本中的变音符号（重音符号），使用 NFKD 标准化。
+ * Remove combining diacritics via NFKD normalization.
  *
- * 例如：é → e, ü → u, ñ → n
+ * For example: é → e, ü → u, ñ → n.
  *
- * @param s - 可能包含变音符号的文本
- * @returns 去除变音符号后的文本
+ * @param s - text that may contain diacritics
+ * @returns text with diacritics removed
  */
 export function unaccent(s: string): string {
   return s.normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
 }
 
-// ── Fallback 分词 ──────────────────────────────────────────────
+// ── ASCII fast-path tokenizer ───────────────────────────────────
 
 /**
- * 基于 CJK Unicode 范围的最简分词 fallback。
+ * Split pure-ASCII text on runs of characters that are neither word characters
+ * nor apostrophes/hyphens. This keeps `O'Brien`, `don't` and `hello-world` as
+ * single tokens while splitting on spaces and punctuation such as `.`, `@`.
+ */
+function tokenizeAscii(text: string): string[] {
+  return text
+    .split(/[^\w'-]+/)
+    .filter((t) => t.length > 0);
+}
+
+// ── Fallback (CJK) tokenizer ────────────────────────────────────
+
+/**
+ * Minimal CJK fallback tokenizer.
  *
- * 策略：
- *   - 对于连续的中文字符，每个字符拆分为单独的词
- *   - 非中文部分（英文、数字等）保留原样
+ * Strategy:
+ *   - Each consecutive CJK character becomes its own token
+ *   - Non-CJK runs (English, numbers, …) are normalized via punctuation-free
+ *     splitting and pushed as-is
  *
- * @param text - 待分词的文本
- * @returns 分词结果数组
+ * @param text - text to tokenize
+ * @returns an array of tokens
  */
 function fallbackTokenize(text: string): string[] {
   const tokens: string[] = [];
   let currentBuffer = '';
 
   for (const char of text) {
-    const code = char.charCodeAt(0);
-    const isCJK = CJK_RANGES.some(([start, end]) => code >= start && code <= end);
+    const isCJK = isCJKCode(char.charCodeAt(0));
 
     if (isCJK) {
-      // 非中文缓冲区有内容，先提交
+      // Flush any accumulated non-CJK buffer first.
       if (currentBuffer.length > 0) {
         pushNormalized(tokens, currentBuffer);
         currentBuffer = '';
       }
-      // 单个 CJK 字符作为一个独立的词
+      // A single CJK character maps to a single token.
       tokens.push(char);
     } else {
       currentBuffer += char;
     }
   }
 
-  // 处理剩余的非中文内容
+  // Flush trailing non-CJK content.
   if (currentBuffer.length > 0) {
     pushNormalized(tokens, currentBuffer);
   }
@@ -155,7 +181,8 @@ function fallbackTokenize(text: string): string[] {
 }
 
 /**
- * 将文本按空白符拆分并加入 token 列表，同时过滤空串和纯空白。
+ * Split a non-CJK run into tokens by whitespace/punctuation while preserving
+ * apostrophes and hyphens; append results to the token list.
  */
 function pushNormalized(tokens: string[], text: string): void {
   const parts = text
