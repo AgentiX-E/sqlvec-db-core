@@ -32,10 +32,11 @@ export class SequenceCacheManager {
   private cacheSize: number;
 
   /**
-   * In-memory cache per sequence: { start, end, current }
-   * current is the next value to hand out.
+   * In-memory cache per sequence: { start, end, current, inc }
+   * current is the next value to hand out; inc is the step captured at
+   * allocation time so nextVal/currVal need not re-query the database.
    */
-  private caches: Map<string, { start: number; end: number; current: number }> = new Map();
+  private caches: Map<string, { start: number; end: number; current: number; inc: number }> = new Map();
 
   constructor(db: Database.Database, cacheSize: number = DEFAULT_CACHE_SIZE) {
     this.db = db;
@@ -67,7 +68,7 @@ export class SequenceCacheManager {
 
     if (cache && cache.current <= cache.end) {
       const val = cache.current;
-      cache.current += 1;
+      cache.current += cache.inc;
       logger.debug({ sequence: name, value: val }, 'Sequence nextVal (cached)');
       return val;
     }
@@ -81,15 +82,16 @@ export class SequenceCacheManager {
    */
   private allocateRange(name: string): number {
     const inc = this.getIncrement(name);
+    const span = this.cacheSize * inc;
 
-    // Atomically advance the stored last_value
+    // Atomically advance the stored last_value by a full cache span.
     const stmt = this.db.prepare(`
       INSERT INTO ${SEQUENCES_TABLE} (name, last_value, increment)
       VALUES (?, ?, ?)
       ON CONFLICT(name) DO UPDATE SET
         last_value = last_value + ?
     `);
-    stmt.run(name, this.cacheSize, inc, this.cacheSize);
+    stmt.run(name, span, inc, span);
 
     // Read back the new last_value
     const row = this.db.prepare(
@@ -100,12 +102,15 @@ export class SequenceCacheManager {
       throw new Error(`Failed to allocate range for sequence "${name}"`);
     }
 
-    const start = row.last_value - this.cacheSize + 1;
+    // The first value handed out is (previous last_value + increment), i.e.
+    // (new last_value - span + increment).
+    const start = row.last_value - span + inc;
 
     this.caches.set(name, {
       start,
       end: row.last_value,
-      current: start + 1, // first value handed out
+      current: start + inc, // first value handed out
+      inc,
     });
 
     logger.debug({ sequence: name, start, end: row.last_value }, 'Sequence range allocated');
@@ -121,7 +126,7 @@ export class SequenceCacheManager {
   currVal(name: string): number {
     const cache = this.caches.get(name);
     if (cache) {
-      return cache.current - 1;
+      return cache.current - cache.inc;
     }
 
     const row = this.db.prepare(
