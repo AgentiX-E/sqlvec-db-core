@@ -39,14 +39,19 @@ export const TOAST_ELIGIBLE_TYPES = new Set(['TEXT', 'BYTEA', 'JSON', 'JSONB', '
  * LZ4 compression/decompression wrapper.
  * Uses `lz4-asm` package if available, with fallback to Buffer-based no-op.
  */
-class Lz4Compressor {
+export class Lz4Compressor {
   private lz4: any = null;
   private available: boolean = false;
 
-  constructor() {
+  /**
+   * @param lz4Impl Optional injection point for testing; when omitted the
+   *   compressor attempts to load `lz4-asm` dynamically so the hard dependency
+   *   can be absent without breaking the module's no-op fallback.
+   */
+  constructor(lz4Impl?: { compress: (b: Buffer) => Buffer; decompress: (b: Buffer) => Buffer }) {
     try {
       // Dynamic require to avoid hard dependency
-      this.lz4 = require('lz4-asm');
+      this.lz4 = lz4Impl ?? require('lz4-asm');
       this.available = true;
       logger.info('LZ4 compression available via lz4-asm');
     } catch {
@@ -118,7 +123,9 @@ export function isToastEligible(columnType: string): boolean {
 export function compressColumn(
   value: Buffer | string | null | undefined,
   columnType: string,
+  compressorOverride?: Lz4Compressor,
 ): { compressed: boolean; buffer: Buffer } {
+  const comp = compressorOverride ?? compressor;
   // Handle null/undefined
   if (value === null || value === undefined) {
     return { compressed: false, buffer: Buffer.alloc(0) };
@@ -138,11 +145,16 @@ export function compressColumn(
   }
 
   // Compress
-  const compressed = compressor.compress(inputBuffer);
+  const compressed = comp.compress(inputBuffer);
 
   // Only use compressed if it's actually smaller
   if (compressed.length >= inputBuffer.length) {
-    return { compressed: false, buffer: inputBuffer };
+    // Not compressible — still prepend the raw marker so a leading 0x01 byte
+    // in the payload cannot be mistaken for the LZ4 marker on decompression.
+    const result = Buffer.alloc(1 + inputBuffer.length);
+    result[0] = MARKER_RAW;
+    inputBuffer.copy(result, 1);
+    return { compressed: false, buffer: result };
   }
 
   // Prepend compression marker
@@ -164,18 +176,26 @@ export function compressColumn(
  * @param buffer - The stored buffer (possibly compressed)
  * @returns Decompressed Buffer
  */
-export function decompressColumn(buffer: Buffer | null | undefined): Buffer {
+export function decompressColumn(
+  buffer: Buffer | null | undefined,
+  compressorOverride?: Lz4Compressor,
+): Buffer {
+  const comp = compressorOverride ?? compressor;
   if (!buffer || buffer.length === 0) {
     return Buffer.alloc(0);
   }
 
-  // Check compression marker
+  // Check compression markers
   if (buffer[0] === MARKER_LZ4) {
     const compressedData = buffer.subarray(1);
-    return compressor.decompress(compressedData);
+    return comp.decompress(compressedData);
+  }
+  if (buffer[0] === MARKER_RAW) {
+    // Explicitly marked raw — strip the marker byte.
+    return buffer.subarray(1);
   }
 
-  // Raw data — return as-is
+  // No marker — legacy/unmarked raw data, return as-is
   return buffer;
 }
 
