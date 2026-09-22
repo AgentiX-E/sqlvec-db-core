@@ -45,19 +45,29 @@ export interface CorrelationResult {
 
 // ---- Internal Helpers ----
 
+interface ScanState {
+  depth: number;
+  /** True when `pos` lands inside a string literal or comment. */
+  inStringOrComment: boolean;
+}
+
 /**
- * Compute the parenthesis nesting depth at a given position in the SQL string.
- * Returns 0 for top-level text (not inside any parentheses), 1 for text inside
- * one level of parens, etc. Handles string literals to avoid false depth.
+ * Scan the SQL text up to (but not including) `pos`, tracking parenthesis
+ * nesting depth and whether the position falls inside a string literal or a
+ * comment. String literals (single/double/backtick, with backslash escapes) and
+ * both `--` and `\/\* *\/` comments are skipped so they cannot influence the
+ * result.
  */
-function depthAt(sql: string, pos: number): number {
+function scanUpTo(sql: string, pos: number): ScanState {
   let depth = 0;
   let inString = false;
   let stringChar: string | null = null;
+  let inComment = false;
 
   const max = Math.min(pos, sql.length);
   for (let i = 0; i < max; i++) {
     const ch = sql[i];
+    inComment = false;
 
     // Handle string literals
     if (inString) {
@@ -79,20 +89,21 @@ function depthAt(sql: string, pos: number): number {
 
     // Handle comments
     if (ch === '-' && i + 1 < max && sql[i + 1] === '-') {
-      // Single-line comment: skip to end of line
-      while (i < max && sql[i] !== '\n') i++;
+      // Single-line comment: skip to end of line. If the comment extends past
+      // `pos`, the loop terminates with i >= max and inComment stays set.
+      inComment = true;
+      while (i + 1 < max && sql[i + 1] !== '\n') i++;
       continue;
     }
     if (ch === '/' && i + 1 < max && sql[i + 1] === '*') {
-      // Multi-line comment: skip to */
+      // Multi-line comment: skip to the closing */. If it extends past `pos`,
+      // the loop terminates with i >= max and inComment stays set.
+      inComment = true;
       i += 2;
-      while (i < max) {
-        if (sql[i] === '*' && i + 1 < max && sql[i + 1] === '/') {
-          i += 2;
-          break;
-        }
+      while (i + 1 < max && !(sql[i] === '*' && sql[i + 1] === '/')) {
         i++;
       }
+      i += 1;
       continue;
     }
 
@@ -103,7 +114,7 @@ function depthAt(sql: string, pos: number): number {
     }
   }
 
-  return depth;
+  return { depth, inStringOrComment: inString || inComment };
 }
 
 // ---- Public API ----
@@ -143,28 +154,33 @@ export function detectCorrelation(
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(subquerySql)) !== null) {
       const pos = match.index;
+      const state = scanUpTo(subquerySql, pos);
 
-      // Only match at top level (depth 0) — skip matches inside nested subqueries
-      if (depthAt(subquerySql, pos) !== 0) {
+      // Only match at top level (depth 0) and outside string literals/comments.
+      // A correlated reference inside a nested subquery, a quoted string, or a
+      // comment must never be treated as an actual correlation.
+      if (state.depth !== 0 || state.inStringOrComment) {
         continue;
       }
 
-      // Verify the matched alias name matches case-insensitively
+      // Extract the matched alias (preserving original casing). The regex
+      // pattern already anchors the alias via \b<escapedAlias>. so the matched
+      // name is guaranteed to equal the alias case-insensitively.
       const matchedAlias = match[0].substring(0, match[0].indexOf('.'));
-      if (matchedAlias.toLowerCase() !== alias.toLowerCase()) {
-        continue;
-      }
 
       const fullRef = match[0];
 
       // Deduplicate
+      // Every occurrence must be replaced, but the reported refs list is
+      // deduplicated so a repeated reference appears only once.
+      replacements.push({ start: pos, end: pos + fullRef.length });
+
       if (!refs.some(r => r.fullRef === fullRef)) {
         refs.push({
           alias: matchedAlias,
           column: match[1],
           fullRef,
         });
-        replacements.push({ start: pos, end: pos + fullRef.length });
       }
     }
   }
