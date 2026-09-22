@@ -232,6 +232,12 @@ export class CsvImporter {
     delimiter: string,
     quoteChar: string,
   ): string[] {
+    // A blank line (whitespace only, or empty) is not a data row — return an
+    // empty array so the caller's `row.length === 0` guard can skip it. Without
+    // this, an empty line parses to `['']` (a single empty field) and is
+    // imported as a spurious NULL row.
+    if (line.trim() === '') return [];
+
     const fields: string[] = [];
     let current = '';
     let inQuotes = false;
@@ -293,12 +299,14 @@ export class CsvImporter {
   private sanitizeColumnName(name: string): string {
     // Replace non-alphanumeric characters with underscore
     let sanitized = name.replace(/[^a-zA-Z0-9_]/g, '_');
-    // Ensure starts with a letter or underscore
+    // Trim leading/trailing underscores first — otherwise a numeric-leading
+    // name would gain a `_` prefix only to have it stripped again below.
+    sanitized = sanitized.replace(/^_+|_+$/g, '');
+    // Ensure the identifier starts with a letter or underscore (a bare digit
+    // is not a valid SQL identifier, even when double-quoted in some engines).
     if (/^[0-9]/.test(sanitized)) {
       sanitized = '_' + sanitized;
     }
-    // Trim leading/trailing underscores
-    sanitized = sanitized.replace(/^_+|_+$/g, '');
     // Fallback if empty
     return sanitized || 'column';
   }
@@ -356,6 +364,17 @@ export class CsvImporter {
     return 'TEXT';
   }
 
+  /**
+   * Coerce a value to an INTEGER, honouring the boolean spellings that
+   * `inferType` classifies as INTEGER (true/t/f/yes/no → 1/0). Returns NaN for
+   * genuinely non-numeric text so callers can detect a coercion failure.
+   */
+  private coerceInteger(value: string): number {
+    if (/^(true|t|yes)$/i.test(value)) return 1;
+    if (/^(false|f|no)$/i.test(value)) return 0;
+    return parseInt(value, 10);
+  }
+
   private widenType(a: InferredType, b: InferredType): InferredType {
     if (a === 'TEXT' || b === 'TEXT') return 'TEXT';
     if (a === 'REAL' || b === 'REAL') return 'REAL';
@@ -409,9 +428,13 @@ export class CsvImporter {
   }
 
   private inferTableName(filePath: string): string {
-    // Extract filename without extension
+    // Extract the basename without its extension.
     const basename = filePath.replace(/^.*[/\\]/, '').replace(/\.[^.]+$/, '');
-    return this.sanitizeColumnName(basename) || 'imported_data';
+    // If the basename contains no usable identifier characters at all, fall
+    // back to a stable default. (sanitizeColumnName would otherwise return its
+    // own 'column' fallback, which is the wrong semantics for a table name.)
+    if (/^[^a-zA-Z0-9_]*$/.test(basename)) return 'imported_data';
+    return this.sanitizeColumnName(basename);
   }
 
   // ──────────────────────────────────────────────
@@ -436,7 +459,7 @@ export class CsvImporter {
 
       switch (types[i]) {
         case 'INTEGER':
-          values.push(parseInt(trimmed, 10));
+          values.push(this.coerceInteger(trimmed));
           break;
         case 'REAL':
           values.push(parseFloat(trimmed));

@@ -179,7 +179,10 @@ export class CsvExporter {
       val.includes('\r');
 
     if (needsQuoting) {
-      const escaped = val.replace(new RegExp(quoteChar, 'g'), quoteChar + quoteChar);
+      // Escape the quote character by doubling it. Use split/join rather than a
+      // RegExp so a quoteChar that is a regex metacharacter (e.g. `.`, `*`, `+`)
+      // is treated literally instead of corrupting the value.
+      const escaped = val.split(quoteChar).join(quoteChar + quoteChar);
       return `${quoteChar}${escaped}${quoteChar}`;
     }
     return val;
