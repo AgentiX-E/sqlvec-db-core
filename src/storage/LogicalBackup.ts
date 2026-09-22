@@ -195,31 +195,46 @@ export class LogicalBackup {
       this.db.exec(`DROP TABLE IF EXISTS "${tableName}"`);
     }
 
-    // Disable triggers if requested
+    // Disable triggers/constraints if requested. SQLite has no
+    // `ALTER TABLE … DISABLE TRIGGER ALL` (that is PostgreSQL syntax); the
+    // closest equivalent is to suspend foreign-key enforcement and recursive
+    // triggers for the duration of the restore, then restore the prior state.
+    let prevForeignKeys: boolean | undefined;
+    let prevRecursiveTriggers: boolean | undefined;
     if (opts.disableTriggers) {
-      this.db.exec(`ALTER TABLE "${tableName}" DISABLE TRIGGER ALL`);
+      prevForeignKeys = this.db.pragma('foreign_keys', { simple: true }) as boolean;
+      prevRecursiveTriggers = this.db.pragma('recursive_triggers', {
+        simple: true,
+      }) as boolean;
+      this.db.pragma('foreign_keys = OFF');
+      this.db.pragma('recursive_triggers = OFF');
     }
 
-    // Execute CREATE TABLE
-    this.db.exec(createMatch[0]);
+    try {
+      // Execute CREATE TABLE
+      this.db.exec(createMatch[0]);
 
-    // Extract INSERT INTO statements for this table.
-    // Format can be:
-    //   INSERT INTO "users" VALUES (...);
-    //   INSERT INTO "users" ("col1", "col2") VALUES (...);
-    // Notes: \s*\([^)]*\) optionally matches whitespace + column list before VALUES.
-    const insertRegex = new RegExp(
-      `INSERT\\s+INTO\\s+(?:["\`]?)${this.escapeRegex(tableName)}(?:["\`]?)\\s*(?:\\([^)]*\\))?\\s*VALUES\\s*\\([^;]*;`,
-      'gi',
-    );
-    let insertMatch: RegExpExecArray | null;
-    while ((insertMatch = insertRegex.exec(dumpContent)) !== null) {
-      this.db.exec(insertMatch[0]);
-    }
-
-    // Re-enable triggers if disabled
-    if (opts.disableTriggers) {
-      this.db.exec(`ALTER TABLE "${tableName}" ENABLE TRIGGER ALL`);
+      // Extract INSERT INTO statements for this table.
+      // Format can be:
+      //   INSERT INTO "users" VALUES (...);
+      //   INSERT INTO "users" ("col1", "col2") VALUES (...);
+      // Notes: \s*\([^)]*\) optionally matches whitespace + column list before VALUES.
+      const insertRegex = new RegExp(
+        `INSERT\\s+INTO\\s+(?:["\`]?)${this.escapeRegex(tableName)}(?:["\`]?)\\s*(?:\\([^)]*\\))?\\s*VALUES\\s*\\([^;]*;`,
+        'gi',
+      );
+      let insertMatch: RegExpExecArray | null;
+      while ((insertMatch = insertRegex.exec(dumpContent)) !== null) {
+        this.db.exec(insertMatch[0]);
+      }
+    } finally {
+      // Restore the prior pragma state regardless of success or failure.
+      if (opts.disableTriggers) {
+        this.db.pragma(`foreign_keys = ${prevForeignKeys ? 'ON' : 'OFF'}`);
+        this.db.pragma(
+          `recursive_triggers = ${prevRecursiveTriggers ? 'ON' : 'OFF'}`,
+        );
+      }
     }
   }
 
@@ -574,7 +589,7 @@ export class LogicalBackup {
       // Header row
       parts.push(
         columns
-          .map((c) => this.csvEscape(c, opts.quoteChar))
+          .map((c) => this.csvEscape(c, opts.quoteChar, opts.delimiter))
           .join(opts.delimiter),
       );
 
@@ -582,7 +597,9 @@ export class LogicalBackup {
       for (const row of rows) {
         parts.push(
           columns
-            .map((col) => this.csvEscape(String(row[col] ?? ''), opts.quoteChar))
+            .map((col) =>
+              this.csvEscape(String(row[col] ?? ''), opts.quoteChar, opts.delimiter),
+            )
             .join(opts.delimiter),
         );
       }
@@ -600,7 +617,12 @@ export class LogicalBackup {
    */
   private sqlLiteral(val: any): string {
     if (val === null || val === undefined) return 'NULL';
-    if (typeof val === 'number') return String(val);
+    if (typeof val === 'number') {
+      // NaN and ±Infinity are not valid SQL numeric literals; emit NULL instead
+      // of producing a syntactically invalid INSERT (which SQLite would reject).
+      if (!Number.isFinite(val)) return 'NULL';
+      return String(val);
+    }
     if (typeof val === 'boolean') return val ? '1' : '0';
     if (val instanceof Buffer) {
       return `X'${val.toString('hex')}'`;
@@ -611,15 +633,19 @@ export class LogicalBackup {
     return `'${str}'`;
   }
 
-  private csvEscape(val: string, quoteChar: string): string {
-    // If the value contains delimiter, quote, or newline — wrap in quotes
+  private csvEscape(val: string, quoteChar: string, delimiter: string): string {
+    // If the value contains the delimiter, the quote char, or a newline, it
+    // must be wrapped in quotes (and embedded quote chars doubled).
     if (
-      val.includes(',') ||
+      val.includes(delimiter) ||
       val.includes(quoteChar) ||
       val.includes('\n') ||
       val.includes('\r')
     ) {
-      const escaped = val.replace(new RegExp(quoteChar, 'g'), quoteChar + quoteChar);
+      // Doubling the quote char via split/join treats it as a literal even when
+      // it is a regex metacharacter (`.`, `*`, `+`, …). A RegExp-based replace
+      // would corrupt the value in that case.
+      const escaped = val.split(quoteChar).join(quoteChar + quoteChar);
       return `${quoteChar}${escaped}${quoteChar}`;
     }
     return val;
