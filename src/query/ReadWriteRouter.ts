@@ -33,27 +33,163 @@ export type QueryRole = 'read' | 'write' | 'unknown';
 // ── SQL Tokenizer Helpers ────────────────────────────────────────
 
 /**
- * Normalize SQL for analysis: collapse whitespace, lowercase.
+ * Normalize SQL for analysis: collapse horizontal whitespace (spaces, tabs,
+ * carriage returns) while PRESERVING newlines, because the line-comment
+ * scanner in maskSqlLiterals relies on `\n` to terminate a `--` comment.
  */
 function normalizeSql(sql: string): string {
-  return sql.replace(/\s+/g, ' ').trim();
+  return sql.replace(/[ \t\r]+/g, ' ').trim();
 }
 
 /**
- * Get the first non-comment, meaningful word from SQL.
+ * Mask non-SQL lexical extents (string literals, quoted identifiers,
+ * dollar-quoted strings, and both line and block comments) by replacing each
+ * character with a space while preserving character positions. The returned
+ * text contains only genuine SQL keywords and punctuation, so downstream
+ * keyword/pattern matching can never be fooled by a keyword that appears
+ * inside a string literal, a quoted identifier, or a comment.
+ *
+ * Recognized extents:
+ *   - '...'    single-quoted string, with '' as an escaped quote
+ *   - "..."    double-quoted identifier, with "" as an escaped quote
+ *   - $$...$$  dollar-quoted string (also $tag$...$tag$)
+ *   - -- ...   line comment (to end of line)
+ *   - /* ... *\/ block comment (non-nested)
+ *
+ * E[] escape sequences (backslash escapes) inside single-quoted strings are
+ * also handled so a trailing backslash cannot break out of the literal.
+ */
+function maskSqlLiterals(sql: string): string {
+  const out = sql.split('');
+  const len = sql.length;
+
+  for (let i = 0; i < len; i++) {
+    const c = sql[i];
+
+    // Line comment: mask to end of line (but preserve the newline).
+    if (c === '-' && sql[i + 1] === '-') {
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      let j = i + 2;
+      while (j < len && sql[j] !== '\n') {
+        out[j] = ' ';
+        j++;
+      }
+      i = j - 1;
+      continue;
+    }
+
+    // Block comment: mask to closing */.
+    if (c === '/' && sql[i + 1] === '*') {
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      let j = i + 2;
+      while (j < len && !(sql[j] === '*' && sql[j + 1] === '/')) {
+        out[j] = ' ';
+        j++;
+      }
+      if (j < len) {
+        out[j] = ' ';
+        out[j + 1] = ' ';
+        i = j + 1;
+      } else {
+        i = len;
+      }
+      continue;
+    }
+
+    // Single-quoted string.
+    if (c === "'") {
+      out[i] = ' ';
+      let j = i + 1;
+      while (j < len) {
+        if (sql[j] === '\\' && j + 1 < len) {
+          // E''-style backslash escape consumes the next char too.
+          out[j] = ' ';
+          out[j + 1] = ' ';
+          j += 2;
+          continue;
+        }
+        if (sql[j] === "'") {
+          if (sql[j + 1] === "'") {
+            // Escaped single quote ('').
+            out[j] = ' ';
+            out[j + 1] = ' ';
+            j += 2;
+            continue;
+          }
+          // Closing quote.
+          out[j] = ' ';
+          break;
+        }
+        out[j] = ' ';
+        j++;
+      }
+      i = j;
+      continue;
+    }
+
+    // Double-quoted identifier.
+    if (c === '"') {
+      out[i] = ' ';
+      let j = i + 1;
+      while (j < len) {
+        if (sql[j] === '"') {
+          if (sql[j + 1] === '"') {
+            out[j] = ' ';
+            out[j + 1] = ' ';
+            j += 2;
+            continue;
+          }
+          out[j] = ' ';
+          break;
+        }
+        out[j] = ' ';
+        j++;
+      }
+      i = j;
+      continue;
+    }
+
+    // Dollar-quoted string: $tag$ ... $tag$ (tag may be empty → $$...$$).
+    if (c === '$') {
+      const tagMatch = sql.slice(i).match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/);
+      if (tagMatch) {
+        const tag = tagMatch[0];
+        const close = sql.indexOf(tag, i + tag.length);
+        for (let k = i; k < i + tag.length; k++) out[k] = ' ';
+        if (close !== -1) {
+          for (let k = i + tag.length; k < close + tag.length; k++) out[k] = ' ';
+          i = close + tag.length - 1;
+        } else {
+          // Unterminated dollar quote: mask to end of input.
+          for (let k = i + tag.length; k < len; k++) out[k] = ' ';
+          i = len;
+        }
+        continue;
+      }
+    }
+  }
+
+  return out.join('');
+}
+
+/**
+ * Get the first non-comment, non-literal meaningful word from SQL.
  */
 function firstKeyword(sql: string): string {
-  const clean = sql.replace(/\/\*[\s\S]*?\*\/|--.*$/gm, '').trim();
+  const clean = maskSqlLiterals(sql).trim();
   const match = clean.match(/^(\w+)/i);
   return match ? match[1].toUpperCase() : '';
 }
 
 /**
- * Check if a CTE (WITH clause) contains a modifying statement.
+ * Check if a CTE (WITH clause) contains a modifying statement, ignoring any
+ * occurrence of INSERT/UPDATE/DELETE/MERGE inside strings or comments.
  */
 function cteHasModification(sql: string): boolean {
-  // Match WITH ... AS ( ... INSERT|UPDATE|DELETE ... )
-  const withBlock = sql.match(/\bWITH\b[\s\S]*?(?:INSERT|UPDATE|DELETE|MERGE)\b/i);
+  const masked = maskSqlLiterals(sql);
+  const withBlock = masked.match(/\bWITH\b[\s\S]*?(?:INSERT|UPDATE|DELETE|MERGE)\b/i);
   return withBlock !== null;
 }
 
@@ -158,9 +294,13 @@ export class ReadWriteRouter {
 
       // ── COPY
       case 'COPY': {
-        // COPY table TO → read, COPY table FROM → write
-        const copyMatch = normalized.match(/\bCOPY\s+\w+\s+TO\b/i);
-        return copyMatch ? 'read' : 'write';
+        // COPY table [(cols)] TO ... → read, COPY table [(cols)] FROM ... → write.
+        // Match against the masked text so FROM/TO inside the target string is
+        // ignored, and tolerate an optional parenthesized column list before
+        // the direction keyword, e.g. `COPY users (a,b) TO STDOUT`.
+        const copyMasked = maskSqlLiterals(normalized);
+        const copyMatch = copyMasked.match(/\bCOPY\b[\s\S]*?\b(FROM|TO)\b/i);
+        return copyMatch && copyMatch[1].toUpperCase() === 'TO' ? 'read' : 'write';
       }
 
       // ── LOCK / SELECT ... INTO
@@ -177,7 +317,8 @@ export class ReadWriteRouter {
    * Classify a SELECT statement (may actually be write if FOR UPDATE/INTO or data-modifying CTE).
    */
   private classifySelect(sql: string): QueryRole {
-    const upper = sql.toUpperCase();
+    const masked = maskSqlLiterals(sql);
+    const upper = masked.toUpperCase();
 
     // SELECT ... FOR UPDATE / FOR SHARE / FOR NO KEY UPDATE / FOR KEY SHARE → write
     if (/\bFOR\s+(UPDATE|SHARE|NO\s+KEY\s+UPDATE|KEY\s+SHARE)\b/i.test(upper)) {
@@ -186,15 +327,8 @@ export class ReadWriteRouter {
 
     // SELECT ... INTO (creates a table) → write
     if (/\bINTO\s+(TEMP|TEMPORARY|UNLOGGED)?\s*(TABLE\s+)?\w+/i.test(upper)) {
-      // Make sure it's not just a regular SELECT INTO variable
-      const selectIntoTable = sql.match(
-        /\bSELECT\b[\s\S]*?\bINTO\s+(TEMP|TEMPORARY|UNLOGGED)?\s*(TABLE\s+)?[a-zA-Z_]\w*/i,
-      );
-      if (selectIntoTable) return 'write';
+      return 'write';
     }
-
-    // WITH (CTE) with modifying CTE → checked earlier via WITH keyword
-    // At this point we already know it's SELECT or WITH
 
     return 'read';
   }
