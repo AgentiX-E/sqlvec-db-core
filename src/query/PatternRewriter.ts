@@ -118,6 +118,8 @@ interface PatternRange {
   rhsQuote: string;
   /** Optional ESCAPE clause (character, or empty string if absent) */
   escapeChar: string;
+  /** Whether the operator was prefixed with the `NOT` keyword (`NOT ILIKE`) */
+  negated: boolean;
 }
 
 /**
@@ -135,6 +137,12 @@ function findPatternRanges(sql: string): PatternRange[] {
       const quote = sql[i];
       i++;
       while (i < len) {
+        // Backslash escape: `\'` (or `\"`) is an escaped quote, not the
+        // string terminator (PG `E''` strings and standard SQL escaping).
+        if (sql[i] === '\\' && i + 1 < len) {
+          i += 2;
+          continue;
+        }
         if (sql[i] === quote) {
           // Check for doubled quote (escaped quote in some dialects)
           if (i + 1 < len && sql[i + 1] === quote) {
@@ -246,8 +254,19 @@ function extractRangeAround(
   tag: string,
 ): PatternRange | null {
   // ── Find LHS expression start (walk backward) ─────────────────
-  const lhsStart = findLeftExprStart(sql, opStart);
-  const lhsExpr = sql.substring(lhsStart, opStart).trim();
+  let lhsStart = findLeftExprStart(sql, opStart);
+  let lhsExpr = sql.substring(lhsStart, opStart).trim();
+
+  // Detect `NOT <operator>` (e.g. `NOT ILIKE`, `NOT SIMILAR TO`, `NOT ~~`).
+  // findLeftExprStart stops at the whitespace before `NOT`, yielding a LHS of
+  // `NOT`; treat that keyword as operator negation and recover the true LHS.
+  let negated = false;
+  if (/^NOT$/i.test(lhsExpr)) {
+    negated = true;
+    const notPos = lhsStart; // start of the `NOT` keyword
+    lhsStart = findLeftExprStart(sql, notPos);
+    lhsExpr = sql.substring(lhsStart, notPos).trim();
+  }
 
   // ── Find RHS pattern string (walk forward) ────────────────────
   let pos = opEnd;
@@ -266,8 +285,13 @@ function extractRangeAround(
   const rhsStart = pos;
   pos++; // move past opening quote
 
-  // Find matching closing quote (handle doubled quotes within)
+  // Find matching closing quote (handle doubled quotes and backslash
+  // escapes within).
   while (pos < sql.length) {
+    if (sql[pos] === '\\' && pos + 1 < sql.length) {
+      pos += 2; // backslash escape consumes the next char too
+      continue;
+    }
     if (sql[pos] === quote) {
       if (pos + 1 < sql.length && sql[pos + 1] === quote) {
         pos += 2; // skip doubled quote
@@ -285,14 +309,16 @@ function extractRangeAround(
   // ── Check for optional ESCAPE clause ─────────────────────────
   let escapeChar = '';
   const afterRhs = sql.substring(rhsEnd).trimStart();
-  const escMatch = afterRhs.match(/^ESCAPE\s+('.)'\s*/i);
+  // `ESCAPE '<char>'` or `ESCAPE '<char>'` — capture just the character
+  // (without the surrounding quotes) so callers can re-quote it correctly.
+  const escMatch = afterRhs.match(/^ESCAPE\s+'([^'])'\s*/i);
   if (escMatch) {
-    escapeChar = escMatch[1]; // the character between quotes
+    escapeChar = escMatch[1];
     // Adjust rhsEnd to include ESCAPE clause
     // (we'll handle this when building replacement)
   }
 
-  return { tag, lhsStart, lhsExpr, opStart, opEnd, rhsStart, rhsEnd, rhsPattern, rhsQuote: quote, escapeChar };
+  return { tag, lhsStart, lhsExpr, opStart, opEnd, rhsStart, rhsEnd, rhsPattern, rhsQuote: quote, escapeChar, negated };
 }
 
 /**
@@ -508,7 +534,7 @@ function isSimpleSimilarToPattern(pattern: string, escapeChar: string): boolean 
  * Build a replacement SQL snippet for a pattern operator occurrence.
  */
 function buildReplacement(range: PatternRange): string {
-  const { tag, lhsExpr, rhsPattern, escapeChar } = range;
+  const { tag, lhsExpr, rhsPattern, escapeChar, negated } = range;
 
   // The RHS pattern content (without surrounding quotes)
   const rawPattern = rhsPattern.substring(1, rhsPattern.length - 1);
@@ -516,27 +542,34 @@ function buildReplacement(range: PatternRange): string {
   // Optional ESCAPE clause suffix
   const escSuffix = escapeChar ? ` ESCAPE '${escapeChar}'` : '';
 
+  let replacement: string;
+
   switch (tag) {
     // ── ILIKE / ~~* / !~~* → CASE‑FOLD LIKE ────────────────────
     case 'ILIKE': {
-      return `LOWER(${lhsExpr}) LIKE LOWER(${rhsPattern})${escSuffix}`;
+      replacement = `LOWER(${lhsExpr}) LIKE LOWER(${rhsPattern})${escSuffix}`;
+      break;
     }
 
     case '~~*': {
-      return `LOWER(${lhsExpr}) LIKE LOWER(${rhsPattern})${escSuffix}`;
+      replacement = `LOWER(${lhsExpr}) LIKE LOWER(${rhsPattern})${escSuffix}`;
+      break;
     }
 
     case '!~~*': {
-      return `NOT (LOWER(${lhsExpr}) LIKE LOWER(${rhsPattern})${escSuffix})`;
+      replacement = `NOT (LOWER(${lhsExpr}) LIKE LOWER(${rhsPattern})${escSuffix})`;
+      break;
     }
 
     // ── ~~ (plain LIKE) / !~~ (NOT LIKE) ──────────────────────
     case '~~': {
-      return `${lhsExpr} LIKE ${rhsPattern}${escSuffix}`;
+      replacement = `${lhsExpr} LIKE ${rhsPattern}${escSuffix}`;
+      break;
     }
 
     case '!~~': {
-      return `NOT (${lhsExpr} LIKE ${rhsPattern}${escSuffix})`;
+      replacement = `NOT (${lhsExpr} LIKE ${rhsPattern}${escSuffix})`;
+      break;
     }
 
     // ── SIMILAR TO → LIKE (simple) or REGEXP (complex) ─────────
@@ -544,34 +577,55 @@ function buildReplacement(range: PatternRange): string {
       const esc = escapeChar || '\\';
       if (isSimpleSimilarToPattern(rawPattern, esc)) {
         // Simple pattern — just use LIKE
-        return `${lhsExpr} LIKE ${rhsPattern}${escSuffix}`;
+        replacement = `${lhsExpr} LIKE ${rhsPattern}${escSuffix}`;
+      } else {
+        // Complex pattern — convert to REGEXP. SIMILAR TO matches the *entire*
+        // string (unlike `~`, which does substring matching), so anchor the
+        // translation with ^...$ to preserve whole‑string semantics.
+        const regexPattern = similarToRegex(rawPattern, esc);
+        replacement = `${lhsExpr} REGEXP '^(${regexPattern})$' /* SIMILAR TO → REGEXP; ensure REGEXP function is registered */`;
       }
-      // Complex pattern — convert to REGEXP
-      const regexPattern = similarToRegex(rawPattern, esc);
-      return `${lhsExpr} REGEXP '${regexPattern}' /* SIMILAR TO → REGEXP; ensure REGEXP function is registered */`;
+      break;
     }
 
     // ── ~ (regex match) — needs REGEXP udf ─────────────────────
     case '~': {
-      return `${lhsExpr} REGEXP ${rhsPattern} /* requires registered REGEXP function */`;
+      replacement = `${lhsExpr} REGEXP ${rhsPattern} /* requires registered REGEXP function */`;
+      break;
     }
 
     case '~*': {
-      return `${lhsExpr} REGEXP ${rhsPattern} /* case‑insensitive REGEXP; requires registered REGEXP function */`;
+      // Case‑insensitive regex. SQLite's `REGEXP` operator is bound to the
+      // single case‑sensitive `regexp(pattern, value)` function and JS RegExp
+      // does not support inline flags, so route through the dedicated
+      // case‑insensitive `regexp_isens` function instead.
+      replacement = `regexp_isens(${rhsPattern}, ${lhsExpr}) /* case‑insensitive REGEXP; requires registered regexp_isens function */`;
+      break;
     }
 
     case '!~': {
-      return `NOT (${lhsExpr} REGEXP ${rhsPattern}) /* requires registered REGEXP function */`;
+      replacement = `NOT (${lhsExpr} REGEXP ${rhsPattern}) /* requires registered REGEXP function */`;
+      break;
     }
 
     case '!~*': {
-      return `NOT (${lhsExpr} REGEXP ${rhsPattern}) /* case‑insensitive REGEXP; requires registered REGEXP function */`;
+      replacement = `NOT (regexp_isens(${rhsPattern}, ${lhsExpr})) /* case‑insensitive REGEXP; requires registered regexp_isens function */`;
+      break;
     }
 
     default:
       // Unknown — return the original LHS + operator + RHS unchanged
-      return `${lhsExpr} ${tag} ${rhsPattern}`;
+      replacement = `${lhsExpr} ${tag} ${rhsPattern}`;
   }
+
+  // A `NOT <operator>` keyword prefix (e.g. `NOT ILIKE`) negates the whole
+  // predicate. Apply it by wrapping the positive form (which never carries a
+  // built‑in `!` prefix, so this is safe).
+  if (negated) {
+    replacement = `NOT (${replacement})`;
+  }
+
+  return replacement;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -632,7 +686,7 @@ export function rewritePGPattern(sql: string): PatternResult {
     // Set lastEnd to the end of the original RHS + any ESCAPE clause
     let rhsEnd = range.rhsEnd;
     const afterRhs = trimmed.substring(rhsEnd).trimStart();
-    const escMatch = afterRhs.match(/^ESCAPE\s+('.)'\s*/i);
+    const escMatch = afterRhs.match(/^ESCAPE\s+'([^'])'\s*/i);
     if (escMatch) {
       rhsEnd += trimmed.substring(rhsEnd).length - afterRhs.length + escMatch[0].length;
     }
@@ -696,7 +750,7 @@ export function rewritePGPattern(sql: string): PatternResult {
  * ```
  */
 export function registerRegexpFunction(db: any): void {
-  if (typeof db.function !== 'function') {
+  if (typeof db?.function !== 'function') {
     logger.error(
       'Provided database instance does not expose a `.function()` method. ' +
       'REGEXP registration requires better-sqlite3 or a compatible binding.',
@@ -704,8 +758,10 @@ export function registerRegexpFunction(db: any): void {
     return;
   }
 
+  const opts = { deterministic: true } as const;
+
   // Case‑sensitive REGEXP (~)
-  db.function('regexp', 2, (pattern: string, value: string) => {
+  db.function('regexp', opts, (pattern: string, value: string) => {
     if (value == null) return 0;
     try {
       const re = new RegExp(pattern);
@@ -741,15 +797,17 @@ export function registerRegexpFunction(db: any): void {
  * ```
  */
 export function registerRegexpFunctionDual(db: any): void {
-  if (typeof db.function !== 'function') {
+  if (typeof db?.function !== 'function') {
     logger.error(
       'Provided database instance does not expose a `.function()` method.',
     );
     return;
   }
 
+  const opts = { deterministic: true } as const;
+
   // Case‑sensitive (for `~` and `!~` operators)
-  db.function('regexp', 2, (pattern: string, value: string) => {
+  db.function('regexp', opts, (pattern: string, value: string) => {
     if (value == null) return 0;
     try {
       const re = new RegExp(pattern);
@@ -761,7 +819,7 @@ export function registerRegexpFunctionDual(db: any): void {
   });
 
   // Case‑insensitive (for `~*` and `!~*` operators)
-  db.function('regexp_isens', 2, (pattern: string, value: string) => {
+  db.function('regexp_isens', opts, (pattern: string, value: string) => {
     if (value == null) return 0;
     try {
       const re = new RegExp(pattern, 'i');
@@ -802,7 +860,13 @@ export function registerRegexpFunctionDual(db: any): void {
 export function rewriteAndRegister(sql: string, db: any): PatternResult {
   const result = rewritePGPattern(sql);
 
-  if (result.patterns.some((p) => p === '~' || p === '~*' || p === '!~' || p === '!~*')) {
+  const hasCaseInsensitive = result.patterns.some((p) => p === '~*' || p === '!~*');
+  const hasRegex = result.patterns.some((p) => p === '~' || p === '~*' || p === '!~' || p === '!~*');
+
+  if (hasCaseInsensitive) {
+    // Need both the case‑sensitive `regexp` and case‑insensitive `regexp_isens`.
+    registerRegexpFunctionDual(db);
+  } else if (hasRegex) {
     registerRegexpFunction(db);
   }
 
