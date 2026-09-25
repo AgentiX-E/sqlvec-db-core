@@ -25,6 +25,7 @@
 
 import { PinoLogger } from '../logger/PinoLogger';
 import { protectSQL } from './LiteralProtectionLayer';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('DistinctOnRewriter');
 
@@ -45,36 +46,25 @@ export interface DistinctOnResult {
 
 /**
  * Split a comma-separated expression list at top-level commas only.
- * Respects nested parentheses to avoid splitting inside function arguments
- * or subqueries.
+ * Respects nested parentheses and skips over string literals, quoted
+ * identifiers, dollar-quoted strings, and comments so that a `,` inside any of
+ * them is never treated as a delimiter.
  */
 function splitTopLevelCommas(s: string): string[] {
   const parts: string[] = [];
   let depth = 0;
-  let inString = false;
-  let stringChar = '';
   let current = '';
   let i = 0;
 
   while (i < s.length) {
+    const skip = skipSqlLiteral(s, i);
+    if (skip !== -1) {
+      current += s.slice(i, skip);
+      i = skip;
+      continue;
+    }
+
     const ch = s[i];
-
-    if (inString) {
-      current += ch;
-      if (ch === stringChar) {
-        inString = false;
-      }
-      i++;
-      continue;
-    }
-
-    if (ch === "'" || ch === '"') {
-      current += ch;
-      inString = true;
-      stringChar = ch;
-      i++;
-      continue;
-    }
 
     if (ch === '(') {
       depth++;
@@ -111,13 +101,21 @@ function splitTopLevelCommas(s: string): string[] {
 
 /**
  * Find the matching closing parenthesis, given the position of the opening '('.
- * Returns the index of the matching ')'.
+ * Returns the index of the matching ')'. String literals, quoted identifiers,
+ * dollar-quoted strings, and comments are skipped so their parentheses never
+ * affect the depth count.
  */
 function findMatchingClose(sql: string, openPos: number): number {
   let depth = 1;
   let i = openPos + 1;
 
   while (i < sql.length && depth > 0) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip;
+      continue;
+    }
+
     if (sql[i] === '(') depth++;
     else if (sql[i] === ')') depth--;
     if (depth > 0) i++;
@@ -127,20 +125,56 @@ function findMatchingClose(sql: string, openPos: number): number {
 }
 
 /**
- * Extract the content inside `DISTINCT ON (...)`.
+ * Extract the content inside a TOP-LEVEL `DISTINCT ON (...)`.
  * Returns the raw content string and the position of the closing ')'.
- * Returns `null` if DISTINCT ON is not found.
+ * Returns `null` if DISTINCT ON is not found, or if the DISTINCT ON is nested
+ * inside a subquery (i.e. an unclosed `(` precedes it), which this regex-based
+ * rewriter does not support — the caller then leaves the statement unchanged
+ * rather than emitting a malformed rewrite.
  */
 function extractDistinctOnContent(sql: string): { content: string; closePos: number } | null {
   const regex = /\bDISTINCT\s+ON\s*\(/i;
   const match = regex.exec(sql);
   if (!match) return null;
 
+  // If an unclosed parenthesis (or dollar-quote/string that is not yet closed)
+  // precedes DISTINCT ON, it is nested inside a subquery. Only a top-level
+  // DISTINCT ON is rewritable here; otherwise the outer SELECT wrapper would be
+  // misparsed into the inner body, producing unbalanced parentheses.
+  if (hasUnclosedParenBefore(sql, match.index)) {
+    return null;
+  }
+
   const openPos = match.index + match[0].length - 1; // position of '('
   const closePos = findMatchingClose(sql, openPos);
   const content = sql.substring(openPos + 1, closePos);
 
   return { content, closePos };
+}
+
+/**
+ * Return true if the SQL prefix up to (but not including) `pos` contains an
+ * unclosed `(` at any point — i.e. `pos` sits inside a parenthesized subquery or
+ * function-call argument list. String literals, quoted identifiers,
+ * dollar-quoted strings, and comments are skipped.
+ */
+function hasUnclosedParenBefore(sql: string, pos: number): boolean {
+  let depth = 0;
+  let i = 0;
+  while (i < pos) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      // A literal that extends past `pos` means `pos` is inside it, but we only
+      // reach here for a DISTINCT ON keyword match, which cannot be a literal;
+      // still clamp so the loop does not run past the boundary.
+      i = Math.min(skip, pos);
+      continue;
+    }
+    if (sql[i] === '(') depth++;
+    else if (sql[i] === ')') depth--;
+    i++;
+  }
+  return depth > 0;
 }
 
 /**
@@ -578,8 +612,10 @@ export function rewriteDistinctOn(sql: string): DistinctOnResult {
   // ── 2. Extract DISTINCT ON expressions ─────────────────────────
   const doInfo = extractDistinctOnContent(afterWith);
   if (!doInfo) {
-    // This should never happen because detectDistinctOn returned true
-    logger.warn({ sql: trimmed }, 'DistinctOnRewriter: DISTINCT ON detected but content extraction failed');
+    // Either DISTINCT ON is nested inside a subquery (which this rewriter does
+    // not support), or the keyword only appeared inside a literal that protectSQL
+    // did not cover. Leave the statement unchanged in either case.
+    logger.debug({ sql: trimmed }, 'DistinctOnRewriter: top-level DISTINCT ON not found — leaving unchanged');
     return { sql: trimmed, rewritten: false };
   }
 

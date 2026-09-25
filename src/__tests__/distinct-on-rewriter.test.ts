@@ -218,5 +218,70 @@ describe('DistinctOnRewriter', () => {
       const result = rewriteDistinctOn('SELECT DISTINCT ON (id) name');
       expect(result.rewritten).toBe(true);
     });
+
+    it('leaves a DISTINCT ON nested inside a subquery unchanged (#228)', () => {
+      const result = rewriteDistinctOn(
+        'SELECT * FROM (SELECT DISTINCT ON (a) b FROM t) AS sub',
+      );
+      expect(result.rewritten).toBe(false);
+      expect(result.sql).toBe('SELECT * FROM (SELECT DISTINCT ON (a) b FROM t) AS sub');
+    });
+
+    it('leaves a DISTINCT ON nested in a subquery with an outer WHERE unchanged (#228)', () => {
+      const result = rewriteDistinctOn(
+        'SELECT x FROM (SELECT DISTINCT ON (a) b FROM t) AS sub WHERE x > 0',
+      );
+      expect(result.rewritten).toBe(false);
+    });
+
+    it('preserves a string containing a closing paren inside DISTINCT ON (#229)', () => {
+      const result = rewriteDistinctOn(
+        "SELECT DISTINCT ON (CASE WHEN a=')' THEN 1 ELSE 0 END) b FROM t",
+      );
+      expect(result.rewritten).toBe(true);
+      expect(result.sql).toContain("PARTITION BY CASE WHEN a=')' THEN 1 ELSE 0 END");
+    });
+
+    it('preserves a function call with a string containing parens inside DISTINCT ON (#229)', () => {
+      const result = rewriteDistinctOn(
+        "SELECT DISTINCT ON (f(a, ')', b)) col FROM t",
+      );
+      expect(result.rewritten).toBe(true);
+      expect(result.sql).toContain("PARTITION BY f(a, ')', b)");
+    });
+
+    it('does not split a top-level comma list on a comma inside a string (#230)', () => {
+      const result = rewriteDistinctOn(
+        "SELECT DISTINCT ON (a, b) c FROM t",
+      );
+      expect(result.rewritten).toBe(true);
+      expect(result.sql).toContain('PARTITION BY a, b ORDER BY a, b');
+    });
+
+    it('leaves a subquery DISTINCT ON unchanged when a string precedes it (#228)', () => {
+      const result = rewriteDistinctOn(
+        "SELECT ')' FROM (SELECT DISTINCT ON (a) b FROM t) sub",
+      );
+      expect(result.rewritten).toBe(false);
+    });
+
+    it('leaves a subquery DISTINCT ON unchanged when a balanced paren precedes it (#228)', () => {
+      const result = rewriteDistinctOn(
+        'SELECT (1) FROM (SELECT DISTINCT ON (a) b FROM t) sub',
+      );
+      expect(result.rewritten).toBe(false);
+    });
+
+    it('leaves a subquery DISTINCT ON unchanged when a comment precedes it (#228)', () => {
+      const result = rewriteDistinctOn(
+        'SELECT /* c */ * FROM (SELECT DISTINCT ON (a) b FROM t) sub',
+      );
+      expect(result.rewritten).toBe(false);
+    });
+
+    it('leaves an empty DISTINCT ON expression list unchanged', () => {
+      const result = rewriteDistinctOn('SELECT DISTINCT ON () b FROM t');
+      expect(result.rewritten).toBe(false);
+    });
   });
 });

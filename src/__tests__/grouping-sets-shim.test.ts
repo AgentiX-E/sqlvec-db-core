@@ -234,6 +234,17 @@ describe('rewriteGroupingSets — fallback and error paths', () => {
     expect(rewritten).toBe(true);
     expect(sql).not.toContain('GROUPING SETS');
   });
+
+  it('leaves a GROUPING SETS without a preceding GROUP BY unchanged', () => {
+    // GROUPING SETS is detected, but expandGroupingSets requires `GROUP BY
+    // GROUPING SETS`; without GROUP BY the inner keyword search misses, so the
+    // statement is left unchanged rather than mis-expanded.
+    const { sql, rewritten } = rewriteGroupingSets(
+      'SELECT a FROM t GROUPING SETS ((a))',
+    );
+    expect(rewritten).toBe(false);
+    expect(sql).toBe('SELECT a FROM t GROUPING SETS ((a))');
+  });
 });
 
 describe('_findMatchingCloseParen — literal skip integration', () => {

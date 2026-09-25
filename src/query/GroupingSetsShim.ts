@@ -44,6 +44,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral, isInsideLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('GroupingSetsShim');
 
@@ -172,10 +173,13 @@ export function rewriteGroupingSets(sql: string): GroupingSetsResult {
 
   // ── Phase 2: Check if CUBE or ROLLUP (expand to GROUPING SETS first) ──
   // We expand CUBE and ROLLUP so we can UNION ALL them properly and
-  // support GROUPING() function transformation.
+  // support GROUPING() function transformation. A single literal-aware keyword
+  // search locates the match index, which is passed down so the expand helper
+  // does not re-scan.
 
-  if (_testOutsideLiterals(working, CUBE_PATTERN)) {
-    const expanded = expandCubeOrRollup(working, 'CUBE');
+  const cubeIdx = _findKeywordIndexOutsideLiterals(working, CUBE_PATTERN);
+  if (cubeIdx !== -1) {
+    const expanded = expandCubeOrRollup(working, 'CUBE', cubeIdx);
     if (expanded !== null) {
       return { sql: expanded, rewritten: true };
     }
@@ -184,8 +188,9 @@ export function rewriteGroupingSets(sql: string): GroupingSetsResult {
     return { sql: working, rewritten: false };
   }
 
-  if (_testOutsideLiterals(working, ROLLUP_PATTERN)) {
-    const expanded = expandCubeOrRollup(working, 'ROLLUP');
+  const rollupIdx = _findKeywordIndexOutsideLiterals(working, ROLLUP_PATTERN);
+  if (rollupIdx !== -1) {
+    const expanded = expandCubeOrRollup(working, 'ROLLUP', rollupIdx);
     if (expanded !== null) {
       return { sql: expanded, rewritten: true };
     }
@@ -193,39 +198,29 @@ export function rewriteGroupingSets(sql: string): GroupingSetsResult {
     return { sql: working, rewritten: false };
   }
 
-  // ── Phase 3: Check for GROUPING SETS ──
+  // ── Phase 3: Locate GROUPING SETS ──
+  // A single literal-aware keyword search subsumes both the previous
+  // "detect" (`_testOutsideLiterals`) and "locate" (`_findKeywordIndexOutsideLiterals`)
+  // steps, which were redundant (identical patterns). When no GROUPING SETS
+  // keyword exists, we either transform a standalone GROUPING() function or
+  // leave the statement unchanged.
 
-  const hasGroupingSetsKeyword = _testOutsideLiterals(working, GROUPING_SETS_KEYWORD_PATTERN);
-  if (!hasGroupingSetsKeyword && !hasGroupingFunc) {
-    return {
-      sql: working,
-      rewritten: false,
-    };
+  const groupingSetsIdx = _findKeywordIndexOutsideLiterals(working, /\bGROUPING\s+SETS\s*\(/i);
+  if (groupingSetsIdx === -1) {
+    if (hasGroupingFunc) {
+      // Only GROUPING() function, no GROUPING SETS — transform function calls
+      working = transformGroupingFunc(working);
+      return { sql: working, rewritten: true };
+    }
+    return { sql: working, rewritten: false };
   }
 
   logger.debug({ sql: working }, 'GROUPING SETS detected — rewriting for SQLite compatibility');
 
-  // ── Phase 4: Determine rewrite strategy ──
-
-  if (hasGroupingFunc && !hasGroupingSetsKeyword) {
-    // Only GROUPING() function, no GROUPING SETS — transform function calls
-    working = transformGroupingFunc(working);
-    return {
-      sql: working,
-      rewritten: true,
-    };
-  }
-
-  const groupingSetsIdx = _findKeywordIndexOutsideLiterals(working, /\bGROUPING\s+SETS\s*\(/i);
-  if (groupingSetsIdx === -1) {
-    return { sql: working, rewritten: false };
-  }
-
-  const parenStart = findCharIndex(working, '(', groupingSetsIdx);
-  if (parenStart === -1) {
-    logger.warn({ sql: working }, 'GROUPING SETS found but no opening parenthesis — cannot rewrite');
-    return { sql: working, rewritten: false };
-  }
+  // The matched pattern (`\bGROUPING\s+SETS\s*\() ends with an unescaped `(`
+  // immediately following GROUPING SETS modulo whitespace, so the first `(`
+  // at or after `groupingSetsIdx` is guaranteed to exist (indexOf never -1 here).
+  const parenStart = working.indexOf('(', groupingSetsIdx);
 
   const parenEnd = findMatchingCloseParen(working, parenStart);
   if (parenEnd === -1) {
@@ -273,95 +268,20 @@ export function rewriteGroupingSets(sql: string): GroupingSetsResult {
 // ── Internal Helpers (exported for testing) ───────────────────────
 
 /**
- * Skip over a SQL literal, quoted identifier, dollar-quoted string, or
- * comment starting at `pos`, returning the index just past it (or `-1` if
- * the character at `pos` does not begin one of these constructs).
- *
- * This is the foundation of literal-aware scanning: bare parenthesis
- * counting and comma splitting would otherwise be fooled by `)`, `(`, or
- * `,` characters that appear *inside* string literals or comments.
+ * Re-export of the shared literal scanner's `skipSqlLiteral`. Kept under the
+ * `_`-prefixed name for API compatibility with this module's existing exports.
  *
  * @internal
  */
-export function _skipSqlLiteral(sql: string, pos: number): number {
-  const c = sql[pos];
-  const len = sql.length;
-
-  // Line comment: `--` to end of line.
-  if (c === '-' && sql[pos + 1] === '-') {
-    let j = pos + 2;
-    while (j < len && sql[j] !== '\n') j++;
-    return j;
-  }
-
-  // Block comment: `/*` to `*/`.
-  if (c === '/' && sql[pos + 1] === '*') {
-    const end = sql.indexOf('*/', pos + 2);
-    return end === -1 ? len : end + 2;
-  }
-
-  // Single-quoted string.
-  if (c === "'") {
-    let j = pos + 1;
-    while (j < len) {
-      if (sql[j] === '\\' && j + 1 < len) {
-        j += 2; // E''-style backslash escape consumes the next char too.
-        continue;
-      }
-      if (sql[j] === "'") {
-        if (sql[j + 1] === "'") { j += 2; continue; } // doubled '' escape
-        return j + 1;
-      }
-      j++;
-    }
-    return len; // unterminated string
-  }
-
-  // Double-quoted identifier.
-  if (c === '"') {
-    let j = pos + 1;
-    while (j < len) {
-      if (sql[j] === '"') {
-        if (sql[j + 1] === '"') { j += 2; continue; } // doubled "" escape
-        return j + 1;
-      }
-      j++;
-    }
-    return len; // unterminated identifier
-  }
-
-  // Dollar-quoted string: $$ ... $$ or $tag$ ... $tag$.
-  if (c === '$') {
-    const m = sql.slice(pos).match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/);
-    if (m) {
-      const tag = m[0];
-      const close = sql.indexOf(tag, pos + tag.length);
-      return close === -1 ? len : close + tag.length;
-    }
-    return -1; // a bare $ that is not a dollar-quote opener
-  }
-
-  return -1;
-}
+export const _skipSqlLiteral = skipSqlLiteral;
 
 /**
- * Return true if `pos` is inside a string literal, quoted identifier,
- * dollar-quoted string, or comment (i.e. the character there is not real SQL).
+ * Re-export of the shared literal scanner's `isInsideLiteral`. Kept under the
+ * `_`-prefixed name for API compatibility with this module's existing exports.
+ *
+ * @internal
  */
-export function _isInsideLiteral(sql: string, pos: number): boolean {
-  let i = 0;
-  const len = sql.length;
-  while (i < pos && i < len) {
-    const skip = _skipSqlLiteral(sql, i);
-    if (skip === -1) {
-      i++;
-      continue;
-    }
-    if (pos < skip) return true;
-    i = skip;
-  }
-  return false;
-}
+export const _isInsideLiteral = isInsideLiteral;
 
 /**
  * Return true if `regex` matches the SQL text *outside* any string literal,
@@ -379,7 +299,7 @@ export function _testOutsideLiterals(sql: string, regex: RegExp): boolean {
   const rg = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : regex.flags + 'g');
   let m: RegExpExecArray | null;
   while ((m = rg.exec(sql)) !== null) {
-    if (!_isInsideLiteral(sql, m.index)) {
+    if (!isInsideLiteral(sql, m.index)) {
       return true;
     }
     if (m.index === rg.lastIndex) rg.lastIndex++; // avoid zero-width infinite loop
@@ -398,7 +318,7 @@ export function _findKeywordIndexOutsideLiterals(sql: string, regex: RegExp): nu
   const rg = new RegExp(regex.source, regex.flags.includes('g') ? regex.flags : regex.flags + 'g');
   let m: RegExpExecArray | null;
   while ((m = rg.exec(sql)) !== null) {
-    if (!_isInsideLiteral(sql, m.index)) {
+    if (!isInsideLiteral(sql, m.index)) {
       return m.index;
     }
     if (m.index === rg.lastIndex) rg.lastIndex++;
@@ -671,12 +591,13 @@ function splitSuffix(suffix: string): { having: string; orderLimit: string } {
 
 /**
  * Expand GROUP BY CUBE(...) or GROUP BY ROLLUP(...) into UNION ALL queries.
+ *
+ * `gsStart` is the already-located index of the CUBE/ROLLUP keyword (the caller
+ * resolved it via a literal-aware search, so it is guaranteed valid).
  */
-function expandCubeOrRollup(sql: string, type: 'CUBE' | 'ROLLUP'): string | null {
+function expandCubeOrRollup(sql: string, type: 'CUBE' | 'ROLLUP', gsStart: number): string | null {
   // Find GROUP BY CUBE( or GROUP BY ROLLUP( outside literals
   const pattern = type === 'CUBE' ? CUBE_PATTERN : ROLLUP_PATTERN;
-  const gsStart = _findKeywordIndexOutsideLiterals(sql, pattern);
-  if (gsStart === -1) return null;
 
   const m = sql.slice(gsStart).match(pattern)!;
   const afterKeyword = gsStart + m[0].length;
@@ -831,20 +752,6 @@ function stripGroupByGroupingSets(working: string, groupingSetsIdx: number, grou
 
   logger.debug({ sql: working }, 'GROUP BY GROUPING SETS clause completely stripped — full aggregation mode (fallback)');
   return { sql: working, rewritten: true };
-}
-
-/**
- * Find the index of a keyword regex match in the string.
- */
-function findKeywordIndex(sql: string, pattern: RegExp): number {
-  return _findKeywordIndex(sql, pattern);
-}
-
-/**
- * Find the index of the first occurrence of character `ch` at or after `fromIndex`.
- */
-function findCharIndex(sql: string, ch: string, fromIndex: number): number {
-  return _findCharIndex(sql, ch, fromIndex);
 }
 
 /**
