@@ -62,8 +62,9 @@ export function detectSetMaxDepth(sql: string): number | null {
   if (!trimmed.toUpperCase().startsWith('SET ')) return null;
   const match = trimmed.match(SET_MAX_DEPTH_PATTERN);
   if (!match) return null;
+  // match[1] is guaranteed to be a run of digits by the capture group, so
+  // parseInt can never yield NaN here.
   const value = parseInt(match[1], 10);
-  if (isNaN(value)) return null;
   return Math.max(MIN_DEPTH, Math.min(MAX_DEPTH, value));
 }
 
@@ -94,6 +95,67 @@ interface ParsedCte {
 }
 
 /**
+ * Return the index just past a SQL literal/comment starting at `i`, or `i` if
+ * the character at `i` does not begin a literal. Recognizes single-quoted
+ * strings (`''` and `E''` backslash escapes), double-quoted identifiers
+ * (`""`), dollar-quoted strings (`$$...$$` / `$tag$...$tag$`), line comments
+ * (`--`), and block comments (`/* *\/`). This lets paren-balancing and keyword
+ * scanning ignore parentheses and keywords that only occur inside literals.
+ */
+function skipSqlLiteral(sql: string, i: number): number {
+  const len = sql.length;
+  const c = sql[i];
+
+  if (c === '-' && sql[i + 1] === '-') {
+    let j = i + 2;
+    while (j < len && sql[j] !== '\n') j++;
+    return j;
+  }
+
+  if (c === '/' && sql[i + 1] === '*') {
+    let j = i + 2;
+    while (j < len && !(sql[j] === '*' && sql[j + 1] === '/')) j++;
+    return j < len ? j + 2 : len;
+  }
+
+  if (c === "'") {
+    let j = i + 1;
+    while (j < len) {
+      if (sql[j] === '\\' && j + 1 < len) { j += 2; continue; }
+      if (sql[j] === "'") {
+        if (sql[j + 1] === "'") { j += 2; continue; }
+        return j + 1;
+      }
+      j++;
+    }
+    return j;
+  }
+
+  if (c === '"') {
+    let j = i + 1;
+    while (j < len) {
+      if (sql[j] === '"') {
+        if (sql[j + 1] === '"') { j += 2; continue; }
+        return j + 1;
+      }
+      j++;
+    }
+    return j;
+  }
+
+  if (c === '$') {
+    const tagMatch = sql.slice(i).match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/);
+    if (tagMatch) {
+      const tag = tagMatch[0];
+      const close = sql.indexOf(tag, i + tag.length);
+      return close === -1 ? len : close + tag.length;
+    }
+  }
+
+  return i;
+}
+
+/**
  * Parse a recursive CTE into its components.
  * Uses paren balancing to find the CTE definition boundaries.
  */
@@ -109,10 +171,17 @@ function parseCteStructure(sql: string): ParsedCte | null {
   const cteName = m[2];
   const cteCols = (m[3] || '').trim();
 
-  // Balance parens to find the closing paren of the CTE body
+  // Balance parens to find the closing paren of the CTE body, skipping
+  // parentheses that occur inside string literals, quoted identifiers,
+  // dollar-quotes, or comments.
   let depth = 1;
   let closePos = -1;
   for (let i = headerEnd; i < trimmed.length; i++) {
+    const skip = skipSqlLiteral(trimmed, i);
+    if (skip > i) {
+      i = skip - 1;
+      continue;
+    }
     if (trimmed[i] === '(') depth++;
     else if (trimmed[i] === ')') {
       depth--;
@@ -128,7 +197,7 @@ function parseCteStructure(sql: string): ParsedCte | null {
   const ua = body.match(uaRe);
   if (!ua) return null;
 
-  const uaPos = (ua.index || 0);
+  const uaPos = ua.index!;
   const anchorSql = body.substring(0, uaPos).trim();
   const recursiveSql = body.substring(uaPos + ua[0].length).trim();
   const outerSql = trimmed.substring(closePos + 1).trim();
@@ -139,43 +208,73 @@ function parseCteStructure(sql: string): ParsedCte | null {
 }
 
 /**
- * Insert a column expression into a SELECT list (before FROM, WHERE, etc.)
- * Returns the modified SQL.
- */
-function injectColumnInSelect(sql: string, colExpr: string): string {
-  // Find the first FROM keyword that's after the SELECT list
-  // Strategy: find SELECT, then find the next FROM/WHERE/GROUP/HAVING/ORDER/LIMIT
-  const selectRe = /^\s*SELECT\s+/i;
-  if (!selectRe.test(sql)) return sql;
-
-  // Find the end of the SELECT column list — look for the first clause keyword
-  const clauseRe = /\b(FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|WINDOW)\b/i;
-  const clauseMatch = sql.match(clauseRe);
-  
-  if (clauseMatch && clauseMatch.index !== undefined) {
-    // Insert before the clause keyword
-    return sql.substring(0, clauseMatch.index) + ', ' + colExpr + ' ' + sql.substring(clauseMatch.index);
-  }
-  
-  // No clause found — just append
-  return sql + ', ' + colExpr;
-}
-
-/**
  * Add a condition to a WHERE clause, or add a WHERE clause if none exists.
  */
 function addCondition(sql: string, condition: string): string {
-  const whereRe = /\bWHERE\b/i;
-  if (whereRe.test(sql)) {
-    return sql.replace(whereRe, `WHERE ${condition} AND `);
+  const wherePos = findKeywordByRe(sql, /\bWHERE\b/i, 0);
+  if (wherePos !== -1) {
+    // Insert the new condition right after WHERE, preserving the existing
+    // condition that follows (trimmed to avoid double spaces).
+    const rest = sql.substring(wherePos + 5).replace(/^\s+/, '');
+    return `${sql.substring(0, wherePos)}WHERE ${condition} AND ${rest}`;
   }
   // Find a good place to add WHERE — after FROM clause but before GROUP/ORDER/LIMIT
-  const delimRe = /\b(GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|WINDOW)\b/i;
-  const delim = sql.match(delimRe);
-  if (delim && delim.index !== undefined) {
-    return sql.substring(0, delim.index) + ` WHERE ${condition} ` + sql.substring(delim.index);
+  const delimPos = findKeywordByRe(sql, POST_FROM_CLAUSE_RE, 0);
+  if (delimPos !== -1) {
+    return sql.substring(0, delimPos) + ` WHERE ${condition} ` + sql.substring(delimPos);
   }
   return sql + ` WHERE ${condition}`;
+}
+
+const CLAUSE_KEYWORD_RE = /\b(FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|WINDOW)\b/i;
+
+/**
+ * Clause keywords that may FOLLOW a FROM sub-clause — a WHERE condition must be
+ * inserted BEFORE these (and thus after FROM), so they exclude FROM itself.
+ */
+const POST_FROM_CLAUSE_RE = /\b(WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|WINDOW)\b/i;
+
+/**
+ * Find the index of the first keyword matching `pattern` at or after `from`,
+ * ignoring occurrences inside string literals, quoted identifiers,
+ * dollar-quotes, and comments. Returns -1 when none is found.
+ */
+function findKeywordByRe(sql: string, pattern: RegExp, from: number): number {
+  // Clone with the global flag so RegExp#exec can iterate all matches.
+  const re = new RegExp(pattern.source, pattern.flags.replace(/g/g, '') + 'g');
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(sql)) !== null) {
+    if (m.index < from) continue;
+    if (isInsideLiteral(sql, m.index)) continue;
+    return m.index;
+  }
+  return -1;
+}
+
+/**
+ * Find the index of the first clause keyword (FROM/WHERE/GROUP BY/etc.) at or
+ * after `from`, ignoring occurrences inside literals/comments.
+ */
+function findClauseKeyword(sql: string, from: number): number {
+  return findKeywordByRe(sql, CLAUSE_KEYWORD_RE, from);
+}
+
+/**
+ * Determine whether `pos` lies inside a string literal, quoted identifier,
+ * dollar-quote, or comment by scanning the SQL from the start (re-skipping
+ * literals). This is O(n) per call, which is acceptable for the short CTE
+ * bodies this module rewrites.
+ */
+function isInsideLiteral(sql: string, pos: number): boolean {
+  for (let i = 0; i < pos; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip > i) {
+      if (pos < skip) return true;
+      i = skip - 1;
+    }
+  }
+  return false;
 }
 
 // ──────────────────────────────────────────────
@@ -216,22 +315,15 @@ export function injectCteDepthLimit(
   const newCols = cteCols ? `${cteCols}, __sqldepth` : '__sqldepth';
 
   // Rewrite anchor member: add `, 1 AS __sqldepth` to SELECT
-  let newAnchor = rewriteSelectForDepth(anchorSql, '1', true);
-  if (newAnchor === anchorSql) {
-    // Fallback: inject manually
-    newAnchor = injectColumnInSelect(anchorSql, '1 AS __sqldepth');
-  }
+  const newAnchor = rewriteSelectForDepth(anchorSql, '1');
 
   // Rewrite recursive member: add `, __sqldepth+1 AS __sqldepth` + WHERE __sqldepth < N
-  let newRecursive = rewriteSelectForDepth(recursiveSql, '__sqldepth+1', true);
-  if (newRecursive === recursiveSql) {
-    newRecursive = injectColumnInSelect(recursiveSql, '__sqldepth+1 AS __sqldepth');
-  }
+  const newRecursive = rewriteSelectForDepth(recursiveSql, '__sqldepth+1');
   // Add depth limit condition
-  newRecursive = addCondition(newRecursive, `__sqldepth < ${depth}`);
+  const finalRecursive = addCondition(newRecursive, `__sqldepth < ${depth}`);
 
   // Rebuild: prefix + new column list + new body + outer query
-  const newBody = `${newAnchor}\nUNION ALL\n${newRecursive}`;
+  const newBody = `${newAnchor}\nUNION ALL\n${finalRecursive}`;
   const rewritten = `WITH RECURSIVE ${cteName}(${newCols}) AS (\n${newBody}\n) ${outerSql}`;
 
   logger.debug(
@@ -243,27 +335,27 @@ export function injectCteDepthLimit(
 }
 
 /**
- * Rewrite a SELECT statement to add a depth column.
- * Naive approach: find the first SELECT, then the first FROM, and insert.
+ * Rewrite a SELECT statement to append a depth column (aliased `__sqldepth`).
+ * The column is added to the end of the SELECT list, before the first
+ * clause keyword (FROM/WHERE/GROUP BY/…), or appended if there is no clause.
+ * Non-SELECT members (e.g. a `VALUES` anchor) are returned unchanged.
  */
-function rewriteSelectForDepth(sql: string, depthExpr: string, addAlias: boolean): string {
+function rewriteSelectForDepth(sql: string, depthExpr: string): string {
   const selectMatch = sql.match(/^\s*SELECT\s+/i);
   if (!selectMatch) return sql;
 
   const selectEnd = (selectMatch.index || 0) + selectMatch[0].length;
-  const rest = sql.substring(selectEnd);
 
-  // Find the first clause keyword
-  const clauseRe = /\b(FROM|WHERE|GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET)\b/i;
-  const clauseMatch = rest.match(clauseRe);
+  // Find the first clause keyword (literal-aware)
+  const clausePos = findClauseKeyword(sql, selectEnd);
 
-  if (clauseMatch && clauseMatch.index !== undefined) {
-    const aliasClause = addAlias ? `AS __sqldepth` : '';
-    const inject = `, ${depthExpr} ${aliasClause}`.trim();
-    return sql.substring(0, selectEnd) + 
-           rest.substring(0, clauseMatch.index) + inject + ' ' +
-           rest.substring(clauseMatch.index);
+  if (clausePos !== -1) {
+    const inject = `${depthExpr} AS __sqldepth`.trim();
+    const cols = sql.substring(selectEnd, clausePos).replace(/\s+$/, '');
+    return `${sql.substring(0, selectEnd)}${cols}, ${inject} ${sql.substring(clausePos)}`;
   }
 
-  return sql; // Can't parse
+  // No clause — append the depth column directly after the SELECT list.
+  const cols = sql.substring(selectEnd).replace(/\s+$/, '');
+  return `${sql.substring(0, selectEnd)}${cols}, ${depthExpr} AS __sqldepth`.trim();
 }
