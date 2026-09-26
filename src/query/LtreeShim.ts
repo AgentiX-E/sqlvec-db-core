@@ -20,6 +20,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('LtreeShim');
 
@@ -274,36 +275,49 @@ export class LtreeShim {
   /**
    * Check if a path matches an lquery pattern (~ operator).
    * Supports:
-   *   - `*`  — matches any single label at that position
-   *   - `%`  — matches any depth (zero or more labels)
+   *   - `*`  — matches exactly one label at that position
+   *   - `%`  — matches zero or more labels (greedily, anchored)
    *   - exact label match
+   *
+   * The pattern is anchored to the whole path (PostgreSQL ltree `~` semantics):
+   * a match succeeds only if every label of the path is consumed.
+   * `%` may be followed by further pattern labels; it backtracks so that the
+   * remaining labels can still match the rest of the path.
    */
   static match(path: LtreePath, pattern: string): boolean {
     const parts = pattern.split('.');
 
-    // Handle any-depth wildcard
-    const hasAnyDepth = parts.includes('%');
-    if (hasAnyDepth) {
-      const fixedLabels = parts.filter(p => p !== '*' && p !== '%');
-      if (fixedLabels.length === 0) return true;
+    // Iterative matcher with backtracking for the `%` (zero-or-more) wildcard.
+    // We walk the pattern left-to-right against the path labels; `*` consumes
+    // exactly one label, `%` consumes zero or more labels (trying progressively
+    // longer spans via backtracking), and literal labels must match exactly.
+    const labels = path.labels;
+    const n = labels.length;
 
-      let pi = 0;
-      for (const label of path.labels) {
-        if (pi < fixedLabels.length && label.value === fixedLabels[pi]) {
-          pi++;
-        }
+    const matchFrom = (pi: number, li: number): boolean => {
+      if (pi === parts.length) {
+        return li === n; // consumed the whole pattern AND the whole path
       }
-      return pi === fixedLabels.length;
-    }
+      const part = parts[pi];
+      if (part === '%') {
+        // Match zero or more labels: try every span length [0 .. n-li].
+        for (let consumed = 0; li + consumed <= n; consumed++) {
+          if (matchFrom(pi + 1, li + consumed)) return true;
+        }
+        return false;
+      }
+      if (part === '*') {
+        // Exactly one label.
+        if (li >= n) return false;
+        return matchFrom(pi + 1, li + 1);
+      }
+      // Literal label.
+      if (li >= n) return false;
+      if (labels[li].value !== part) return false;
+      return matchFrom(pi + 1, li + 1);
+    };
 
-    // Exact length matching (with single-label wildcards)
-    if (parts.length !== path.depth) return false;
-
-    for (let i = 0; i < parts.length; i++) {
-      if (parts[i] === '*') continue;
-      if (path.labels[i].value !== parts[i]) return false;
-    }
-    return true;
+    return matchFrom(0, 0);
   }
 
   // ── LCA (Lowest Common Ancestor) ──────────────────────────────
@@ -337,6 +351,14 @@ export class LtreeShim {
    */
   static subltree(path: LtreePath, start: number, end?: number): LtreePath {
     return path.subltree(start, end);
+  }
+
+  /**
+   * Extract a subpath from `start`, taking `count` labels.
+   * Mirrors PostgreSQL's subpath(ltree, offset, len).
+   */
+  static subpath(path: LtreePath, start: number, count: number): LtreePath {
+    return path.subpath(start, count);
   }
 
   // ── Level ─────────────────────────────────────────────────────
@@ -378,11 +400,67 @@ export class LtreeShim {
 
   /**
    * Detect if a SQL statement contains ltree function calls.
+   * Skips string/identifier literals, quoted identifiers, and comments so that
+   * occurrences inside data or comments are not falsely reported.
    */
   static detectFunctions(sql: string): boolean {
-    const LTREE_FUNCS_RE =
-      /\b(ltree|ltree2text|ltree_in|nlevel|subltree|subpath|lquery|ltxtquery|lca)\s*\(/i;
-    return LTREE_FUNCS_RE.test(sql);
+    if (!sql || typeof sql !== 'string') return false;
+
+    const funcs = [
+      'ltree',
+      'ltree2text',
+      'ltree_in',
+      'nlevel',
+      'subltree',
+      'subpath',
+      'lquery',
+      'ltxtquery',
+      'lca',
+    ];
+
+    let i = 0;
+    const n = sql.length;
+    while (i < n) {
+      const ch = sql[i];
+
+      // Skip line/block comments.
+      if (ch === '-' && sql[i + 1] === '-') {
+        const nl = sql.indexOf('\n', i);
+        i = nl === -1 ? n : nl + 1;
+        continue;
+      }
+      if (ch === '/' && sql[i + 1] === '*') {
+        const close = sql.indexOf('*/', i + 2);
+        i = close === -1 ? n : close + 2;
+        continue;
+      }
+
+      // Skip string literals, quoted identifiers, and backtick identifiers.
+      if (ch === "'" || ch === '"' || ch === '`') {
+        const skip = skipSqlLiteral(sql, i);
+        i = skip === -1 ? n : skip + 1;
+        continue;
+      }
+
+      // Match a candidate identifier at the current position.
+      if (/[a-zA-Z_]/.test(ch)) {
+        let j = i + 1;
+        while (j < n && /[a-zA-Z0-9_]/.test(sql[j])) j++;
+        const word = sql.slice(i, j);
+        if (funcs.includes(word.toLowerCase())) {
+          // Require a following `(` (allow whitespace).
+          let k = j;
+          while (k < n && /\s/.test(sql[k])) k++;
+          if (k < n && sql[k] === '(') return true;
+        }
+        i = j;
+        continue;
+      }
+
+      i++;
+    }
+
+    return false;
   }
 
   /**
@@ -406,10 +484,10 @@ export class LtreeShim {
           args[2] !== undefined ? Number(args[2]) : undefined,
         );
       case 'subpath':
-        return LtreeShim.subltree(
+        return LtreeShim.subpath(
           args[0] as LtreePath,
           Number(args[1]),
-          args[2] !== undefined ? Number(args[2]) : undefined,
+          Number(args[2]),
         );
       case 'lca':
         return LtreeShim.lca(args[0] as LtreePath, args[1] as LtreePath);
@@ -447,13 +525,6 @@ function toLegacy(path: LtreePath): LegacyLtreeResult {
   };
 }
 
-function toLegacyOrError(val: unknown): unknown {
-  if (val instanceof LtreePath) {
-    return toLegacy(val);
-  }
-  return val;
-}
-
 /** @deprecated Use LtreeShim.ltree() / new LtreePath() instead */
 export function ltree(label: string): LegacyLtreeResult {
   return toLegacy(LtreePath.parse(label));
@@ -477,10 +548,10 @@ export function subltree(path: LtreePath | LegacyLtreeResult, start: number, end
   return toLegacy(p.subltree(start, end));
 }
 
-/** @deprecated Use LtreeShim.subltree() / path.subltree() instead */
+/** @deprecated Use LtreeShim.subpath() / path.subpath() instead */
 export function subpath(path: LtreePath | LegacyLtreeResult, start: number, count: number): LegacyLtreeResult {
   const p = path instanceof LtreePath ? path : LtreePath.parse(path.labels.join('.'));
-  return toLegacy(new LtreePath(p.labels.slice(start, start + count)));
+  return toLegacy(p.subpath(start, count));
 }
 
 /** @deprecated Use LtreeShim.ancestorOf() / path.isAncestorOf() instead */
