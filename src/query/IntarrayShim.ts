@@ -45,6 +45,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('IntarrayShim');
 
@@ -318,7 +319,7 @@ export function query_int(arr: number[], query: string): number[] {
   if (elements.length === 0) return [];
 
   // Parse the query as a set of conditions
-  const ast = parseQueryExpression(query);
+  const ast = _parseQueryExpression(query);
   if (!ast) return [];
 
   return arr.filter(v => evaluateQueryTree(ast, v));
@@ -348,8 +349,55 @@ type QueryNode = QueryBinOp | QueryUnaryOp | QueryLeaf;
 
 // ── Simple recursive descent parser for query_int ───────────────
 
-function parseQueryExpression(input: string): QueryNode | null {
-  const tokens = tokenizeQuery(input);
+export function _tokenizeQuery(input: string): RawToken[] {
+  const tokens: RawToken[] = [];
+  const trimmed = input.trim();
+  let i = 0;
+
+  while (i < trimmed.length) {
+    const ch = trimmed[i];
+
+    if (/\s/.test(ch)) {
+      i++;
+      continue;
+    }
+
+    if (ch === '(' || ch === ')') {
+      tokens.push({ type: 'paren', value: ch });
+      i++;
+      continue;
+    }
+
+    if (ch === '&' || ch === '|' || ch === '!') {
+      tokens.push({ type: 'op', value: ch });
+      i++;
+      continue;
+    }
+
+    if (/[0-9\-]/.test(ch)) {
+      const start = i;
+      if (ch === '-') i++;
+      while (i < trimmed.length && /[0-9]/.test(trimmed[i])) i++;
+      const numStr = trimmed.slice(start, i);
+      const num = parseInt(numStr, 10);
+      if (!isNaN(num)) {
+        tokens.push({ type: 'number', value: num });
+      }
+      continue;
+    }
+
+    i++; // skip unknown chars
+  }
+
+  return tokens;
+}
+
+/**
+ * Parse a query_int expression string into an AST (internal, exported for
+ * direct unit testing of the recursive-descent edge cases).
+ */
+export function _parseQueryExpression(input: string): QueryNode | null {
+  const tokens = _tokenizeQuery(input);
   if (tokens.length === 0) return null;
   let pos = 0;
 
@@ -414,49 +462,6 @@ interface RawToken {
   value: string | number;
 }
 
-function tokenizeQuery(input: string): RawToken[] {
-  const tokens: RawToken[] = [];
-  const trimmed = input.trim();
-  let i = 0;
-
-  while (i < trimmed.length) {
-    const ch = trimmed[i];
-
-    if (/\s/.test(ch)) {
-      i++;
-      continue;
-    }
-
-    if (ch === '(' || ch === ')') {
-      tokens.push({ type: 'paren', value: ch });
-      i++;
-      continue;
-    }
-
-    if (ch === '&' || ch === '|' || ch === '!') {
-      tokens.push({ type: 'op', value: ch });
-      i++;
-      continue;
-    }
-
-    if (/[0-9\-]/.test(ch)) {
-      const start = i;
-      if (ch === '-') i++;
-      while (i < trimmed.length && /[0-9]/.test(trimmed[i])) i++;
-      const numStr = trimmed.slice(start, i);
-      const num = parseInt(numStr, 10);
-      if (!isNaN(num)) {
-        tokens.push({ type: 'number', value: num });
-      }
-      continue;
-    }
-
-    i++; // skip unknown chars
-  }
-
-  return tokens;
-}
-
 function parseQueryElements(query: string): number[] {
   const elems: number[] = [];
   // eslint-disable-next-line require-unicode-regexp
@@ -487,93 +492,276 @@ function evaluateQueryTree(node: QueryNode, value: number): boolean {
 /**
  * Detect intarray operators (@>, <@, &&) in a SQL string.
  */
-export function detectIntarrayOperator(sql: string): boolean {
-  if (!sql || typeof sql !== 'string') return false;
-  const cleaned = sql.replace(/'[^']*'/g, '').replace(/"[^"]*"/g, '').replace(/--[^\n]*/g, '');
-  // Check for @>, <@, && with array-like expressions
-  // eslint-disable-next-line require-unicode-regexp
-  return /\bARRAY\s*\[[^\]]*\]\s*@>\s*ARRAY\s*\[/i.test(cleaned) ||
-    // eslint-disable-next-line require-unicode-regexp
-    /\bARRAY\s*\[[^\]]*\]\s*<@\s*ARRAY\s*\[/i.test(cleaned) ||
-    // eslint-disable-next-line require-unicode-regexp
-    /\bARRAY\s*\[[^\]]*\]\s*&&\s*ARRAY\s*\[/i.test(cleaned) ||
-    // Detect query_int function
-    /\bquery_int\s*\(/i.test(cleaned);
+interface IntarrayOccurrence {
+  op: 'contains' | 'contained_by' | 'overlap';
+  start: number; // index of the first char of the LHS (replacement start)
+  end: number; // index just past the RHS `]` (replacement end)
+  lhs: string;
+  rhsStart: number;
+  rhsEnd: number;
 }
 
 /**
- * Rewrite intarray operators and query_int to function calls.
+ * Locate the closing `]` of an `ARRAY[...]` literal, skipping string literals
+ * and quoted identifiers so a `]` inside them does not terminate the array.
+ *
+ * @param sql        - The SQL text.
+ * @param openBracket - Index of the `[` just after `ARRAY`.
+ * @returns Index of the matching `]`, or `-1` if unterminated.
+ */
+function findArrayClose(sql: string, openBracket: number): number {
+  let i = openBracket + 1;
+  while (i < sql.length) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip;
+      continue;
+    }
+    if (sql[i] === ']') return i;
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Extract the left-hand operand ending at (inclusive) `end`. Returns the
+ * operand text and the index of its first character, or `null` if none.
+ *
+ * Handles: `ARRAY[...]` literals, quoted identifiers (`"col"`, `` `col` ``),
+ * parenthesised expressions/function calls, and plain/dotted identifiers.
+ */
+function extractLhs(sql: string, end: number): { text: string; start: number } | null {
+  const ch = sql[end];
+
+  // Quoted identifier: `"..."` or `` `...` ``. Walk back to the opening quote,
+  // then continue over any dotted prefix (e.g. `sch."col"`).
+  if (ch === '"' || ch === '`') {
+    const open = skipBackwardLiteral(sql, end); // index of the opening quote
+    let cursor = open - 1;
+    while (cursor >= 0 && /[A-Za-z0-9_.]/.test(sql[cursor])) cursor--;
+    return { text: sql.slice(cursor + 1, end + 1), start: cursor + 1 };
+  }
+
+  // ARRAY[...] literal on the left side. Walk back from the `]` to the `ARRAY`
+  // (or the `[`), including the bracketed content.
+  if (ch === ']') {
+    // Locate the matching `[` for this `]`, scanning backward with nested
+    // bracket depth and literal skipping.
+    let depth = 0;
+    let cursor = end;
+    while (cursor >= 0) {
+      const c = sql[cursor];
+      const skipBack = skipBackwardLiteral(sql, cursor);
+      if (skipBack !== -1) {
+        cursor = skipBack;
+        continue;
+      }
+      if (c === ']') { depth++; cursor--; continue; }
+      if (c === '[') {
+        depth--;
+        cursor--;
+        if (depth <= 0) break;
+        continue;
+      }
+      cursor--;
+    }
+    // cursor is now just before the `[` (or the ARRAY keyword may precede).
+    let kwEnd = cursor + 1;
+    let kwStart = kwEnd;
+    while (kwStart > 0 && /\s/.test(sql[kwStart - 1])) kwStart--;
+    const kwMatch = sql.slice(0, kwStart).match(/ARRAY$/i);
+    if (kwMatch) {
+      return { text: sql.slice(kwStart - 5, end + 1), start: kwStart - 5 };
+    }
+    return { text: sql.slice(cursor + 1, end + 1), start: cursor + 1 };
+  }
+
+  // Parenthesised expression / function call.
+  if (ch === ')') {
+    let depth = 0;
+    let cursor = end;
+    while (cursor >= 0) {
+      const c = sql[cursor];
+      const skipBack = skipBackwardLiteral(sql, cursor);
+      if (skipBack !== -1) {
+        cursor = skipBack;
+        continue;
+      }
+      if (c === ')') { depth++; cursor--; continue; }
+      if (c === '(') {
+        depth--;
+        cursor--;
+        if (depth <= 0) break;
+        continue;
+      }
+      if (depth > 0) { cursor--; continue; }
+      break;
+    }
+    while (cursor >= 0 && /[A-Za-z0-9_.]/.test(sql[cursor])) cursor--;
+    return { text: sql.slice(cursor + 1, end + 1), start: cursor + 1 };
+  }
+
+  // Plain identifier or dotted qualified name.
+  let cursor = end;
+  while (cursor >= 0 && /[A-Za-z0-9_."`[\]]/.test(sql[cursor])) cursor--;
+  return { text: sql.slice(cursor + 1, end + 1), start: cursor + 1 };
+}
+
+/**
+ * Skip backward over a string literal, quoted identifier, or dollar-quoted
+ * string whose *closing* edge is at (inclusive) `pos`. Returns the index of the
+ * *opening* edge of the construct, or `-1` if `pos` is not such a closing edge.
+ */
+function skipBackwardLiteral(sql: string, pos: number): number {
+  const c = sql[pos];
+  if (c !== "'" && c !== '"' && c !== '`') return -1;
+
+  let j = pos - 1;
+  while (j >= 0) {
+    const prev = sql[j];
+    if (prev === c) {
+      // Doubled-quote escape (`''`, `""`, `` ``).
+      if (j - 1 >= 0 && sql[j - 1] === c) {
+        j -= 2;
+        continue;
+      }
+      return j; // index of the matching opening quote
+    }
+    // Backslash escape inside an E'' string.
+    if (prev === '\\' && c === "'" && j - 1 >= 0) {
+      j -= 2;
+      continue;
+    }
+    j--;
+  }
+  return -1;
+}
+
+/**
+ * Scan `sql` for intarray operators (`@>`, `<@`, `&&`) outside of literals and
+ * comments. Each occurrence must have a right-hand side starting with `ARRAY[`.
+ */
+function findIntarrayOccurrences(sql: string): IntarrayOccurrence[] {
+  const occurrences: IntarrayOccurrence[] = [];
+
+  for (let i = 0; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    const ch = sql[i];
+    let op: IntarrayOccurrence['op'] | null = null;
+    let opEnd = i;
+
+    if (ch === '@' && sql[i + 1] === '>') {
+      op = 'contains';
+      opEnd = i + 2;
+    } else if (ch === '<' && sql[i + 1] === '@') {
+      op = 'contained_by';
+      opEnd = i + 2;
+    } else if (ch === '&' && sql[i + 1] === '&') {
+      op = 'overlap';
+      opEnd = i + 2;
+    }
+
+    if (op === null) continue;
+
+    // Locate the `ARRAY[` of the right-hand side.
+    let rhsStart = opEnd;
+    while (rhsStart < sql.length && /\s/.test(sql[rhsStart])) rhsStart++;
+    if (!/^ARRAY\b/i.test(sql.slice(rhsStart))) continue;
+
+    let bracket = rhsStart + 5;
+    while (bracket < sql.length && /\s/.test(sql[bracket])) bracket++;
+    if (bracket >= sql.length || sql[bracket] !== '[') continue;
+    const rhsEnd = findArrayClose(sql, bracket);
+    if (rhsEnd === -1) continue;
+
+    // Extract the left-hand operand.
+    let lhsEnd = i - 1;
+    while (lhsEnd >= 0 && /\s/.test(sql[lhsEnd])) lhsEnd--;
+    if (lhsEnd < 0) continue;
+    const lhsInfo = extractLhs(sql, lhsEnd);
+    if (!lhsInfo || lhsInfo.text.trim() === '') continue;
+
+    occurrences.push({
+      op,
+      start: lhsInfo.start,
+      end: rhsEnd + 1,
+      lhs: lhsInfo.text,
+      rhsStart,
+      rhsEnd,
+    });
+    i = rhsEnd;
+  }
+
+  return occurrences;
+}
+
+/**
+ * Detect intarray operators (@>, <@, &&) outside of literals/comments, or a
+ * `query_int(...)` call.
+ */
+export function detectIntarrayOperator(sql: string): boolean {
+  if (!sql || typeof sql !== 'string') return false;
+  if (findIntarrayOccurrences(sql).length > 0) return true;
+
+  // query_int(...) call outside of literals.
+  for (let i = 0; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+    if (/^query_int\s*\(/i.test(sql.slice(i))) return true;
+  }
+  return false;
+}
+
+/**
+ * Rewrite intarray operators to function calls, literal-aware.
  *
  * Rewrites:
  *   `arr @> ARRAY[1,2]`   → `intarray_contains(arr, ARRAY[1,2])`
  *   `arr <@ ARRAY[1,2]`   → `intarray_contained_by(arr, ARRAY[1,2])`
  *   `arr && ARRAY[1,2]`   → `intarray_overlap(arr, ARRAY[1,2])`
- *   `query_int(arr, 'q')` → `query_int(arr, 'q')` (already function)
  */
 export function rewriteIntarrayOperators(sql: string): { sql: string; rewritten: boolean } {
   if (!sql || typeof sql !== 'string') {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  let result = sql;
-  let rewritten = false;
-
-  // `@>` → intarray_contains
-  // Handles: col @> ARRAY[...] or ARRAY[...] @> ARRAY[...]
-  // eslint-disable-next-line require-unicode-regexp
-  result = result.replace(
-    /([\w.()"`]+)\s*@>\s*(ARRAY\s*\[[^\]]*\])/gi,
-    (_match, left, right) => {
-      rewritten = true;
-      return `intarray_contains(${left.trim()}, ${right.trim()})`;
-    },
-  );
-
-  // Also handle ARRAY[...] on the left side of @>
-  // eslint-disable-next-line require-unicode-regexp
-  result = result.replace(
-    /(ARRAY\s*\[[^\]]*\])\s*@>\s*(ARRAY\s*\[[^\]]*\])/gi,
-    (_match, left, right) => {
-      rewritten = true;
-      return `intarray_contains(${left.trim()}, ${right.trim()})`;
-    },
-  );
-
-  // `<@` → intarray_contained_by
-  // eslint-disable-next-line require-unicode-regexp
-  result = result.replace(
-    /([\w.()"`]+)\s*<@\s*(ARRAY\s*\[[^\]]*\])/gi,
-    (_match, left, right) => {
-      rewritten = true;
-      return `intarray_contained_by(${left.trim()}, ${right.trim()})`;
-    },
-  );
-
-  // Also handle ARRAY[...] on the left side of <@
-  // eslint-disable-next-line require-unicode-regexp
-  result = result.replace(
-    /(ARRAY\s*\[[^\]]*\])\s*<@\s*(ARRAY\s*\[[^\]]*\])/gi,
-    (_match, left, right) => {
-      rewritten = true;
-      return `intarray_contained_by(${left.trim()}, ${right.trim()})`;
-    },
-  );
-
-  // `&&` → intarray_overlap
-  // eslint-disable-next-line require-unicode-regexp
-  result = result.replace(
-    /(ARRAY\s*\[[^\]]*\])\s*&&\s*(ARRAY\s*\[[^\]]*\])/gi,
-    (_match, left, right) => {
-      rewritten = true;
-      return `intarray_overlap(${left.trim()}, ${right.trim()})`;
-    },
-  );
-
-  if (rewritten) {
-    logger.debug({ before: sql, after: result }, 'Rewrote intarray operators');
+  const occurrences = findIntarrayOccurrences(sql);
+  if (occurrences.length === 0) {
+    return { sql, rewritten: false };
   }
 
-  return { sql: result, rewritten };
+  const fnName = {
+    contains: 'intarray_contains',
+    contained_by: 'intarray_contained_by',
+    overlap: 'intarray_overlap',
+  } as const;
+
+  // Apply right-to-left to keep earlier offsets valid.
+  const parts: string[] = [];
+  let lastEnd = sql.length;
+  for (const occ of [...occurrences].sort((a, b) => b.start - a.start)) {
+    if (occ.end > lastEnd) {
+      logger.warn({ occurrence: occ }, 'Overlapping intarray replacement — skipping');
+      continue;
+    }
+    const rhs = sql.slice(occ.rhsStart, occ.rhsEnd + 1).trim();
+    parts.push(sql.slice(occ.end, lastEnd));
+    parts.push(`${fnName[occ.op]}(${occ.lhs.trim()}, ${rhs})`);
+    lastEnd = occ.start;
+  }
+  parts.push(sql.slice(0, lastEnd));
+
+  const result = parts.reverse().join('');
+  logger.debug({ before: sql, after: result }, 'Rewrote intarray operators');
+  return { sql: result, rewritten: true };
 }
 
 // ──────────── Parsing helpers ────────────────────────────────────
@@ -605,7 +793,7 @@ export function parsePgArray(input: string): number[] {
     inner = trimmed;
   }
 
-  if (!inner) {
+  if (!inner.trim()) {
     return [];
   }
 
@@ -824,8 +1012,8 @@ export function rewriteIntarrayFunctions(sql: string): { sql: string; rewritten:
       // Build replacement with proper capture group references
       let r = replacement;
       for (let i = 1; i < args.length - 2; i++) {
-        // offset and string are always last two args in replace callback
-        if (i >= args.length - 2) break;
+        // offset and string are always last two args in the replace callback,
+        // so group indices stop well before `args.length - 2`.
         r = r.replace(new RegExp(`\\$${i}(?![0-9])`, 'g'), (args[i] ?? '').trim());
       }
       return r;
