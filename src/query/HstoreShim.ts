@@ -52,6 +52,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('HstoreShim');
 
@@ -78,6 +79,13 @@ export interface HstoreRewriteResult {
  *
  * This parser converts PG hstore text to a JS object.
  */
+/**
+ * Unescape a PG hstore quoted string: `\"` → `"` and `\\` → `\`.
+ */
+function unescapeHstore(s: string): string {
+  return s.replace(/\\(["\\])/g, '$1');
+}
+
 function parsePgHstore(text: string): Record<string, string | null> {
   const result: Record<string, string | null> = {};
   const trimmed = text.trim();
@@ -107,7 +115,7 @@ function parsePgHstore(text: string): Record<string, string | null> {
         if (trimmed[i] === '\\') i++; // skip escaped char
         i++;
       }
-      key = trimmed.slice(keyStart, i);
+      key = unescapeHstore(trimmed.slice(keyStart, i));
       if (i < len) i++; // skip closing quote
     } else {
       const keyStart = i;
@@ -130,16 +138,15 @@ function parsePgHstore(text: string): Record<string, string | null> {
         if (trimmed[i] === '\\') i++;
         i++;
       }
-      value = trimmed.slice(valStart, i);
+      value = unescapeHstore(trimmed.slice(valStart, i));
       if (i < len) i++; // skip closing quote
-    } else if (i < len && trimmed.toUpperCase().startsWith('NULL', i)) {
+    } else if (i < len && /^NULL\b/i.test(trimmed.slice(i))) {
       value = null;
       i += 4;
     } else {
       const valStart = i;
       while (i < len && trimmed[i] !== ',' && trimmed[i] !== ' ') i++;
       value = trimmed.slice(valStart, i).trim();
-      if (value.toUpperCase() === 'NULL') value = null;
     }
 
     // Store the parsed key-value pair
@@ -181,12 +188,11 @@ export function parseHstoreToObject(text: string | null): Record<string, string 
  * Convert a JS object back to JSON hstore string.
  */
 export function objectToHstoreJson(obj: Record<string, string | null>): string {
-  // Remove any undefined/symbol keys, keep only string keys
+  // Object.keys already yields only own enumerable string keys; coerce
+  // undefined values to null (JSON has no undefined representation).
   const clean: Record<string, string | null> = {};
   for (const key of Object.keys(obj)) {
-    if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      clean[key] = obj[key] === undefined ? null : obj[key];
-    }
+    clean[key] = obj[key] === undefined ? null : obj[key];
   }
   return JSON.stringify(clean);
 }
@@ -518,11 +524,6 @@ export class HstoreShim {
  * Uses `\b` word boundary before `->` and ensures the right side
  * is a single-quoted string literal.
  */
-// Note: The PG hstore `->` operator is the same syntax as JSON `->`.
-// In the context of this shim, we assume hstore columns.
-// The rewrite converts `expr -> 'key'` to `hstore_get_value(expr, 'key')`.
-// eslint-disable-next-line require-unicode-regexp
-const HSTORE_OP_REGEX = /([\w.()"'`]+)\s*->\s*'([^']*)'/gi;
 
 /**
  * Detect whether the given SQL contains the `->` hstore operator syntax.
@@ -542,17 +543,64 @@ export function detectHstoreOperator(sql: string): boolean {
     return false;
   }
 
-  // Make sure we don't match ->> (JSON text accessor)
-  // eslint-disable-next-line require-unicode-regexp
-  const opRegex = /([\w.()"'`]+)\s*->\s*'([^']*)'/gi;
-  let match: RegExpExecArray | null;
-  while ((match = opRegex.exec(sql)) !== null) {
-    // Check this isn't a ->> pattern
-    const beforeOp = sql.slice(Math.max(0, match.index - 1), match.index);
-    if (beforeOp === '>') continue; // This is ->> not ->
-    return true;
+  return findHstoreArrow(sql) !== null;
+}
+
+/**
+ * Find the next hstore `->` operator occurrence (expression `->` followed by
+ * a string literal), skipping string literals, quoted identifiers,
+ * dollar-quoted strings, and comments. Returns the index of the `->` arrow,
+ * or `null` when no operator is present.
+ *
+ * The `->>` JSON text accessor is not a match: when the arrow is immediately
+ * followed by another `>`, or preceded by `-`, it is skipped.
+ */
+function findHstoreArrow(sql: string): { arrowIndex: number } | null {
+  for (let i = 0; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    if (sql[i] !== '-' || sql[i + 1] !== '>') continue;
+
+    // Skip JSON `->>` text accessor: `->` followed by `>`.
+    if (sql[i + 2] === '>') continue;
+
+    // The arrow must be preceded by a valid expression character (not a bare
+    // `-` start, e.g. a subtraction or another operator).
+    if (i === 0) continue;
+
+    // Arrow must be followed (after optional whitespace) by a single-quoted
+    // string literal.
+    let j = i + 2;
+    while (j < sql.length && /\s/.test(sql[j])) j++;
+    if (sql[j] !== "'") continue;
+
+    return { arrowIndex: i };
   }
-  return false;
+  return null;
+}
+
+/**
+ * Given `pos` pointing at a closing quote (`'`, `"`, or `` ` ``), return the
+ * index just before the *opening* quote of the same string/identifier. Handles
+ * doubled-quote escapes (e.g. `''` inside a string, `""` inside an identifier
+ * and ```` ``` ```` inside a backtick identifier). Used while scanning an
+ * expression backward so a `)` inside a literal does not affect paren depth.
+ */
+function skipStringBackward(sql: string, pos: number): number {
+  const quote = sql[pos];
+  let i = pos - 1;
+  while (i >= 0) {
+    if (sql[i] === quote) {
+      if (i - 1 >= 0 && sql[i - 1] === quote) { i -= 2; continue; } // doubled escape
+      return i - 1;
+    }
+    i--;
+  }
+  return -1;
 }
 
 /**
@@ -589,31 +637,91 @@ export function rewriteHstoreOperator(sql: string): HstoreRewriteResult {
     };
   }
 
-  // Collect replacements in reverse order
+  // Collect replacements (arrow index + full span + rewritten text).
   const replacements: Array<{
     start: number;
     end: number;
     replacement: string;
   }> = [];
 
-  // eslint-disable-next-line require-unicode-regexp
-  const opRegex = /([\w.()"'`]+)\s*->\s+'([^']*)'/gi;
-  let match: RegExpExecArray | null;
+  for (let i = 0; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
 
-  while ((match = opRegex.exec(sql)) !== null) {
-    const fullMatch = match[0];
-    const expr = match[1].trim();
-    const key = match[2];
+    if (sql[i] !== '-' || sql[i + 1] !== '>') continue;
+    if (sql[i + 2] === '>') continue; // ->> JSON text accessor
+    if (i === 0) continue;
 
-    // Skip if this is actually ->> (JSON text accessor)
-    const beforeOp = sql.slice(Math.max(0, match.index - 1), match.index);
-    if (beforeOp === '>') continue;
+    // The string literal on the right (after optional whitespace).
+    let j = i + 2;
+    while (j < sql.length && /\s/.test(sql[j])) j++;
+    if (sql[j] !== "'") continue;
 
-    const replacement = `hstore_get(${expr}, '${key}')`;
+    // Read the full single-quoted string literal (honoring '' escapes).
+    const literalStart = j;
+    let k = j + 1;
+    while (k < sql.length) {
+      if (sql[k] === "'") {
+        if (sql[k + 1] === "'") { k += 2; continue; }
+        break;
+      }
+      k++;
+    }
+    // k is the closing quote index; the literal spans [literalStart, k].
+    const literalEnd = k + 1;
+    const key = sql.slice(literalStart + 1, k).replace(/''/g, "'");
 
+    // Walk left from the arrow to isolate the left-hand expression. The LHS
+    // ends just before the arrow. It is one of:
+    //   - `ident` or `a.b.c` (dotted qualified name)
+    //   - `func(...)` or `( ... )` (a parenthesised expression / call)
+    let exprStart = i - 1;
+    while (exprStart >= 0 && /\s/.test(sql[exprStart])) exprStart--;
+
+    let cursor = exprStart;
+    if (cursor >= 0 && sql[cursor] === ')') {
+      // Back-scan the balanced parenthesised suffix, skipping string literals
+      // and quoted identifiers so `)` inside them do not affect nesting.
+      let depth = 0;
+      while (cursor >= 0) {
+        const ch = sql[cursor];
+        if (ch === "'" || ch === '"' || ch === '`') {
+          cursor = skipStringBackward(sql, cursor);
+          continue;
+        }
+        if (ch === ')') { depth++; cursor--; continue; }
+        if (ch === '(') {
+          depth--;
+          cursor--;
+          if (depth <= 0) break;
+          continue;
+        }
+        if (depth > 0) { cursor--; continue; }
+        break;
+      }
+      // Continue over an optional function name preceding the `(`.
+      while (cursor >= 0 && /[A-Za-z0-9_]/.test(sql[cursor])) cursor--;
+    } else if (cursor >= 0 && (sql[cursor] === '"' || sql[cursor] === '`')) {
+      // Quoted identifier (double-quote or backtick). Step back to just
+      // before the opening quote, then continue over any dotted prefix.
+      cursor = skipStringBackward(sql, cursor);
+      while (cursor >= 0 && /[A-Za-z0-9_.]/.test(sql[cursor])) cursor--;
+    } else {
+      // Plain identifier or dotted qualified name.
+      while (cursor >= 0 && /[A-Za-z0-9_.]/.test(sql[cursor])) cursor--;
+    }
+
+    const lhs = sql.slice(cursor + 1, i).trim();
+    if (!lhs) continue;
+
+    const escapedKey = key.replace(/'/g, "''");
+    const replacement = `hstore_get(${lhs}, '${escapedKey}')`;
     replacements.push({
-      start: match.index,
-      end: match.index + fullMatch.length,
+      start: cursor + 1,
+      end: literalEnd,
       replacement,
     });
   }
@@ -622,10 +730,9 @@ export function rewriteHstoreOperator(sql: string): HstoreRewriteResult {
     return { sql, rewritten: false };
   }
 
-  // Apply replacements right-to-left
+  // Apply replacements right-to-left to preserve offsets.
   const parts: string[] = [];
   let lastEnd = sql.length;
-
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
     if (r.end > lastEnd) {
       logger.warn({ replacement: r }, 'Overlapping hstore replacement — skipping');
@@ -636,7 +743,6 @@ export function rewriteHstoreOperator(sql: string): HstoreRewriteResult {
     lastEnd = r.start;
   }
   parts.push(sql.slice(0, lastEnd));
-
   const result = parts.reverse().join('');
 
   logger.debug(
@@ -661,30 +767,10 @@ export function rewriteHstoreOperator(sql: string): HstoreRewriteResult {
  * The `?` operator checks if a key exists in the hstore.
  * Handles: col ? 'key', tablename.col ? 'key'
  *
- * Note: `?` is also used as a JSON operator and in placeholders.
- * We use a conservative regex that requires an identifier on the left
- * side and a string literal on the right side.
+ * Note: `?` is also used as a JSON operator and in placeholders. The scanner
+ * only treats a `?` as an hstore operator when a string literal (or, for
+ * `?|`/`?&`, an `ARRAY[...]`) immediately follows.
  */
-// eslint-disable-next-line require-unicode-regexp
-const HSTORE_HAS_KEY_REGEX = /([\w.()"`]+)\s+\?\s+'([^']*)'/gi;
-
-/**
- * Regex matching the hstore `?|` operator:
- *   `expr ?| ARRAY['a','b']`
- *
- * The `?|` operator checks if ANY of the specified keys exist.
- */
-// eslint-disable-next-line require-unicode-regexp
-const HSTORE_HAS_ANY_REGEX = /([\w.()"`]+)\s+\?\|\s+(?:ARRAY\s*)?\[([^\]]*)\]/gi;
-
-/**
- * Regex matching the hstore `?&` operator:
- *   `expr ?& ARRAY['a','b']`
- *
- * The `?&` operator checks if ALL of the specified keys exist.
- */
-// eslint-disable-next-line require-unicode-regexp
-const HSTORE_HAS_ALL_REGEX = /([\w.()"`]+)\s+\?&\s+(?:ARRAY\s*)?\[([^\]]*)\]/gi;
 
 /**
  * Detect whether the given SQL contains hstore `?`, `?|`, or `?&` operators.
@@ -692,16 +778,118 @@ const HSTORE_HAS_ALL_REGEX = /([\w.()"`]+)\s+\?&\s+(?:ARRAY\s*)?\[([^\]]*)\]/gi;
 export function detectHstoreKeyOperators(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) return false;
 
-  HSTORE_HAS_KEY_REGEX.lastIndex = 0;
-  if (HSTORE_HAS_KEY_REGEX.test(sql)) return true;
+  return findHstoreKeyOperatorAt(sql, 0) !== null;
+}
 
-  HSTORE_HAS_ANY_REGEX.lastIndex = 0;
-  if (HSTORE_HAS_ANY_REGEX.test(sql)) return true;
+interface HstoreKeyOccurrence {
+  /** Index of the `?` character. */
+  qIndex: number;
+  /** Operator kind: `?`, `?|`, or `?&`. */
+  op: '?' | '?|' | '?&';
+  /** Byte offset of the operator's LHS expression start. */
+  lhsStart: number;
+  /** Full end offset (after the RHS string literal or array). */
+  end: number;
+  /** The key (single) or comma-joined keys (for any/all). */
+  keys: string;
+}
 
-  HSTORE_HAS_ALL_REGEX.lastIndex = 0;
-  if (HSTORE_HAS_ALL_REGEX.test(sql)) return true;
+/**
+ * Find the next hstore `?`/`?|`/`?&` operator, skipping string literals,
+ * quoted identifiers, dollar-quoted strings, and comments, and treating the
+ * RHS as either a single-quoted string (`?`) or `ARRAY[...]` (`?|`/`?&`).
+ * Returns `null` when no operator is found.
+ */
+function findHstoreKeyOperatorAt(sql: string, start: number): HstoreKeyOccurrence | null {
+  for (let i = start; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
 
-  return false;
+    if (sql[i] !== '?') continue;
+
+    const op = sql[i + 1] === '|' ? '?|' : sql[i + 1] === '&' ? '?&' : '?';
+    const afterOp = i + (op === '?' ? 1 : 2);
+
+    // Skip whitespace, then parse the RHS.
+    let j = afterOp;
+    while (j < sql.length && /\s/.test(sql[j])) j++;
+
+    let keys: string;
+    let end: number;
+    if (op === '?') {
+      // `?` accepts only a single-quoted string literal.
+      if (sql[j] !== "'") continue;
+      let k = j + 1;
+      while (k < sql.length) {
+        if (sql[k] === "'") {
+          if (sql[k + 1] === "'") { k += 2; continue; }
+          break;
+        }
+        k++;
+      }
+      keys = sql.slice(j + 1, k).replace(/''/g, "'");
+      end = k + 1;
+    } else {
+      // `?|` and `?&` accept only an `ARRAY[...]` literal.
+      if (!/^ARRAY\b/i.test(sql.slice(j))) continue;
+      let a = j + 5;
+      while (a < sql.length && /\s/.test(sql[a])) a++;
+      if (sql[a] !== '[') continue;
+      const close = findArrayClose(sql, a);
+      if (close === -1) continue;
+      keys = extractStringArrayValues(sql.slice(a + 1, close)).join(',');
+      end = close + 1;
+    }
+
+    // LHS expression: step back over whitespace, then a quoted identifier,
+    // a balanced parenthesised call, or a plain/dotted identifier.
+    let lhsStart = i - 1;
+    while (lhsStart >= 0 && /\s/.test(sql[lhsStart])) lhsStart--;
+
+    let cursor = lhsStart;
+    if (cursor >= 0 && sql[cursor] === ')') {
+      let depth = 0;
+      while (cursor >= 0) {
+        const ch = sql[cursor];
+        if (ch === "'" || ch === '"' || ch === '`') { cursor = skipStringBackward(sql, cursor); continue; }
+        if (ch === ')') { depth++; cursor--; continue; }
+        if (ch === '(') { depth--; cursor--; if (depth <= 0) break; continue; }
+        if (depth > 0) { cursor--; continue; }
+        break;
+      }
+      while (cursor >= 0 && /[A-Za-z0-9_]/.test(sql[cursor])) cursor--;
+    } else if (cursor >= 0 && (sql[cursor] === '"' || sql[cursor] === '`')) {
+      cursor = skipStringBackward(sql, cursor);
+      while (cursor >= 0 && /[A-Za-z0-9_.]/.test(sql[cursor])) cursor--;
+    } else {
+      while (cursor >= 0 && /[A-Za-z0-9_.]/.test(sql[cursor])) cursor--;
+    }
+
+    const lhs = sql.slice(cursor + 1, i).trim();
+    if (!lhs) continue;
+
+    return { qIndex: i, op, lhsStart: cursor + 1, end, keys };
+  }
+  return null;
+}
+
+/**
+ * Find the index of the `]` closing an array literal starting at `openIdx`
+ * (the `[`), skipping string literals inside the array.
+ */
+function findArrayClose(sql: string, openIdx: number): number {
+  for (let i = openIdx + 1; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+    if (sql[i] === ']') return i;
+  }
+  return -1;
 }
 
 /**
@@ -717,35 +905,42 @@ export function rewriteHstoreKeyOperators(sql: string): HstoreRewriteResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  let result = sql;
-  let rewritten = false;
-
-  // 1. Rewrite `?` operator: col ? 'key' → hstore_exists(col, 'key')
-  result = result.replace(HSTORE_HAS_KEY_REGEX, (_match, expr, key) => {
-    rewritten = true;
-    return `hstore_exists(${expr.trim()}, '${key}')`;
-  });
-
-  // 2. Rewrite `?|` operator: col ?| ARRAY['a','b'] → hstore_exists_any(col, 'a,b')
-  result = result.replace(HSTORE_HAS_ANY_REGEX, (_match, expr, keysContent) => {
-    rewritten = true;
-    // Extract string literals from the array content: 'a','b' → a,b
-    const keys = extractStringArrayValues(keysContent).join(',');
-    return `hstore_exists_any(${expr.trim()}, '${keys}')`;
-  });
-
-  // 3. Rewrite `?&` operator: col ?& ARRAY['a','b'] → hstore_exists_all(col, 'a,b')
-  result = result.replace(HSTORE_HAS_ALL_REGEX, (_match, expr, keysContent) => {
-    rewritten = true;
-    const keys = extractStringArrayValues(keysContent).join(',');
-    return `hstore_exists_all(${expr.trim()}, '${keys}')`;
-  });
-
-  if (rewritten) {
-    logger.debug({ before: sql, after: result }, 'Hstore key operators rewritten');
+  const replacements: Array<{ start: number; end: number; replacement: string }> = [];
+  let occ = findHstoreKeyOperatorAt(sql, 0);
+  while (occ) {
+    const lhs = sql.slice(occ.lhsStart, occ.qIndex).trim();
+    const escapedKeys = occ.keys.replace(/'/g, "''");
+    const fn = occ.op === '?' ? 'hstore_exists' : occ.op === '?|' ? 'hstore_exists_any' : 'hstore_exists_all';
+    replacements.push({
+      start: occ.lhsStart,
+      end: occ.end,
+      replacement: `${fn}(${lhs}, '${escapedKeys}')`,
+    });
+    occ = findHstoreKeyOperatorAt(sql, occ.end);
   }
 
-  return { sql: result, rewritten };
+  if (replacements.length === 0) {
+    return { sql, rewritten: false };
+  }
+
+  // Apply replacements right-to-left to preserve offsets.
+  const parts: string[] = [];
+  let lastEnd = sql.length;
+  for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
+    if (r.end > lastEnd) {
+      logger.warn({ replacement: r }, 'Overlapping hstore key replacement — skipping');
+      continue;
+    }
+    parts.push(sql.slice(r.end, lastEnd));
+    parts.push(r.replacement);
+    lastEnd = r.start;
+  }
+  parts.push(sql.slice(0, lastEnd));
+  const result = parts.reverse().join('');
+
+  logger.debug({ before: sql, after: result }, 'Hstore key operators rewritten');
+
+  return { sql: result, rewritten: true };
 }
 
 /**
