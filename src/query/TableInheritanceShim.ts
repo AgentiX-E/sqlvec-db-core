@@ -32,6 +32,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('TableInheritanceShim');
 
@@ -81,17 +82,6 @@ const CREATE_TABLE_PREAMBLE_RE =
   /^\s*CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")\s*\(/i;
 
 /**
- * Simpler regex to just detect if INHERITS keyword is present after a column definition block.
- */
-const INHERITS_KEYWORD_RE = /\bINHERITS\s*\(/i;
-
-/**
- * Extract parent table names from the INHERITS clause.
- * Matches comma-separated identifiers (quoted or unquoted).
- */
-const PARENT_TABLE_NAME_RE = /["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?/g;
-
-/**
  * ALTER TABLE ... INHERIT detection.
  *
  * Matches:
@@ -105,18 +95,12 @@ const PARENT_TABLE_NAME_RE = /["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?/g;
  *   [3] Parent table name
  */
 const ALTER_INHERIT_RE =
-  /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")\s+(NO\s+)?INHERIT\s+(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")\s*;?\s*$/i;
+  /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+(NO\s+)?INHERIT\s+(?:"([^"]+)"|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*;?\s*$/i;
 
 /**
  * SELECT FROM ONLY detection.
  */
 const ONLY_RE = /\bFROM\s+ONLY\s+/i;
-
-/**
- * FROM clause table name extraction — used for SELECT rewriting.
- * Captures table name after FROM (or FROM ONLY).
- */
-const FROM_TABLE_RE = /\bFROM\s+(?:ONLY\s+)?(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")(?:\s+(?:AS\s+)?(["`]?[A-Za-z_][A-Za-z0-9_]*["`]?))?/i;
 
 /**
  * Trailing semicolons.
@@ -141,7 +125,7 @@ export const INHERITANCE_META_DDL = `
 /**
  * Map a SQLite column type string to a PostgreSQL-friendly type name.
  */
-function mapSqliteTypeToPgType(sqliteType: string | null): string {
+export function _mapSqliteTypeToPgType(sqliteType: string | null): string {
   if (!sqliteType) return 'TEXT';
   const upper = sqliteType.toUpperCase().trim();
   if (upper.includes('INT')) return 'INTEGER';
@@ -169,7 +153,30 @@ export function detectInherits(sql: string): boolean {
   const trimmed = sql.trim();
   if (!/^\s*CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s/i.test(trimmed)) return false;
 
-  return INHERITS_KEYWORD_RE.test(trimmed);
+  // Scan for the INHERITS keyword outside string literals, quoted
+  // identifiers, dollar-quoted strings, and comments. A bare `\bINHERITS\s*\(`
+  // would false-positive on text like `DEFAULT 'INHERITS (x)'`.
+  for (let i = 0; i < trimmed.length; i++) {
+    const skip = skipSqlLiteral(trimmed, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+    if (isWordStart(trimmed, i) && trimmed.startsWith('INHERITS', i)) {
+      const after = i + 'INHERITS'.length;
+      if (/^\s*\(/.test(trimmed.substring(after))) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Whether `pos` is the start of a word (not preceded by an identifier char).
+ */
+function isWordStart(sql: string, pos: number): boolean {
+  if (pos === 0) return true;
+  const prev = sql[pos - 1];
+  return !/[A-Za-z0-9_]/.test(prev);
 }
 
 /**
@@ -190,10 +197,17 @@ export function extractInheritsTables(sql: string): { childTable: string; parent
   const childTable = preMatch[1] || preMatch[2] || '';
   const parenStart = preMatch.index! + preMatch[0].length - 1; // position of '('
 
-  // Use paren-matching to find the column definition block
+  // Use literal-aware paren-matching to find the column definition block.
+  // A `)` inside a string literal (e.g. a DEFAULT value) must not close the
+  // column-definition parentheses early.
   let depth = 1;
-  let colContentEnd = parenStart + 1;
+  let colContentEnd = -1;
   for (let i = parenStart + 1; i < trimmed.length; i++) {
+    const skip = skipSqlLiteral(trimmed, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
     if (trimmed[i] === '(') depth++;
     else if (trimmed[i] === ')') {
       depth--;
@@ -204,7 +218,7 @@ export function extractInheritsTables(sql: string): { childTable: string; parent
     }
   }
 
-  if (depth !== 0) return null; // Unbalanced parens
+  if (colContentEnd === -1) return null; // Unbalanced parens
 
   // The remaining SQL after the closing paren
   const afterCol = trimmed.substring(colContentEnd + 1).trim();
@@ -214,13 +228,63 @@ export function extractInheritsTables(sql: string): { childTable: string; parent
   if (!inheritsMatch) return null;
 
   const parentList = inheritsMatch[1];
-  const parentTables: string[] = [];
-  let pMatch: RegExpExecArray | null;
-  while ((pMatch = PARENT_TABLE_NAME_RE.exec(parentList)) !== null) {
-    parentTables.push(pMatch[1]);
-  }
+  const parentTables = _parseParentTableList(parentList);
 
   return { childTable, parentTables };
+}
+
+/**
+ * Parse a comma-separated list of (possibly quoted) parent table names.
+ *
+ * Handles quoted identifiers containing spaces or other special characters
+ * (e.g. `"Parent Table"`), which a bare `[A-Za-z0-9_]*` regex would split on
+ * the space. Backtick and double-quote delimiters are supported, and doubled
+ * double-quotes (`""`) are treated as an escaped quote.
+ */
+export function _parseParentTableList(parentList: string): string[] {
+  const result: string[] = [];
+  let current = '';
+  let quote: '"' | '`' | null = null;
+  let i = 0;
+
+  while (i < parentList.length) {
+    const ch = parentList[i];
+
+    if (quote) {
+      if (quote === '"' && ch === '"' && parentList[i + 1] === '"') {
+        current += '"';
+        i += 2;
+        continue;
+      }
+      if (ch === quote) {
+        quote = null;
+        i++;
+        continue;
+      }
+      current += ch;
+      i++;
+      continue;
+    }
+
+    if (ch === '"' || ch === '`') {
+      quote = ch;
+      i++;
+      continue;
+    }
+    if (ch === ',') {
+      const name = current.trim();
+      if (name) result.push(name);
+      current = '';
+      i++;
+      continue;
+    }
+    current += ch;
+    i++;
+  }
+
+  const name = current.trim();
+  if (name) result.push(name);
+  return result;
 }
 
 /**
@@ -473,7 +537,7 @@ export function buildCreateTableWithParentColumns(
   // Build SQL
   const colDefs: string[] = [];
   for (const [, col] of allColumns) {
-    let colDef = `"${col.name}" ${mapSqliteTypeToPgType(col.type)}`;
+    let colDef = `"${col.name}" ${_mapSqliteTypeToPgType(col.type)}`;
     if (col.notnull) colDef += ' NOT NULL';
     if (col.dflt_value !== null && col.dflt_value !== undefined) {
       colDef += ` DEFAULT ${col.dflt_value}`;
@@ -522,8 +586,13 @@ export function rewriteCreateTableInherits(sql: string, db?: any): InheritsResul
   if (preMatch) {
     const parenStart = preMatch.index! + preMatch[0].length - 1;
     let depth = 1;
-    let colEnd = parenStart + 1;
+    let colEnd = -1;
     for (let i = parenStart + 1; i < trimmed.length; i++) {
+      const skip = skipSqlLiteral(trimmed, i);
+      if (skip !== -1) {
+        i = skip - 1;
+        continue;
+      }
       if (trimmed[i] === '(') depth++;
       else if (trimmed[i] === ')') {
         depth--;
@@ -534,12 +603,12 @@ export function rewriteCreateTableInherits(sql: string, db?: any): InheritsResul
       }
     }
 
-    if (depth === 0) {
+    if (colEnd !== -1) {
       const rawCols = trimmed.substring(parenStart + 1, colEnd).trim();
       if (rawCols.length > 0) {
-        const colParts = splitColumnDefs(rawCols);
+        const colParts = _splitColumnDefs(rawCols);
         for (const part of colParts) {
-          const parsed = parseSimpleColumnDef(part.trim());
+          const parsed = _parseSimpleColumnDef(part.trim());
           if (parsed) {
             childColumns.push(parsed);
           }
@@ -588,60 +657,109 @@ export function rewriteSelectForInheritance(sql: string, db: any): string {
 
   const trimmed = sql.trim();
 
-  // Find the first FROM clause
-  const selectMatch = trimmed.match(
-    /\bSELECT\b.*?\bFROM\s+(?:ONLY\s+)?(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")(?:\s+(?:AS\s+)?(?:["`]?[A-Za-z_][A-Za-z0-9_]*["`]?))?/is,
-  );
-
-  if (!selectMatch) return sql;
-
-  const tableName = selectMatch[1] || selectMatch[2];
-  if (!tableName) return sql;
+  const fromInfo = _findTopLevelFrom(trimmed);
+  if (!fromInfo) return sql;
 
   // Check if this table has descendants
-  const children = getAllDescendants(db, tableName);
+  const children = getAllDescendants(db, fromInfo.tableName);
   if (children.length === 0) return sql;
 
-  // Check for ONLY modifier — if ONLY is present, we don't expand children
-  if (ONLY_RE.test(trimmed)) {
+  // Check for ONLY modifier on this specific FROM — if ONLY is present, we
+  // don't expand children.
+  if (fromInfo.only) {
     return sql;
   }
 
   // Build the UNION ALL subquery
-  const allTables = [tableName, ...children];
+  const allTables = [fromInfo.tableName, ...children];
   const unionParts = allTables.map(t => `SELECT * FROM "${t}"`);
   const unionAll = unionParts.join(' UNION ALL ');
 
-  // Determine alias
-  const aliasMatch = trimmed.match(
-    /\bFROM\s+(?:ONLY\s+)?(?:["`]?[A-Za-z_][A-Za-z0-9_]*["`]?|"[^"]+")\s+(?:AS\s+)?(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")\b/i,
-  );
-  const alias = aliasMatch ? (aliasMatch[1] || aliasMatch[2] || tableName) : tableName;
+  const alias = fromInfo.alias || fromInfo.tableName;
 
-  // Replace the FROM clause
-  const fromRe = /\bFROM\s+(?:ONLY\s+)?(?:["`]?[A-Za-z_][A-Za-z0-9_]*["`]?|"[^"]+")(?:\s+(?:AS\s+)?(?:["`]?[A-Za-z_][A-Za-z0-9_]*["`]?|"[^"]+"))?/i;
+  // Replace exactly the FROM ... [alias] span we located, leaving the
+  // SELECT-list text (which may contain string literals with "FROM") intact.
+  const rewritten =
+    trimmed.substring(0, fromInfo.start) +
+    `FROM (${unionAll}) AS ${alias}` +
+    trimmed.substring(fromInfo.end);
 
-  const rewritten = trimmed.replace(
-    fromRe,
-    (match) => {
-      // Check if there's an existing alias
-      const existingAlias = match.match(
-        /(?:AS\s+)?(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")\s*$/,
-      );
-      if (existingAlias && existingAlias.index! > 0) {
-        // Already has an alias — replace table name portion
-        return match.replace(
-          /(?:["`]?[A-Za-z_][A-Za-z0-9_]*["`]?|"[^"]+")/,
-          `(${unionAll}) AS ${alias}`,
-        );
-      }
-      return `FROM (${unionAll}) AS ${alias}`;
-    },
-  );
-
-  logger.debug({ before: trimmed, after: rewritten, tableName, children }, 'SELECT rewritten for inheritance');
+  logger.debug({ before: trimmed, after: rewritten, tableName: fromInfo.tableName, children }, 'SELECT rewritten for inheritance');
 
   return rewritten;
+}
+
+/**
+ * Locate the first top-level `FROM` clause in a SELECT statement, along with
+ * its table name, optional alias, and the exact `[start, end)` span of the
+ * `FROM [ONLY] <table> [AS <alias>]` text.
+ *
+ * The scan is literal-aware: string literals, quoted identifiers, dollar-quoted
+ * strings, and comments are skipped so that a `FROM` or table name appearing
+ * inside them is never mistaken for real syntax. Nested parenthesised
+ * subqueries (depth > 0) are also skipped so we match only the outer SELECT's
+ * FROM clause.
+ */
+export function _findTopLevelFrom(
+  sql: string,
+): { start: number; end: number; tableName: string; alias: string; only: boolean } | null {
+  let depth = 0;
+
+  for (let i = 0; i < sql.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    const ch = sql[i];
+    if (ch === '(') {
+      depth++;
+      continue;
+    }
+    if (ch === ')') {
+      if (depth > 0) depth--;
+      continue;
+    }
+    if (depth !== 0) continue;
+
+    // Look for a top-level FROM keyword.
+    if (!/FROM\b/i.test(sql.substring(i, i + 5))) continue;
+
+    // Match the FROM keyword precisely.
+    const kwMatch = /^FROM\b/i.exec(sql.substring(i));
+    if (!kwMatch) continue;
+
+    const fromEnd = i + kwMatch[0].length;
+    const rest = sql.substring(fromEnd);
+
+    // Optional ONLY keyword, then the table name.
+    const tableMatch = /^\s*(ONLY\s+)?(\"([^\"]+)\"|`([^`]+)`|[A-Za-z_][A-Za-z0-9_]*)/.exec(rest);
+    if (!tableMatch) continue;
+
+    const only = !!tableMatch[1];
+    const tableName = tableMatch[3] || tableMatch[4] || tableMatch[2] || '';
+    if (!tableName) continue;
+
+    let end = fromEnd + tableMatch[0].length;
+
+    // Optional alias: AS alias or bare alias (not followed by a keyword).
+    const afterTable = sql.substring(end);
+    const aliasMatch = /^\s+(?:AS\s+)?(\"([^\"]+)\"|`([^`]+)`|[A-Za-z_][A-Za-z0-9_]*)/.exec(afterTable);
+    let alias = '';
+    if (aliasMatch) {
+      // Avoid swallowing a trailing WHERE/JOIN/etc. keyword as an alias.
+      const candidate = aliasMatch[1];
+      if (!/^(WHERE|JOIN|LEFT|RIGHT|INNER|CROSS|ON|GROUP|ORDER|LIMIT|OFFSET|UNION|HAVING|NATURAL|FULL)$/i.test(candidate)) {
+        alias = aliasMatch[2] || aliasMatch[3] || aliasMatch[1];
+        end = end + aliasMatch[0].length;
+      }
+    }
+
+    return { start: i, end, tableName, alias, only };
+  }
+
+  return null;
 }
 
 /**
@@ -704,9 +822,9 @@ export function handleAlterInherit(sql: string, db: any): AlterInheritResult {
     return { sql: trimmed, rewritten: false, action: null };
   }
 
-  const childTable = match[1] || match[2] || '';
-  const isNoInherit = !!match[3]; // 'NO ' prefix captures if present
-  const parentTable = match[4] || match[5] || '';
+  const childTable = match[1] || match[2] || match[3] || '';
+  const isNoInherit = !!match[4]; // 'NO ' prefix captures if present
+  const parentTable = match[5] || match[6] || match[7] || '';
 
   if (!childTable || !parentTable) {
     logger.warn({ sql: trimmed }, 'ALTER TABLE INHERIT: could not extract table names');
@@ -768,7 +886,7 @@ export function addMissingParentColumns(db: any, childTable: string, parentTable
 
     for (const pCol of parentCols) {
       if (!childColNames.has(pCol.name.toLowerCase())) {
-        const colDef = `"${pCol.name}" ${mapSqliteTypeToPgType(pCol.type)}`;
+        const colDef = `"${pCol.name}" ${_mapSqliteTypeToPgType(pCol.type)}`;
         const alterSql = `ALTER TABLE "${childTable}" ADD COLUMN ${colDef}`;
         db.exec(alterSql);
         logger.debug({ childTable, column: pCol.name, alterSql }, 'Added parent column to child table');
@@ -845,8 +963,8 @@ export function getPgInheritsRows(db: any, tableName?: string): Array<{
     let oidBase = 50000;
     return rows.map((r: any) => {
       oidBase++;
-      const parentOid = hashTableNameToOid(String(r.parent_table), oidBase);
-      const childOid = hashTableNameToOid(String(r.child_table), oidBase + 1000);
+      const parentOid = _hashTableNameToOid(String(r.parent_table), oidBase);
+      const childOid = _hashTableNameToOid(String(r.child_table), oidBase + 1000);
       return {
         inhrelid: childOid,
         inhparent: parentOid,
@@ -863,7 +981,7 @@ export function getPgInheritsRows(db: any, tableName?: string): Array<{
 /**
  * Simple helper to hash a table name to a deterministic OID.
  */
-function hashTableNameToOid(name: string, base: number): number {
+export function _hashTableNameToOid(name: string, base: number): number {
   let hash = 0;
   for (let i = 0; i < name.length; i++) {
     const chr = name.charCodeAt(i);
@@ -878,12 +996,19 @@ function hashTableNameToOid(name: string, base: number): number {
  *
  * Handles nested parentheses (e.g., DEFAULT expressions with parens).
  */
-function splitColumnDefs(cols: string): string[] {
+export function _splitColumnDefs(cols: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let current = '';
 
   for (let i = 0; i < cols.length; i++) {
+    const skip = skipSqlLiteral(cols, i);
+    if (skip !== -1) {
+      current += cols.substring(i, skip);
+      i = skip - 1;
+      continue;
+    }
+
     const ch = cols[i];
 
     if (ch === '(') {
@@ -915,16 +1040,19 @@ function splitColumnDefs(cols: string): string[] {
  * @param colDef - A single column definition string.
  * @returns Parsed column info or null.
  */
-function parseSimpleColumnDef(colDef: string): { name: string; type: string; notnull: boolean; dflt_value: string | null } | null {
+export function _parseSimpleColumnDef(colDef: string): { name: string; type: string; notnull: boolean; dflt_value: string | null } | null {
   if (!colDef || colDef.trim().length === 0) return null;
 
   const trimmed = colDef.trim();
 
-  // Extract column name (first word or quoted identifier)
-  const nameMatch = trimmed.match(/^(?:["`]?([A-Za-z_][A-Za-z0-9_]*)["`]?|"([^"]+)")\s+/);
+  // Extract column name: a quoted identifier (double-quote or backtick, which
+  // may contain spaces) or a bare word. The quoted branch must be tried first
+  // so an opening quote is not mistakenly treated as an optional delimiter
+  // around a bare identifier (which would split `"weird name"` at the space).
+  const nameMatch = trimmed.match(/^(?:"([^"]+)"|`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+/);
   if (!nameMatch) return null;
 
-  const name = nameMatch[1] || nameMatch[2] || '';
+  const name = nameMatch[1] || nameMatch[2] || nameMatch[3] || '';
   let rest = trimmed.substring(nameMatch[0].length).trim();
 
   // Extract type (next word up to NOT NULL, DEFAULT, CHECK, etc.)
