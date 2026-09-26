@@ -42,6 +42,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('JsonTableShim');
 
@@ -62,7 +63,7 @@ export interface JsonTableRewriteResult {
 //  Interface for parsed JSON_TABLE components
 // ──────────────────────────────────────────────
 
-interface JsonTableParsed {
+export interface JsonTableParsed {
   /** The JSON array/string argument */
   jsonString: string;
   /** Path expression (e.g., '$[*]') */
@@ -79,7 +80,7 @@ interface JsonTableParsed {
   hasNestedPaths: boolean;
 }
 
-interface JsonTableColumn {
+export interface JsonTableColumn {
   /** Column name */
   name: string;
   /** Column type (int, text, boolean, etc.) - may be empty */
@@ -92,7 +93,7 @@ interface JsonTableColumn {
   onClause: string;
 }
 
-interface NestedPathInfo {
+export interface NestedPathInfo {
   /** The NESTED PATH expression (e.g., '$.items[*]') */
   path: string;
   /** Columns within this nested path */
@@ -102,16 +103,6 @@ interface NestedPathInfo {
 // ──────────────────────────────────────────────
 //  Constants – Regex patterns
 // ──────────────────────────────────────────────
-
-/**
- * Matches JSON_TABLE function calls.
- * This is intentionally broad to capture the overall structure.
- *
- * Pattern breakdown:
- * - json_table(  - the function name (case-insensitive)
- * - Then captures the JSON string, path, COLUMNS block, and alias
- */
-const JSON_TABLE_REGEX = /json_table\s*\(\s*('[^']*'|"[^"]*")\s*,\s*('[^']*'|"[^"]*")\s*COLUMNS\s*\(([\s\S]*?)\)\s*\)\s*(?:AS\s+)?(\w+)?/gi;
 
 /**
  * Matches individual column definitions within the COLUMNS block.
@@ -144,6 +135,10 @@ const NESTED_PATH_REGEX = /NESTED\s+PATH\s+'([^']*)'\s*COLUMNS\s*\(([\s\S]*?)\)/
 /**
  * Detect if a SQL statement contains JSON_TABLE usage.
  *
+ * Uses the same literal-aware scan as `rewriteJsonTable` so that a
+ * `json_table(` occurrence inside a string literal (or a JSON string argument
+ * containing a doubled single-quote escape) is never mistaken for real syntax.
+ *
  * @param sql - The SQL statement to check
  * @returns true if JSON_TABLE is detected
  */
@@ -153,8 +148,10 @@ export function detectJsonTable(sql: string): boolean {
   // Quick pre-check for json_table keyword
   if (!/\bjson_table\s*\(/i.test(sql)) return false;
 
-  JSON_TABLE_REGEX.lastIndex = 0;
-  return JSON_TABLE_REGEX.test(sql);
+  // Literal-aware scan: skip string literals and comments so only a real
+  // structural `json_table(` counts. Reuse findAllJsonTables (already
+  // literal-aware) for a single source of truth.
+  return findAllJsonTables(sql).length > 0;
 }
 
 // ──────────────────────────────────────────────
@@ -169,7 +166,7 @@ export function detectJsonTable(sql: string): boolean {
  * @param columnsBlock - The text inside COLUMNS(...)
  * @returns Object with columns array and nestedPaths array
  */
-function parseColumns(columnsBlock: string): { columns: JsonTableColumn[]; nestedPaths: NestedPathInfo[] } {
+export function _parseColumns(columnsBlock: string): { columns: JsonTableColumn[]; nestedPaths: NestedPathInfo[] } {
   const columns: JsonTableColumn[] = [];
   const nestedPaths: NestedPathInfo[] = [];
   let trimmed = columnsBlock.trim();
@@ -198,7 +195,7 @@ function parseColumns(columnsBlock: string): { columns: JsonTableColumn[]; neste
   for (const { match: nm } of nestedMatches) {
     const nestedPathStr = nm[1];
     const nestedColumnsBlock = nm[2];
-    const nestedResult = parseColumns(nestedColumnsBlock);
+    const nestedResult = _parseColumns(nestedColumnsBlock);
     // Mark all nested columns with kind='nested'
     for (const col of nestedResult.columns) {
       const adjustedPath = col.path && !col.path.startsWith('$.')
@@ -279,16 +276,6 @@ function parseColumns(columnsBlock: string): { columns: JsonTableColumn[]; neste
   return { columns, nestedPaths };
 }
 
-/**
- * Parses a COLUMNS block to identify NESTED PATH columns.
- *
- * @param columnsBlock - The raw COLUMNS block text
- * @returns true if any NESTED PATH declarations exist
- */
-function hasNestedPaths(columnsBlock: string): boolean {
-  return /NESTED\s+PATH/i.test(columnsBlock);
-}
-
 // ──────────────────────────────────────────────
 //  SQL Rewriting
 // ──────────────────────────────────────────────
@@ -300,7 +287,7 @@ function hasNestedPaths(columnsBlock: string): boolean {
  * @param colType - PG type (e.g., 'int', 'text', 'varchar(100)')
  * @returns cleaned type for CAST() or empty
  */
-function getSqliteCastType(colType: string): string {
+export function _getSqliteCastType(colType: string): string {
   if (!colType) return '';
   const cleanType = colType.replace(/\(.*?\)/, '').trim().toLowerCase();
 
@@ -355,7 +342,7 @@ function getSqliteCastType(colType: string): string {
  * @param extractExpr - The column extraction expression
  * @returns Expression with ON clause applied
  */
-function applyOnClause(onClause: string, extractExpr: string): string {
+export function _applyOnClause(onClause: string, extractExpr: string): string {
   if (!onClause) return extractExpr;
 
   const trimmedClause = onClause.trim();
@@ -395,29 +382,29 @@ function applyOnClause(onClause: string, extractExpr: string): string {
  * @param col - Parsed column definition
  * @returns SQL expression for extracting the column value
  */
-function buildColumnExtract(col: JsonTableColumn): string {
+export function _buildColumnExtract(col: JsonTableColumn): string {
   switch (col.kind) {
     case 'ordinality':
       return `ROW_NUMBER() OVER ()`;
     case 'exists': {
       const path = col.path || '$.dummy';
-      const existsExpr = `CASE WHEN json_extract(value, '${escapeJsonPath(path)}') IS NOT NULL THEN 1 ELSE 0 END`;
-      return applyOnClause(col.onClause, existsExpr);
+      const existsExpr = `CASE WHEN json_extract(value, '${_escapeJsonPath(path)}') IS NOT NULL THEN 1 ELSE 0 END`;
+      return _applyOnClause(col.onClause, existsExpr);
     }
     case 'nested': {
       // For nested columns, extract from the nested value
       const path = col.path || '$."' + col.name + '"';
-      const extracted = `json_extract(value, '${escapeJsonPath(path)}')`;
-      return applyOnClause(col.onClause, extracted);
+      const extracted = `json_extract(value, '${_escapeJsonPath(path)}')`;
+      return _applyOnClause(col.onClause, extracted);
     }
     case 'regular':
     default: {
       const path = col.path || '$."' + col.name + '"';
-      let extracted = `json_extract(value, '${escapeJsonPath(path)}')`;
+      let extracted = `json_extract(value, '${_escapeJsonPath(path)}')`;
       // Apply ON clause before CAST
-      extracted = applyOnClause(col.onClause, extracted);
+      extracted = _applyOnClause(col.onClause, extracted);
       // Apply CAST if type is specified
-      const castType = getSqliteCastType(col.type);
+      const castType = _getSqliteCastType(col.type);
       if (castType) {
         if (col.onClause && /^DEFAULT\s+/i.test(col.onClause.trim())) {
           // For DEFAULT ON clause, wrap entire COALESCE with CAST
@@ -435,13 +422,19 @@ function buildColumnExtract(col: JsonTableColumn): string {
  * Standard JSON path notation (dot-delimited, bracket notation for arrays)
  * is valid in SQLite json_extract, so only handle edge cases.
  */
-function escapeJsonPath(path: string): string {
+export function _escapeJsonPath(path: string): string {
   if (!path || path === '$' || path === '$[*]') return path;
 
   // Standard JSON path patterns that work in SQLite json_extract:
-  // $.a, $.a.b, $.items[0].name, $.items[*].name, $[0].a, etc.
-  // These use standard dot/bracket notation - no escaping needed
+  // $.a, $.a.b, $.items[0].name, $.items[*].name, $[0].a, $."a b", etc.
+  // These use standard dot/bracket notation, and an already-quoted property
+  // name (e.g. `$."a b"`) is also valid, so no extra escaping is needed.
   if (/^\$(\.[\w_]+|\[.*?\])*$/.test(path)) {
+    return path;
+  }
+  // Already-quoted property names: the JSON path already uses SQLite's
+  // `."name"` syntax, so return it verbatim rather than double-quoting.
+  if (/^\$(\."([^"]|"")*"|\.[\w_]+|\[.*?\])*$/.test(path)) {
     return path;
   }
 
@@ -478,7 +471,7 @@ function buildJsonEachSource(jsonStr: string): string {
  * Determine whether a JSON path expression contains wildcard array iteration markers ($[*]).
  * Used to distinguish between simple extraction paths and iteration paths.
  */
-function hasWildcardIteration(path: string): boolean {
+export function _hasWildcardIteration(path: string): boolean {
   return /\[\*\]/.test(path);
 }
 
@@ -486,7 +479,7 @@ function hasWildcardIteration(path: string): boolean {
  * Extract the base path up to a wildcard iteration point.
  * e.g., '$.stores[*].books[*].title' → ['$.stores', 'stores']
  */
-function extractIterationBase(path: string): string {
+export function _extractIterationBase(path: string): string {
   const starIndex = path.indexOf('[*]');
   if (starIndex < 0) return path;
   return path.substring(0, starIndex);
@@ -506,7 +499,7 @@ function extractIterationBase(path: string): string {
  * @param fullPath - The full JSON path (e.g., $.stores[*].books[*].title)
  * @returns Structured info about the iteration chain
  */
-function parseIterationPath(fullPath: string): {
+export function _parseIterationPath(fullPath: string): {
   segments: string[];         // path segments: ['stores', 'books']
   finalKey: string;           // final property key: 'title'
   aliasChain: string[];       // alias for each level: ['_lv0', '_lv1']
@@ -549,12 +542,12 @@ function parseIterationPath(fullPath: string): {
  * @param baseAlias - The alias for the base json_each
  * @returns SQL fragment for FROM clause
  */
-function buildIterationFromClause(
+export function _buildIterationFromClause(
   jsonStr: string,
   path: string,
   baseAlias: string,
 ): string {
-  const { segments } = parseIterationPath(path);
+  const { segments } = _parseIterationPath(path);
   const iterationKeys = segments.slice(0, -1); // all except final property
 
   if (iterationKeys.length === 0) {
@@ -589,7 +582,7 @@ function buildIterationFromClause(
  * Detect if any column path contains multi-level [*] iteration.
  * e.g., $.stores[*].books[*].title has 2 levels of iteration.
  */
-function hasMultiLevelIteration(parsed: JsonTableParsed): boolean {
+export function _hasMultiLevelIteration(parsed: JsonTableParsed): boolean {
   if (parsed.hasNestedPaths) return true;
   for (const col of parsed.columns) {
     if (col.path && (col.path.match(/\[\*\]/g) || []).length >= 2) {
@@ -606,7 +599,7 @@ function hasMultiLevelIteration(parsed: JsonTableParsed): boolean {
  * @param parsed - Parsed JSON_TABLE components
  * @returns Rewritten SQL fragment — a parenthesized subquery with alias
  */
-function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
+export function _rewriteSingleJsonTable(parsed: JsonTableParsed): string {
   if (parsed.columns.length === 0) {
     logger.warn('JSON_TABLE with no columns — returning empty result');
     // Empty column set: return subquery that produces no rows
@@ -617,16 +610,16 @@ function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
   const alias = parsed.alias || 'jt';
 
   // Handle JSON tree recursion (multi-level [*] paths)
-  if (hasMultiLevelIteration(parsed)) {
+  if (_hasMultiLevelIteration(parsed)) {
     if (parsed.hasNestedPaths && parsed.nestedPaths.length > 0) {
       // NESTED PATH with multi-level — build CROSS JOIN chain
       const regularCols = parsed.columns.filter(c => c.kind !== 'nested');
       const regularSelectExprs = regularCols.map(c =>
-        `${buildColumnExtract(c)} AS ${c.name}`
+        `${_buildColumnExtract(c)} AS ${c.name}`
       );
       const nestedSelectExprs = parsed.nestedPaths.flatMap(np =>
         np.columns.map(c =>
-          `${buildColumnExtract(c)} AS ${c.name}`
+          `${_buildColumnExtract(c)} AS ${c.name}`
         )
       );
       const allSelects = [...regularSelectExprs, ...nestedSelectExprs].join(',\n       ');
@@ -637,8 +630,8 @@ function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
         const nestedAlias = `${alias}_n${idx}`;
         const extractPath = np.path.replace(/\[\*\]$/, '');
         return `CROSS JOIN json_each(
-    CASE WHEN json_type(${alias}.value, '${escapeJsonPath(extractPath)}') IS NOT NULL
-         THEN json_extract(${alias}.value, '${escapeJsonPath(extractPath)}')
+    CASE WHEN json_type(${alias}.value, '${_escapeJsonPath(extractPath)}') IS NOT NULL
+         THEN json_extract(${alias}.value, '${_escapeJsonPath(extractPath)}')
          ELSE '[]'
     END
   ) AS ${nestedAlias}`;
@@ -658,7 +651,7 @@ function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
       c => c.path && (c.path.match(/\[\*\]/g) || []).length >= 2
     );
     if (multiLevelCol) {
-      const { segments } = parseIterationPath(multiLevelCol.path);
+      const { segments } = _parseIterationPath(multiLevelCol.path);
       const iterationKeys = segments.slice(0, -1); // all except final key
 
       // Build FROM with cross-join chain
@@ -672,27 +665,27 @@ function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
       // Build SELECT expressions - each column needs to pick the right level
       const selectExprs = parsed.columns.map(col => {
         if (!col.path) {
-          return `${buildColumnExtract(col)} AS ${col.name}`;
+          return `${_buildColumnExtract(col)} AS ${col.name}`;
         }
         const wildcardCount = (col.path.match(/\[\*\]/g) || []).length;
 
         if (wildcardCount >= 2) {
           // Multi-level path: extract from the right level
-          const { extractFrom } = parseIterationPath(col.path);
+          const { extractFrom } = _parseIterationPath(col.path);
           const finalPath = col.path.replace(/\[\*\]/g, ''); // strip wildcards
           // Re-extract using the correct alias
           const lastSegment = segments[segments.length - 1];
           const depth = wildcardCount;
           const sourceAlias = depth >= 2 ? `_lv${depth - 1}` : alias;
           const extractExpr = `json_extract(${sourceAlias}.value, '$.${lastSegment}')`;
-          const castType = getSqliteCastType(col.type);
-          let expr = applyOnClause(col.onClause, extractExpr);
+          const castType = _getSqliteCastType(col.type);
+          let expr = _applyOnClause(col.onClause, extractExpr);
           if (castType) expr = `CAST(${expr} AS ${castType})`;
           return `${expr} AS ${col.name}`;
         }
 
         // Single-level or simple path — extract from base json_each's value
-        const expr = buildColumnExtract(col);
+        const expr = _buildColumnExtract(col);
         return `${expr} AS ${col.name}`;
       });
 
@@ -705,42 +698,16 @@ function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
 
   const selectExprs: string[] = [];
   for (const col of parsed.columns) {
-    selectExprs.push(`${buildColumnExtract(col)} AS ${col.name}`);
+    selectExprs.push(`${_buildColumnExtract(col)} AS ${col.name}`);
   }
 
   const selectList = selectExprs.join(',\n       ');
 
-  // Handle NESTED PATH: requires CROSS JOIN additional json_each calls
-  if (parsed.hasNestedPaths && parsed.nestedPaths.length > 0) {
-    // Build base query from non-nested columns + nested via cross joins
-    const regularCols = parsed.columns.filter(c => c.kind !== 'nested');
-    const regularSelects = regularCols.map(c =>
-      `${buildColumnExtract(c)} AS ${c.name}`
-    ).join(',\n       ');
+  // NOTE: NESTED PATH handling happens exclusively in the multi-level branch
+  // above. `_hasMultiLevelIteration` returns true whenever `hasNestedPaths` is
+  // true, so a parsed JSON_TABLE with NESTED PATH columns never reaches this
+  // point — the simple case below is only for flat (non-nested) JSON_TABLEs.
 
-    // For nested paths, we build a CROSS JOIN into the nested array
-    // Extract the nested array path (without the [*] notation)
-    const nestedPathInfo = parsed.nestedPaths[0];
-    const nestedArrayPath = nestedPathInfo.path.replace(/\[\*\]$/, '');
-    const nestedColSelects = nestedPathInfo.columns.map(c =>
-      // Extract from the nested json_each's 'value'
-      `json_extract(${alias}_nested.value, '${escapeJsonPath(c.path)}') AS ${c.name}`
-    ).join(',\n       ');
-
-    // Build: base query CROSS JOIN json_each(extracted_nested_array)
-    return `(
-  SELECT ${regularSelects},
-         ${nestedColSelects}
-  FROM json_each(${parsed.jsonString}) AS ${alias}
-  CROSS JOIN json_each(
-    CASE WHEN json_type(${alias}.value, '${escapeJsonPath(nestedArrayPath)}') IS NOT NULL
-         THEN json_extract(${alias}.value, '${escapeJsonPath(nestedArrayPath)}')
-         ELSE '[]'
-    END
-  ) AS ${alias}_nested
-) AS ${alias}`;
-
-  }
   // Simple case: just json_each + json_extract
   return `(
   SELECT ${selectList}
@@ -749,102 +716,172 @@ function rewriteSingleJsonTable(parsed: JsonTableParsed): string {
 }
 
 /**
+ * Extract a quoted string literal starting at `start`, returning its raw
+ * text (including quotes) and the index just past the closing quote.
+ *
+ * Handles single quotes (with `''` and backslash escapes), double quotes, and
+ * dollar-quoted strings. Returns null when `sql[start]` does not open a string.
+ */
+export function _readQuotedLiteral(sql: string, start: number): { raw: string; end: number } | null {
+  const c = sql[start];
+  if (c === "'" || c === '"') {
+    const quote = c;
+    let j = start + 1;
+    while (j < sql.length) {
+      if (quote === "'" && sql[j] === '\\' && j + 1 < sql.length) {
+        j += 2; // E''-style escape
+        continue;
+      }
+      if (sql[j] === quote) {
+        if (sql[j + 1] === quote) { j += 2; continue; } // doubled-quote escape
+        return { raw: sql.substring(start, j + 1), end: j + 1 };
+      }
+      j++;
+    }
+    return null; // unterminated
+  }
+  if (c === '$') {
+    const end = skipSqlLiteral(sql, start);
+    if (end !== -1 && end > start) {
+      return { raw: sql.substring(start, end), end };
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
  * Find all JSON_TABLE expressions in a SQL statement and parse them.
- * Uses parenthesis counting to correctly handle nested COLUMNS blocks.
+ *
+ * Uses literal-aware scanning (via skipSqlLiteral) so that `json_table(`
+ * occurrences inside string literals, and parentheses inside the JSON string
+ * argument or column PATH literals, do not corrupt the structural parse.
  *
  * @param sql - The SQL statement
  * @returns Array of parsed JSON_TABLE components
  */
 function findAllJsonTables(sql: string): JsonTableParsed[] {
   const results: JsonTableParsed[] = [];
-  // Use a regex to find json_table positions (but not the full match,
-  // since COLUMNS can have nested parens)
-  const positionRe = /\bjson_table\s*\(/gi;
-  let posMatch: RegExpExecArray | null;
+  const len = sql.length;
 
-  positionRe.lastIndex = 0;
-  while ((posMatch = positionRe.exec(sql)) !== null) {
-    const startIdx = posMatch.index;
-    const functionBodyStart = startIdx + posMatch[0].length;
-
-    // Step 1: Extract arguments until COLUMNS keyword
-    // Find the COLUMNS keyword after the json_table( call
-    const afterFunc = sql.substring(functionBodyStart);
-    const colsMatch = afterFunc.match(/\s*,\s*'[^']*'\s*COLUMNS\s*\(/i);
-    if (!colsMatch) continue;
-
-    const colsBlockStart = functionBodyStart + (colsMatch.index || 0) + colsMatch[0].length;
-
-    // Step 2: Count parentheses to find the matching close paren of the COLUMNS block
-    let depth = 1;
-    let i = colsBlockStart;
-    while (i < sql.length && depth > 0) {
-      if (sql[i] === '(') depth++;
-      else if (sql[i] === ')') depth--;
-      if (depth > 0) i++;
+  // Scan character-by-character so we can skip string literals and comments
+  // and only treat a `json_table(` as structural when it is real SQL.
+  let idx = 0;
+  while (idx < len) {
+    const skip = skipSqlLiteral(sql, idx);
+    if (skip !== -1) {
+      idx = skip;
+      continue;
     }
 
-    // Now i points to the closing paren of the COLUMNS block
-    // The json_table function continues after COLUMNS )
-    // Find the matching close paren for the json_table function
-    // We need to find where json_table(... ) ends
-    // The json_table function body starts at functionBodyStart
-    
-    // Count all parens from after json_table(
-    depth = 1;
-    let j = functionBodyStart;
-    while (j < sql.length && depth > 0) {
-      if (sql[j] === '(') depth++;
-      else if (sql[j] === ')') depth--;
-      if (depth > 0) j++;
+    // Detect the `json_table(` keyword at the current position.
+    if (/\bjson_table\s*\(/i.test(sql.slice(idx))) {
+      const m = /\bjson_table\s*\(/i.exec(sql.slice(idx))!;
+      const startIdx = idx + m.index;
+      const functionBodyStart = startIdx + m[0].length;
+
+      const parsed = parseJsonTableAt(sql, startIdx, functionBodyStart);
+      if (parsed) {
+        results.push(parsed);
+        idx = startIdx + parsed.originalText.length;
+        continue;
+      }
     }
 
-    // j now points to the closing paren of json_table()
-    if (j >= sql.length) continue;
-
-    // Extract the full json_table(...) text
-    const fullMatchEnd = j + 1;
-    const fullJsonTableText = sql.substring(startIdx, fullMatchEnd);
-
-    // Extract the columns block
-    const columnsBlock = sql.substring(colsBlockStart, i);
-
-    // Extract the json string (first arg)
-    const firstLenMatch = sql.substring(functionBodyStart).match(/\s*('[^']*'|"[^"]*")\s*,\s*/);
-    if (!firstLenMatch) continue;
-    const jsonString = firstLenMatch[1];
-
-    // Extract the path (second arg)
-    const afterFirstArg = functionBodyStart + firstLenMatch[0].length;
-    const secondArgMatch = sql.substring(afterFirstArg).match(/\s*('[^']*'|"[^"]*")\s*/);
-    if (!secondArgMatch) continue;
-    const pathExpr = secondArgMatch[1];
-
-    // Extract the alias (after the json_table's closing paren)
-    const afterClose = sql.substring(fullMatchEnd).match(/^\s*(?:AS\s+)?(\w+)?/);
-    const alias = afterClose ? (afterClose[1] || 'jt') : 'jt';
-
-    // Build the originalText: json_table(...) + optional alias
-    const aliasMatch = sql.substring(fullMatchEnd).match(/^\s*(?:AS\s+)?(\w+)/);
-    let originalText = fullJsonTableText;
-    if (aliasMatch) {
-      originalText = sql.substring(startIdx, fullMatchEnd + aliasMatch[0].length);
-    }
-
-    const { columns, nestedPaths } = parseColumns(columnsBlock);
-
-    results.push({
-      jsonString,
-      pathExpr,
-      columns,
-      nestedPaths,
-      alias,
-      originalText,
-      hasNestedPaths: nestedPaths.length > 0,
-    });
+    idx++;
   }
 
   return results;
+}
+
+/**
+ * Parse a single JSON_TABLE call whose keyword spans `[startIdx, functionBodyStart)`.
+ * Returns the parsed structure (including `originalText` for replacement) or
+ * null when the call is malformed.
+ */
+function parseJsonTableAt(
+  sql: string,
+  startIdx: number,
+  functionBodyStart: number,
+): JsonTableParsed | null {
+  // ── First argument: the JSON string ──
+  // Skip whitespace, then read a quoted literal.
+  let p = functionBodyStart;
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+  const jsonLit = _readQuotedLiteral(sql, p);
+  if (!jsonLit) return null;
+  const jsonString = jsonLit.raw;
+
+  // Expect a comma after the JSON string.
+  p = jsonLit.end;
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+  if (sql[p] !== ',') return null;
+  p++; // skip comma
+
+  // ── Second argument: the root path ──
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+  const pathLit = _readQuotedLiteral(sql, p);
+  if (!pathLit) return null;
+  const pathExpr = pathLit.raw;
+
+  // ── Locate the COLUMNS keyword (literal-aware) ──
+  p = pathLit.end;
+  while (p < sql.length) {
+    const skip = skipSqlLiteral(sql, p);
+    if (skip !== -1) { p = skip; continue; }
+    if (/\bCOLUMNS\s*\(/i.test(sql.slice(p))) {
+      const cm = /\bCOLUMNS\s*\(/i.exec(sql.slice(p))!;
+      p += cm.index + cm[0].length; // p now just past "COLUMNS("
+      break;
+    }
+    p++;
+  }
+  if (p >= sql.length) return null;
+
+  const colsBlockStart = p;
+
+  // ── Find the matching close paren of the COLUMNS block (literal-aware) ──
+  let depth = 1;
+  let i = colsBlockStart;
+  while (i < sql.length && depth > 0) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) { i = skip; continue; }
+    if (sql[i] === '(') depth++;
+    else if (sql[i] === ')') depth--;
+    i++;
+  }
+  if (depth !== 0) return null; // unclosed COLUMNS block
+
+  const columnsBlock = sql.substring(colsBlockStart, i - 1);
+
+  // ── Find the matching close paren of the json_table( call ──
+  // The COLUMNS block is closed; continue scanning for the single remaining
+  // close paren that ends the json_table function.
+  while (i < sql.length && /\s/.test(sql[i])) i++;
+  if (sql[i] !== ')') return null;
+  const fullMatchEnd = i + 1;
+  const fullJsonTableText = sql.substring(startIdx, fullMatchEnd);
+
+  // ── Alias (optional) ──
+  const aliasMatch = sql.slice(fullMatchEnd).match(/^\s*(?:AS\s+)?([A-Za-z_]\w*)/);
+  let alias = 'jt';
+  let originalText = fullJsonTableText;
+  if (aliasMatch) {
+    alias = aliasMatch[1];
+    originalText = sql.substring(startIdx, fullMatchEnd + aliasMatch[0].length);
+  }
+
+  const { columns, nestedPaths } = _parseColumns(columnsBlock);
+
+  return {
+    jsonString,
+    pathExpr,
+    columns,
+    nestedPaths,
+    alias,
+    originalText,
+    hasNestedPaths: nestedPaths.length > 0,
+  };
 }
 
 // ──────────────────────────────────────────────
@@ -881,7 +918,7 @@ export function rewriteJsonTable(sql: string): JsonTableRewriteResult {
   // Process from last to first to preserve string positions during replacement
   for (let i = tables.length - 1; i >= 0; i--) {
     const table = tables[i];
-    const rewritten = rewriteSingleJsonTable(table);
+    const rewritten = _rewriteSingleJsonTable(table);
     // Replace the original text with the rewritten version
     // Use simple string replacement at the first occurrence (which is the last one in reverse)
     const idx = resultSql.lastIndexOf(table.originalText);
