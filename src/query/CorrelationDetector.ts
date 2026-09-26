@@ -15,6 +15,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { isInsideLiteral, skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('CorrelationDetector');
 
@@ -54,67 +55,36 @@ interface ScanState {
 /**
  * Scan the SQL text up to (but not including) `pos`, tracking parenthesis
  * nesting depth and whether the position falls inside a string literal or a
- * comment. String literals (single/double/backtick, with backslash escapes) and
- * both `--` and `\/\* *\/` comments are skipped so they cannot influence the
+ * comment. String literals (single/double/backtick, with doubled-quote and
+ * backslash escapes), dollar-quoted strings, and both `--` and `/* *​/` comments
+ * are skipped via the shared literal scanner so they cannot influence the
  * result.
  */
 function scanUpTo(sql: string, pos: number): ScanState {
   let depth = 0;
-  let inString = false;
-  let stringChar: string | null = null;
-  let inComment = false;
+  const inStringOrComment = isInsideLiteral(sql, pos);
 
   const max = Math.min(pos, sql.length);
-  for (let i = 0; i < max; i++) {
+  let i = 0;
+  while (i < max) {
+    // Skip any literal/quoted-identifier/dollar-quote/comment wholesale so its
+    // parentheses do not affect the depth count.
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = Math.min(skip, max);
+      continue;
+    }
+
     const ch = sql[i];
-    inComment = false;
-
-    // Handle string literals
-    if (inString) {
-      if (ch === '\\') {
-        i++; // skip escaped character
-        continue;
-      }
-      if (ch === stringChar) {
-        inString = false;
-      }
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === '`') {
-      inString = true;
-      stringChar = ch;
-      continue;
-    }
-
-    // Handle comments
-    if (ch === '-' && i + 1 < max && sql[i + 1] === '-') {
-      // Single-line comment: skip to end of line. If the comment extends past
-      // `pos`, the loop terminates with i >= max and inComment stays set.
-      inComment = true;
-      while (i + 1 < max && sql[i + 1] !== '\n') i++;
-      continue;
-    }
-    if (ch === '/' && i + 1 < max && sql[i + 1] === '*') {
-      // Multi-line comment: skip to the closing */. If it extends past `pos`,
-      // the loop terminates with i >= max and inComment stays set.
-      inComment = true;
-      i += 2;
-      while (i + 1 < max && !(sql[i] === '*' && sql[i + 1] === '/')) {
-        i++;
-      }
-      i += 1;
-      continue;
-    }
-
     if (ch === '(') {
       depth++;
     } else if (ch === ')') {
       if (depth > 0) depth--;
     }
+    i++;
   }
 
-  return { depth, inStringOrComment: inString || inComment };
+  return { depth, inStringOrComment };
 }
 
 // ---- Public API ----

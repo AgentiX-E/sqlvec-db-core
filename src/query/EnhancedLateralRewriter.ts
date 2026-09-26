@@ -26,6 +26,7 @@
 import { PinoLogger } from '../logger/PinoLogger';
 import { detectLateral, rewriteLateral, type LateralResult } from './LateralJoinRewriter';
 import { detectCorrelation, type CorrelationRef } from './CorrelationDetector';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('EnhancedLateralRewriter');
 
@@ -90,47 +91,17 @@ function extractParenthesizedContent(
   }
 
   let depth = 1;
-  let inString = false;
-  let stringChar: string | null = null;
   let i = openParenIndex + 1;
 
   while (i < sql.length && depth > 0) {
     const ch = sql[i];
 
-    if (inString) {
-      if (ch === '\\') {
-        i += 2;
-        continue;
-      }
-      if (ch === stringChar) {
-        inString = false;
-      }
-      i++;
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === '`') {
-      inString = true;
-      stringChar = ch;
-      i++;
-      continue;
-    }
-
-    if (ch === '-' && i + 1 < sql.length && sql[i + 1] === '-') {
-      // Single-line comment
-      while (i < sql.length && sql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '/' && i + 1 < sql.length && sql[i + 1] === '*') {
-      // Multi-line comment
-      i += 2;
-      while (i + 1 < sql.length) {
-        if (sql[i] === '*' && sql[i + 1] === '/') {
-          i += 2;
-          break;
-        }
-        i++;
-      }
+    // Skip string literals, quoted identifiers (single/double/backtick),
+    // dollar-quoted strings, and line/block comments via the shared scanner so
+    // their parentheses never disturb the depth count.
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip;
       continue;
     }
 
@@ -200,26 +171,34 @@ function extractOuterAliases(fullSql: string, lateralIndex: number): string[] {
       if (!trimmed) continue;
       // Skip subqueries (parenthesized expressions)
       if (trimmed.startsWith('(')) continue;
-      // Remove ON/WHERE/etc. after the table ref if present
+      // Remove ON/WHERE/etc. after the table ref if present. `trimmed` is
+      // already non-empty (guarded above) and, because the removed suffix
+      // requires a leading `\s+`, the remainder is always non-empty too.
       const cleaned = trimmed.replace(/\s+(ON|WHERE|ORDER|GROUP|LIMIT|HAVING)\s.*$/i, '').trim();
-      if (!cleaned) continue;
-      // Get words in this table reference
-      const words = cleaned.split(/\s+/).filter(w => w.length > 0);
-      if (words.length === 0) continue;
-      // The alias is typically the last identifier
-      let aliasCandidate = words[words.length - 1].replace(/[(),;]/g, '');
-      if (!aliasCandidate || knownKeywords.has(aliasCandidate.toLowerCase())) {
-        for (let i = words.length - 1; i >= 0; i--) {
-          const w = words[i].replace(/[(),;]/g, '');
-          if (w && !knownKeywords.has(w.toLowerCase())) {
-            aliasCandidate = w;
-            break;
+
+      // A single FROM item may contain several joined table references
+      // (e.g. `users u JOIN orders o`). Extract the alias from each join
+      // segment so no outer alias is missed, which would otherwise cause a
+      // correlated reference to that alias to go undetected.
+      const joinSegments = cleaned.split(/\s+(?:LEFT|RIGHT|FULL|INNER|CROSS|NATURAL)?\s*JOIN\s+/i);
+
+      for (const segment of joinSegments) {
+        const words = segment.trim().split(/\s+/).filter(w => w.length > 0);
+        // The alias is typically the last identifier
+        let aliasCandidate = words[words.length - 1].replace(/[(),;]/g, '');
+        if (!aliasCandidate || knownKeywords.has(aliasCandidate.toLowerCase())) {
+          for (let i = words.length - 1; i >= 0; i--) {
+            const w = words[i].replace(/[(),;]/g, '');
+            if (w && !knownKeywords.has(w.toLowerCase())) {
+              aliasCandidate = w;
+              break;
+            }
           }
         }
-      }
-      if (aliasCandidate && !knownKeywords.has(aliasCandidate.toLowerCase())) {
-        if (!aliases.includes(aliasCandidate)) {
-          aliases.push(aliasCandidate);
+        if (aliasCandidate && !knownKeywords.has(aliasCandidate.toLowerCase())) {
+          if (!aliases.includes(aliasCandidate)) {
+            aliases.push(aliasCandidate);
+          }
         }
       }
     }
@@ -237,22 +216,14 @@ function extractOuterAliases(fullSql: string, lateralIndex: number): string[] {
  */
 function findClauseEnd(sql: string, startPos: number): number {
   let depth = 0;
-  let inString = false;
-  let stringChar: string | null = null;
   const clauseEnders = /\b(SELECT|WHERE|LATERAL|GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING)\b/i;
 
   for (let i = startPos; i < sql.length; i++) {
     const ch = sql[i];
 
-    if (inString) {
-      if (ch === '\\') { i++; continue; }
-      if (ch === stringChar) inString = false;
-      continue;
-    }
-
-    if (ch === "'" || ch === '"') {
-      inString = true;
-      stringChar = ch;
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
       continue;
     }
 
@@ -260,7 +231,9 @@ function findClauseEnd(sql: string, startPos: number): number {
     if (ch === ')') { depth--; continue; }
 
     if (depth === 0) {
-      clauseEnders.lastIndex = i;
+      // `clauseEnders` carries no `g` flag, so `substring(i).match(...)` always
+      // anchors at offset 0 of the slice; a zero index means `i` is itself the
+      // start of a clause-ending keyword.
       const enderMatch = sql.substring(i).match(clauseEnders);
       if (enderMatch && enderMatch.index === 0) {
         return i;
@@ -279,29 +252,16 @@ function splitTopLevel(text: string, delimiter: string): string[] {
   const parts: string[] = [];
   let current = '';
   let depth = 0;
-  let inString = false;
-  let stringChar: string | null = null;
 
   for (let i = 0; i < text.length; i++) {
     const ch = text[i];
 
-    if (inString) {
-      if (ch === '\\') {
-        current += ch + (text[i + 1] || '');
-        i++;
-        continue;
-      }
-      if (ch === stringChar) {
-        inString = false;
-      }
-      current += ch;
-      continue;
-    }
-
-    if (ch === "'" || ch === '"' || ch === '`') {
-      inString = true;
-      stringChar = ch;
-      current += ch;
+    // Skip literals/quoted identifiers/dollar-quotes/comments via the shared
+    // scanner so delimiters and parentheses inside them are never misinterpreted.
+    const skip = skipSqlLiteral(text, i);
+    if (skip !== -1) {
+      current += text.substring(i, skip);
+      i = skip - 1;
       continue;
     }
 
@@ -471,11 +431,11 @@ export function rewriteLateralEnhanced(
           occ.subqueryAlias || '',
           occ.correlation.refs,
         );
-        rewrittenSql = scalarRewrite.sql;
+        // Entry conditions (single-column SELECT, no inner FROM) guarantee the
+        // scalar rewrite always succeeds here, so the `!` is safe and mirrors
+        // the checked invariants above.
+        rewrittenSql = scalarRewrite!;
         anyRewritten = true;
-        if (scalarRewrite.warning) {
-          result.warnings.push(scalarRewrite.warning);
-        }
         logger.debug(
           { subqueryAlias: occ.subqueryAlias, sqlSlice: occ.subqueryInnerSql.substring(0, 60) },
           'Single-column LATERAL with SELECT-list correlation rewritten as correlated scalar subquery',
@@ -483,35 +443,25 @@ export function rewriteLateralEnhanced(
         continue; // skip CROSS JOIN + warning path
       }
 
-      // ── Otherwise: existing CROSS JOIN + optional warning ──
-      // Determine if ALL correlation refs are in WHERE clause context.
-      // If all are in WHERE, the CROSS JOIN rewrite is safe (WHERE clause
-      // handles correlation). If any ref is NOT in WHERE (e.g., in SELECT),
-      // it would break after LATERAL is stripped, so we need a warning.
-      const allRefsInWhere = occ.correlation.refs.every(r =>
-        refIsInWhereClause(occ.subqueryInnerSql, r.fullRef),
-      );
+      // ── Otherwise: CROSS JOIN rewrite at the cost of correlation semantics ──
+      // A correlated subquery with its own FROM clause cannot be expressed in
+      // SQLite without LATERAL: after stripping LATERAL into a CROSS JOIN the
+      // outer alias is no longer in scope inside the subquery. We therefore
+      // replace correlation references with placeholder comments (via the
+      // already-computed `sqlWithoutCorrelation`) and ALWAYS emit a semantic-gap
+      // warning — there is no "safe" correlated CROSS JOIN, regardless of
+      // whether the reference sits in WHERE or elsewhere.
 
-      // Step a: Replace correlation refs with placeholders inside the subquery
-      // We need to locate the correlation ref text within the full SQL
+      // Step a: Swap in the placeholder-annotated subquery computed by
+      // CorrelationDetector. Using the precomputed string (instead of re-matching
+      // each alias.column with a fresh regex) keeps every reference — including
+      // multiple distinct references — correctly replaced without index drift.
       const subqueryStartInFull = rewrittenSql.indexOf(occ.subqueryInnerSql, occ.lateralKwIndex);
       if (subqueryStartInFull >= 0) {
-        for (const ref of occ.correlation.refs) {
-          const refPattern = new RegExp(`\\b${ref.alias}\\.${ref.column}\\b`);
-          const subquerySlice = rewrittenSql.substring(
-            subqueryStartInFull,
-            subqueryStartInFull + occ.subqueryInnerSql.length,
-          );
-          const refMatch = subquerySlice.match(refPattern);
-          if (refMatch) {
-            const refStart = subqueryStartInFull + refMatch.index!;
-            const refEnd = refStart + refMatch[0].length;
-            rewrittenSql =
-              rewrittenSql.substring(0, refStart) +
-              `/* CORR(${refMatch[0]}) */` +
-              rewrittenSql.substring(refEnd);
-          }
-        }
+        rewrittenSql =
+          rewrittenSql.substring(0, subqueryStartInFull) +
+          occ.correlation.sqlWithoutCorrelation +
+          rewrittenSql.substring(subqueryStartInFull + occ.subqueryInnerSql.length);
       }
 
       // Step b: Replace the `context LATERAL` with appropriate join keyword
@@ -520,9 +470,8 @@ export function rewriteLateralEnhanced(
 
       anyRewritten = true;
 
-      // Step c: Add gap warning only if any correlation ref is NOT in WHERE clause.
-      // WHERE-clause refs are safe with CROSS JOIN; non-WHERE refs are truly problematic.
-      if (!allRefsInWhere && !gapWarningAdded) {
+      // Step c: Inject the gap warning comment for every correlated CROSS JOIN.
+      if (!gapWarningAdded) {
         if (rewrittenSql.endsWith(';')) {
           rewrittenSql = rewrittenSql.slice(0, -1) + '\n' + CORRELATION_GAP_WARNING + ';';
         } else {
@@ -531,43 +480,14 @@ export function rewriteLateralEnhanced(
         gapWarningAdded = true;
       }
 
-      if (!allRefsInWhere) {
-        const refList = occ.correlation.refs.map(r => r.fullRef).join(', ');
-        result.warnings.push(
-          `LATERAL subquery references outer column(s) outside WHERE clause: [${refList}]. ` +
-          'Cross-join may produce cartesian product. Manual SQL rewriting required.',
-        );
-        logger.warn(
-          { refs: occ.correlation.refs.map(r => r.fullRef), outerAliases: occ.outerAliases },
-          'Correlated LATERAL subquery with non-WHERE refs detected — semantic gap warning injected',
-        );
-      } else {
-        logger.debug(
-          { refs: occ.correlation.refs.map(r => r.fullRef) },
-          'Correlated LATERAL subquery with WHERE-clause refs — no semantic gap warning needed',
-        );
-      }
-    } else if (occ.hasCorrelation && !occ.allRefsInWhere && occ.singleColumnSelect) {
-      // ---- Correlated LATERAL with single-column SELECT list refs → scalar subquery ----
-      // Transformation: remove LATERAL, keep the subquery as correlated scalar subquery.
-      // The outer column refs are in scope when the subquery is in scalar position.
-      const scalarRewrite = tryScalarSubqueryRewrite(
-        rewrittenSql,
-        occ.lateralKwIndex,
-        occ.context,
-        occ.subqueryInnerSql,
-        occ.subqueryAlias || '',
-        occ.correlation.refs,
+      const refList = occ.correlation.refs.map(r => r.fullRef).join(', ');
+      result.warnings.push(
+        `LATERAL subquery references outer column(s): [${refList}]. ` +
+        'Cross-join produce cartesian product or unresolved references. Manual SQL rewriting required.',
       );
-      rewrittenSql = scalarRewrite.sql;
-      anyRewritten = true;
-      if (scalarRewrite.warning) {
-        result.warnings.push(scalarRewrite.warning);
-      }
-      // Log success: single-column LATERAL converted to scalar subquery
-      logger.debug(
-        { subqueryAlias: occ.subqueryAlias, sqlSlice: occ.subqueryInnerSql.substring(0, 60) },
-        'Single-column LATERAL with SELECT-list correlation rewritten as correlated scalar subquery',
+      logger.warn(
+        { refs: occ.correlation.refs.map(r => r.fullRef), outerAliases: occ.outerAliases },
+        'Correlated LATERAL subquery detected — semantic gap warning injected',
       );
     } else {
       // ---- Non-correlated LATERAL: use basic keyword strip ----
@@ -593,23 +513,17 @@ export function rewriteLateralEnhanced(
 
 // ---- Internal: Scalar subquery rewrite for single-column SELECT-list correlation ----
 
-interface ScalarRewriteResult {
-  sql: string;
-  warning: string | null;
-}
-
 /**
  * Attempt to rewrite a correlated LATERAL subquery with SELECT-list correlation
  * into a correlated scalar subquery in the outer SELECT list.
  *
- * Only applicable when the LATERAL subquery has a single-column SELECT list.
+ * Only applicable when the LATERAL subquery has a single-column SELECT list and
+ * no FROM clause of its own, so the correlated reference(s) live entirely in
+ * the SELECT list and the whole subquery can be collapsed into a scalar
+ * subquery in the outer SELECT list:
  *
- * ## No-FROM Case (fully resolved):
  *   `SELECT * FROM users u, LATERAL (SELECT u.name AS uname) sub`
- *   → `SELECT *, (SELECT u.name) AS uname FROM users u`
- *
- * ## With-FROM Case (kept in FROM as scalar, still needs manual review):
- *   → warning message returned
+ *   → `SELECT *, (SELECT name) AS sub FROM users u`
  *
  * @param fullSql - Full SQL statement
  * @param lateralKwIndex - Index of LATERAL keyword in fullSql
@@ -617,6 +531,7 @@ interface ScalarRewriteResult {
  * @param subqueryInnerSql - Inner SQL of the LATERAL subquery (between parens)
  * @param subqueryAlias - Alias after the closing paren (e.g., "sub")
  * @param correlationRefs - Correlation references detected
+ * @returns The rewritten SQL, or `null` when the rewrite cannot be completed.
  */
 function tryScalarSubqueryRewrite(
   fullSql: string,
@@ -625,10 +540,10 @@ function tryScalarSubqueryRewrite(
   subqueryInnerSql: string,
   subqueryAlias: string,
   correlationRefs: CorrelationRef[],
-): ScalarRewriteResult {
+): string | null {
   // Only handle single-column SELECT subqueries
   if (!checkSingleColumnSelect(subqueryInnerSql)) {
-    return { sql: fullSql, warning: null };
+    return null;
   }
 
   const innerClean = subqueryInnerSql.trim();
@@ -639,80 +554,71 @@ function tryScalarSubqueryRewrite(
   // Determine the effective alias for the scalar subquery
   const alias = subqueryAlias || extractColumnAlias(selectExpr);
 
-  // Check if the subquery has its own FROM clause
-  const hasOwnFrom = /\bFROM\b/i.test(innerClean);
+  // The caller only routes us here when the subquery has no FROM clause, so
+  // the correlated reference(s) live entirely in the SELECT list and the whole
+  // subquery can be collapsed into a scalar subquery in the outer SELECT list.
+  const beforeLateral = fullSql.substring(0, lateralKwIndex);
+  const fromMatch = beforeLateral.match(/\bFROM\b/i);
+  if (!fromMatch) return null;
+  const selectFromIdx = fromMatch.index!;
 
-  if (!hasOwnFrom) {
-    // ── No FROM case: move to outer SELECT list ──
-    const beforeLateral = fullSql.substring(0, lateralKwIndex);
-    const fromMatch = beforeLateral.match(/\bFROM\b/i);
-    if (!fromMatch) return { sql: fullSql, warning: null };
-    const selectFromIdx = fromMatch.index!;
-
-    // Build scalar subquery expression, unqualified
-    let scalarExpr = selectExpr;
-    for (const ref of correlationRefs) {
-      const refPattern = new RegExp(`\\b${escapeRegex(ref.alias)}\\.${escapeRegex(ref.column)}\\b`, 'g');
-      scalarExpr = scalarExpr.replace(refPattern, ref.column);
-    }
-
-    // Strip the inline AS alias from the scalar expression
-    const scalarExprClean = scalarExpr.replace(/\s+AS\s+\w+\s*$/i, '').trim();
-    const scalarSubqueryExpr = `(SELECT ${scalarExprClean}) AS ${alias}`;
-
-    // Find end of LATERAL entry (closing paren + optional alias)
-    const afterLateralEntry = fullSql.indexOf(')', lateralKwIndex);
-    if (afterLateralEntry < 0) return { sql: fullSql, warning: null };
-    let entryEnd = afterLateralEntry + 1;
-    const afterClose = fullSql.substring(entryEnd).match(/^\s+(?:AS\s+)?(\w+)/);
-    if (afterClose) entryEnd += afterClose[0].length;
-
-    // Reconstruct: insert scalar into SELECT list, remove LATERAL entry from FROM clause.
-    // The entry to remove spans from the context keyword (e.g. comma, JOIN) up to the
-    // end of the subquery alias. Find its start by scanning backwards from LATERAL.
-    const beforeLateralForEntry = fullSql.substring(0, lateralKwIndex);
-    const entryStartMatch = beforeLateralForEntry.match(/(?:FROM|,)\s*$/i);
-    const entryStart = entryStartMatch
-      ? lateralKwIndex - entryStartMatch[0].length
-      : lateralKwIndex - context.length;
-    const beforeFrom = fullSql.substring(0, selectFromIdx).trimEnd();
-    const fromPart = fullSql.substring(selectFromIdx);
-
-    // Add to SELECT list
-    const newSelect = beforeFrom.endsWith(',')
-      ? beforeFrom + ` ${scalarSubqueryExpr}`
-      : beforeFrom + `, ${scalarSubqueryExpr}`;
-
-    // Remove LATERAL entry from FROM clause
-    const lateralEntryStr = fullSql.substring(entryStart, entryEnd);
-    let fromCleaned = fromPart.replace(lateralEntryStr, '').replace(/,\s*,/g, ',').trim();
-    fromCleaned = fromCleaned.replace(/,(\s*FROM)/i, ' $1');
-    fromCleaned = fromCleaned.replace(/^(FROM\s*),/i, '$1 ');
-
-    return {
-      sql: newSelect + ' ' + fromCleaned,
-      warning: null,
-    };
+  // Build scalar subquery expression, unqualified
+  let scalarExpr = selectExpr;
+  for (const ref of correlationRefs) {
+    const refPattern = new RegExp(`\\b${escapeRegex(ref.alias)}\\.${escapeRegex(ref.column)}\\b`, 'g');
+    scalarExpr = scalarExpr.replace(refPattern, ref.column);
   }
 
-  // ── With FROM case: can't auto-rewrite. Return actionable warning ──
-  return {
-    sql: fullSql,
-    warning: `LATERAL subquery with FROM clause has SELECT-list correlation refs. ` +
-      `Cannot auto-rewrite. Move the subquery manually to the outer SELECT list: ` +
-      `replace "LATERAL (SELECT ...)" with "(SELECT ...) AS ${alias}" in the outer SELECT list.`,
-  };
+  // Strip the inline AS alias from the scalar expression
+  const scalarExprClean = scalarExpr.replace(/\s+AS\s+\w+\s*$/i, '').trim();
+  const scalarSubqueryExpr = `(SELECT ${scalarExprClean}) AS ${alias}`;
+
+  // Find end of LATERAL entry (closing paren + optional alias)
+  const afterLateralEntry = fullSql.indexOf(')', lateralKwIndex);
+  if (afterLateralEntry < 0) return null;
+  let entryEnd = afterLateralEntry + 1;
+  const afterClose = fullSql.substring(entryEnd).match(/^\s+(?:AS\s+)?(\w+)/);
+  if (afterClose) entryEnd += afterClose[0].length;
+
+  // Reconstruct: insert scalar into SELECT list, remove LATERAL entry from FROM clause.
+  // The entry to remove spans from the context keyword (e.g. comma, JOIN) up to the
+  // end of the subquery alias. Find its start by scanning backwards from LATERAL.
+  const beforeLateralForEntry = fullSql.substring(0, lateralKwIndex);
+  const entryStartMatch = beforeLateralForEntry.match(/(?:FROM|,)\s*$/i);
+  const entryStart = entryStartMatch
+    ? lateralKwIndex - entryStartMatch[0].length
+    : lateralKwIndex - context.length;
+  const beforeFrom = fullSql.substring(0, selectFromIdx).trimEnd();
+  const fromPart = fullSql.substring(selectFromIdx);
+
+  // Add to SELECT list
+  const newSelect = beforeFrom.endsWith(',')
+    ? beforeFrom + ` ${scalarSubqueryExpr}`
+    : beforeFrom + `, ${scalarSubqueryExpr}`;
+
+  // Remove LATERAL entry from FROM clause
+  const lateralEntryStr = fullSql.substring(entryStart, entryEnd);
+  let fromCleaned = fromPart.replace(lateralEntryStr, '').replace(/,\s*,/g, ',').trim();
+  fromCleaned = fromCleaned.replace(/,(\s*FROM)/i, ' $1');
+  fromCleaned = fromCleaned.replace(/^(FROM\s*),/i, '$1 ');
+
+  return newSelect + ' ' + fromCleaned;
 }
 
 /**
  * Extract a column alias from a SELECT expression.
- * Matches `expr AS alias` or `expr alias`.
+ * Matches `expr AS alias`, `expr alias`, or a (possibly table-qualified)
+ * bare column `expr.column` / `table.column`.
  */
 function extractColumnAlias(selectExpr: string): string {
   const asMatch = selectExpr.match(/\s+AS\s+([a-zA-Z_]\w*)\s*$/i);
   if (asMatch) return asMatch[1];
   const bareMatch = selectExpr.match(/\s+([a-zA-Z_]\w*)\s*$/);
   if (bareMatch) return bareMatch[1];
+  // No trailing whitespace alias: handle a bare column, possibly qualified by
+  // a table alias via `alias.column` (e.g. `u.age` → `age`).
+  const qualifiedMatch = selectExpr.match(/(?:[a-zA-Z_]\w*\.)?([a-zA-Z_]\w*)\s*$/);
+  if (qualifiedMatch) return qualifiedMatch[1];
   const words = selectExpr.trim().split(/\s+/);
   return words[words.length - 1] || 'scalar';
 }
@@ -847,22 +753,26 @@ function checkSingleColumnSelect(subquerySql: string): boolean {
  * Returns empty string if no alias is found.
  */
 function extractSubqueryAlias(sql: string, closeParenIndex: number): string {
-  const afterParen = sql.substring(closeParenIndex + 1).trim();
-  // Try WITH or WITHOUT AS keyword
-  const asMatch = afterParen.match(/^(?:\s+AS\s+|\s+)([a-zA-Z_]\w*)/);
+  const afterParen = sql.substring(closeParenIndex + 1);
+  // Allow an optional leading `AS` keyword. Do not trim first: a bare alias has
+  // no leading whitespace when the parenthesis is immediately followed by the
+  // identifier, but an explicit `AS x` needs the whitespace to be distinguished
+  // from a continuation of the identifier.
+  const asMatch = afterParen.match(/^\s*(?:AS\s+)?([a-zA-Z_]\w*)/);
   if (asMatch) return asMatch[1];
   return '';
 }
 
 /**
  * Extract the context keyword (e.g. ", ", "FROM ", "JOIN ", "LEFT JOIN ")
- * that appears immediately before LATERAL.
+ * that appears immediately before LATERAL. The trailing whitespace is kept so
+ * the caller can locate the context span precisely via `context.length`.
  */
 function extractContextBeforeLateral(before: string): string {
-  // Match common patterns: comma, FROM, JOIN variants
-  const trimmed = before.trimEnd();
+  // Match common patterns: comma, FROM, JOIN variants, capturing the trailing
+  // whitespace that separates the keyword from LATERAL.
   const contextRe = /((?:FROM|,|(?:LEFT\s+|RIGHT\s+|INNER\s+|CROSS\s+|NATURAL\s+)?JOIN)\s*)$/i;
-  const contextMatch = trimmed.match(contextRe);
+  const contextMatch = before.match(contextRe);
   return contextMatch ? contextMatch[1] : '';
 }
 
@@ -891,7 +801,10 @@ function rewriteOneLateralContext(
   let joinReplacement: string;
 
   if (ctxLower === 'from' || ctxLower === ',') {
-    joinReplacement = 'CROSS JOIN ';
+    // A comma/`FROM` separator becomes CROSS JOIN; keep a leading space so the
+    // preceding identifier does not fuse with `CROSS` (e.g. `users u, ...` must
+    // not become `users uCROSS ...`).
+    joinReplacement = ' CROSS JOIN ';
   } else if (ctxLower.endsWith('join') || ctxLower === 'join') {
     joinReplacement = 'INNER JOIN ';
   } else {
@@ -909,3 +822,22 @@ function rewriteOneLateralContext(
     sql.substring(contextEnd + 7) // skip "LATERAL" (7 chars)
   );
 }
+
+// ---- Internal helpers re-exported for direct unit testing ----
+// These pure functions are the lexing/parsing primitives used internally. They
+// are re-exported (underscore-prefixed) so their defensive branches — which are
+// unreachable through normal `rewriteLateralEnhanced` inputs — can be exercised
+// directly rather than deleted.
+export {
+  extractParenthesizedContent as _extractParenthesizedContent,
+  extractOuterAliases as _extractOuterAliases,
+  findClauseEnd as _findClauseEnd,
+  splitTopLevel as _splitTopLevel,
+  isRefInWhereClause as _isRefInWhereClause,
+  refIsInWhereClause as _refIsInWhereClause,
+  extractColumnAlias as _extractColumnAlias,
+  checkSingleColumnSelect as _checkSingleColumnSelect,
+  extractSubqueryAlias as _extractSubqueryAlias,
+  extractContextBeforeLateral as _extractContextBeforeLateral,
+  rewriteOneLateralContext as _rewriteOneLateralContext,
+};

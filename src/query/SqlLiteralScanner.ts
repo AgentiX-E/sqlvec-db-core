@@ -11,6 +11,8 @@
  *   - single-quoted string `'...'` (with `''` doubled-quote and `\` backslash
  *     escapes, the latter covering PostgreSQL E'' strings)
  *   - double-quoted identifier `"..."` (with `""` doubled-quote escape)
+ *   - backtick-quoted identifier `` `...` `` (with ``` `` ``` doubled-backtick
+ *     escape)
  *   - dollar-quoted string `$$ ... $$` or `$tag$ ... $tag$`
  *   - line comment `-- ...`
  *   - block comment `/* ... *​/`
@@ -66,6 +68,19 @@ export function skipSqlLiteral(sql: string, pos: number): number {
     while (j < len) {
       if (sql[j] === '"') {
         if (sql[j + 1] === '"') { j += 2; continue; } // doubled "" escape
+        return j + 1;
+      }
+      j++;
+    }
+    return len; // unterminated identifier
+  }
+
+  // Backtick-quoted identifier.
+  if (c === '`') {
+    let j = pos + 1;
+    while (j < len) {
+      if (sql[j] === '`') {
+        if (sql[j + 1] === '`') { j += 2; continue; } // doubled `` escape
         return j + 1;
       }
       j++;
