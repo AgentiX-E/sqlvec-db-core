@@ -6,9 +6,9 @@
  *
  * Strategy:
  *   1. `UUID` / `uuid` as column type         → `TEXT`
- *   2. `gen_random_uuid()`                     → `uuid_generate_v4()` (→ proper UUID with hyphens)
- *   3. `uuid_generate_v4()`                    → `crypto.randomUUID()` (Node 19+)
- *   4. `uuid_generate_v1()`                    → time-based UUID v1 (timestamp + clock + MAC)
+ *   2. `gen_random_uuid()`                     → `hex(randomblob(16))` (runtime-random 32-hex, no hyphens)
+ *   3. `uuid_generate_v4()`                    → `'…'` literal (crypto.randomUUID, Node 19+)
+ *   4. `uuid_generate_v1()`                    → `'…'` literal (time-based UUID v1)
  *   5. `::uuid` / `::UUID` type cast           → stripped (removed)
  *   6. `uuid_nil()`                            → '00000000-0000-0000-0000-000000000000'
  *   7. `uuid_ns_dns()` / `uuid_ns_url()` /     → namespace UUID constants
@@ -176,8 +176,27 @@ const RE_UUID_NS_OID = (): RegExp => /\buuid_ns_oid\s*\(\s*\)/gi;
 const RE_UUID_NS_X500 = (): RegExp => /\buuid_ns_x500\s*\(\s*\)/gi;
 /** ::uuid type cast */
 const RE_UUID_CAST = (): RegExp => /::\s*uuid\b/gi;
-/** standalone UUID type keyword */
-const RE_UUID_TYPE = (): RegExp => /\bUUID\b/gi;
+/**
+ * Standalone `UUID` type keyword, matched only in type position.
+ *
+ * A bare word `uuid` is ambiguous: it may denote the UUID *type* (as in
+ * `id UUID` or `CAST(x AS uuid)`) or an ordinary *identifier/column* (as in
+ * `SELECT uuid FROM t`, `WHERE uuid = 1`, or `ORDER BY uuid`). Blindly
+ * rewriting every `uuid` to `TEXT` would corrupt column references.
+ *
+ * We guard against the identifier reading with two lookarounds:
+ *   - a negative lookbehind rejects `uuid` preceded by an identifier-leading
+ *     keyword or punctuation (`SELECT`, `WHERE`, `FROM`, `ORDER`, `GROUP`,
+ *     `ON`, `BY`, `SET`, `AND`, `OR`, `NOT`, `JOIN`, `UNION`, `,`, `.`);
+ *   - a negative lookahead rejects `uuid` followed by an operator/column
+ *     continuation (`=`, comparisons, `.`, `FROM`, `AS`, `AND`, …).
+ *
+ * `AS uuid` (CAST) and a DDL column definition `id UUID` are deliberately
+ * NOT rejected in either direction, so both still rewrite to `TEXT`.
+ */
+const RE_UUID_TYPE = (): RegExp =>
+  // eslint-disable-next-line regexp/no-unused-capturing-group
+  /(?<!\b(?:SELECT|WHERE|FROM|ORDER|GROUP|ON|BY|SET|AND|OR|NOT|JOIN|UNION|,|\.)\s+)UUID\b(?!\s*(?:FROM|WHERE|ORDER|GROUP|ON|BY|SET|AND|OR|NOT|IN|JOIN|UNION|=|<>|!=|<=|>=|<|>|\.))/gi;
 
 // ── Detect ───────────────────────────────────────────────────────
 
