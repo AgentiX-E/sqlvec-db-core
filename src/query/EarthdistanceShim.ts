@@ -17,8 +17,69 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('EarthdistanceShim');
+
+// ── Internal helpers (literal-aware function-name detection) ──────
+
+/**
+ * The set of earthdistance function names recognized by this shim, kept in
+ * sync with the evaluation switch so detection and evaluation never diverge.
+ */
+const EARTH_FUNCTION_NAMES = [
+  'earth',
+  'earth_distance',
+  'earth_distance_meters',
+  'earth_distance_miles',
+  'll_to_earth',
+  'earth_to_ll',
+  'lat_to_earth',
+  'lon_to_earth',
+  'earth_box',
+  'point',
+] as const;
+
+/**
+ * Detect whether `sql` contains a call to any earthdistance function, using
+ * a literal-aware scan so that function names appearing inside string
+ * literals, quoted identifiers, or comments are never treated as calls.
+ *
+ * A function is recognized only when its name appears as a whole word
+ * (not part of a larger identifier) and is followed — after optional
+ * whitespace — by an opening parenthesis.
+ */
+function findEarthFunction(sql: string, names: readonly string[]): boolean {
+  if (typeof sql !== 'string' || sql.length === 0) {
+    return false;
+  }
+
+  const lower = sql.toLowerCase();
+
+  for (let i = 0; i < lower.length; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    const c = lower[i];
+    if (!/[a-z_]/.test(c)) continue;
+    // Whole-word boundary: previous char must not be an identifier char.
+    if (i > 0 && /[a-z0-9_$]/.test(lower[i - 1])) continue;
+
+    for (const name of names) {
+      if (!lower.startsWith(name, i)) continue;
+      const afterName = i + name.length;
+      // Next non-whitespace char must be `(`.
+      let j = afterName;
+      while (j < lower.length && /\s/.test(lower[j])) j++;
+      if (lower[j] === '(') return true;
+    }
+  }
+
+  return false;
+}
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -220,11 +281,10 @@ export class EarthdistanceShim {
 
   /**
    * Detect if a SQL statement contains earthdistance function calls.
+   * Literal-aware: function names inside strings/comments are ignored.
    */
   static detectFunctions(sql: string): boolean {
-    const EARTH_FUNCS_RE =
-      /\b(earth|earth_distance|ll_to_earth|lat_to_earth|lon_to_earth|earth_box|earth_to_ll|point)\s*\(/i;
-    return EARTH_FUNCS_RE.test(sql);
+    return findEarthFunction(sql, EARTH_FUNCTION_NAMES);
   }
 
   /**
@@ -245,6 +305,12 @@ export class EarthdistanceShim {
         return EarthdistanceShim.earth_to_ll(args[0] as EarthPoint);
       case 'earth_distance':
         return EarthdistanceShim.earth_distance(args[0] as EarthPoint, args[1] as EarthPoint);
+      case 'earth_distance_meters':
+        return EarthdistanceShim.earth_distance_meters(args[0] as EarthPoint, args[1] as EarthPoint);
+      case 'earth_distance_miles':
+        return EarthdistanceShim.earth_distance_miles(args[0] as EarthPoint, args[1] as EarthPoint);
+      case 'earth_box':
+        return earth_box(args[0] as string, Number(args[1]));
       case 'point':
         return EarthdistanceShim.point(args[0] as EarthPoint);
       default:
@@ -285,7 +351,14 @@ export function earth_decode_point(point: string): [number, number] {
   if (parts.length !== 2) {
     throw new Error('Invalid earth point format: "' + point + '". Expected "lat:lon".');
   }
-  return [parseFloat(parts[0]), parseFloat(parts[1])];
+  const lat = parseFloat(parts[0]);
+  const lon = parseFloat(parts[1]);
+  if (!isFinite(lat) || !isFinite(lon)) {
+    throw new Error(
+      'Invalid earth point format: "' + point + '". Expected numeric "lat:lon".',
+    );
+  }
+  return [lat, lon];
 }
 
 /** @deprecated Use EarthdistanceShim.earth_distance() instead */
@@ -340,9 +413,7 @@ export function isEarthModuleEnabled(): boolean {
 
 /** @deprecated Use EarthdistanceShim.detectFunctions() instead */
 export function detectEarthFunctions(sql: string): boolean {
-  const EARTH_FUNCS_RE =
-    /\b(earth|earth_distance|ll_to_earth|lat_to_earth|lon_to_earth|earth_box|earth_encode|earth_decode)\s*\(/i;
-  return EARTH_FUNCS_RE.test(sql);
+  return findEarthFunction(sql, EARTH_FUNCTION_NAMES);
 }
 
 /** @deprecated Use EarthdistanceShim.evaluateFunction() instead */
@@ -357,6 +428,8 @@ export function evaluateEarthFunction(fnName: string, args: unknown[]): unknown 
       return toRadians(Number(args[0]));
     case 'll_to_earth':
       return '' + toRadians(Number(args[0])) + POINT_SEPARATOR + toRadians(Number(args[1]));
+    case 'earth_box':
+      return earth_box(args[0] as string, Number(args[1]));
     default:
       return EarthdistanceShim.evaluateFunction(fnName, args);
   }
