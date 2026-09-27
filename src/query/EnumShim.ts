@@ -98,6 +98,7 @@ export function handleEnumStmt(sql: string): EnumResult {
  * a well-formed `CREATE TYPE ... AS ENUM`.
  */
 export function parseCreateEnum(sql: string): { typeName: string; values: string[] } | null {
+  if (!sql || typeof sql !== 'string') return null;
   let i = skipWs(sql, 0);
 
   if (!matchKeyword(sql, i, 'CREATE')) return null;
@@ -214,6 +215,7 @@ export function parseAlterRenameValue(sql: string): {
   oldValue: string;
   newValue: string;
 } | null {
+  if (!sql || typeof sql !== 'string') return null;
   let i = skipWs(sql, 0);
 
   if (!matchKeyword(sql, i, 'ALTER')) return null;
