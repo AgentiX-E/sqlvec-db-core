@@ -98,12 +98,13 @@ export function rewriteCitextComparisons(
     escapeRegex(col),
   );
 
-  let result = sql;
+  // Protect literals so a column comparison appearing inside a string
+  // literal (e.g. `SELECT 'name = Hello'`) is never rewritten.
+  const protectedSql = protectSQL(sql);
+  let result = protectedSql.protectedSql;
 
   for (const colPattern of columnPatterns) {
     // Pattern 1: col = expr  →  LOWER(col) = LOWER(expr)
-    // This regex matches: column_name followed by =, then captures the RHS expression
-    // ending at a keyword boundary or end-of-string.
     result = result.replace(
       new RegExp(
         `\\b(${colPattern})\\s*=\\s*('[^']*'|[^\\s,;)]+)(?=\\s+(?:AND|OR|WHERE|ORDER|GROUP|LIMIT|HAVING|SET|RETURNING|OFFSET|FETCH)|\\s*[,;)]|$)`,
@@ -140,6 +141,8 @@ export function rewriteCitextComparisons(
     );
   }
 
+  result = restoreSQL({ ...protectedSql, protectedSql: result });
+
   const rewritten = result !== sql;
   if (rewritten) {
     logger.debug({ original: sql, rewritten: result, citextColumns }, 'Rewrote citext comparisons');
@@ -162,11 +165,14 @@ export function rewriteCitextSql(sql: string, citextColumns: string[]): CitextRe
 
 /**
  * Detect CITEXT in SQL.
+ *
+ * Literal-aware: a `CITEXT` token appearing inside a string literal, quoted
+ * identifier, or comment is NOT treated as a type reference.
  */
 export function detectCitextType(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
-  const cleaned = sql.replace(/'[^']*'/g, '').replace(/--[^\n]*/g, '');
-  return /\bCITEXT\b/i.test(cleaned);
+  const protectedSql = protectSQL(sql);
+  return /\bCITEXT\b/i.test(protectedSql.protectedSql);
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
