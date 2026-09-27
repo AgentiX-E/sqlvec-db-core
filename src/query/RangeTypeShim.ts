@@ -30,6 +30,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('RangeTypeShim');
 
@@ -54,35 +55,11 @@ const RANGE_TYPE_NAMES = [
   'daterange',
 ] as const;
 
-/** Combined regex to detect any range type name in SQL text. */
-const RANGE_TYPE_RE = /\b(int4range|int8range|numrange|tsrange|tstzrange|daterange)\b/i;
-
-/**
- * Matches range type names used as column types in DDL.
- */
-const DDL_RANGE_TYPE_RE = /\b(int4range|int8range|numrange|tsrange|tstzrange|daterange)\b/gi;
-
 /** Set of recognized range type names for O(1) lookup. */
 const RANGE_TYPE_SET = new Set<string>(RANGE_TYPE_NAMES);
 
 /**
- * Regex matching known range operators.
- *
- * Operators:
- *   @>  — contains (element @> range, range @> range)
- *   <@  — is contained by (range <@ range, element <@ range)
- *   &&  — overlap (range && range)
- *   -|- — is adjacent to (range -|- range)
- */
-const RANGE_OPERATOR_RE = /(?:(?<![<>])@>|<@(?![<>])|\&\&|-\|-)/;
-
-/**
- * Regex matching range constructor function calls.
- */
-const RANGE_FUNC_CALL_RE = /\b(int4range|int8range|numrange|tsrange|tstzrange|daterange)\s*\(/gi;
-
-/**
- * Matches a simple two-argument range constructor call.
+ * Matches simple two-argument range constructor call.
  *
  * Group 1: range type name
  * Group 2: lower bound expression
@@ -111,10 +88,8 @@ const SIMPLE_DATE_RANGE_RE =
  *   col @> 5
  *   int4range(a,b) @> value
  *
- * We use a two-step approach: first detect the @> operator in context,
- * then expand based on whether the left side is a range function call or a column reference.
+ * The expansion is implemented in `expandRangeOperators` below.
  */
-const RANGE_CONTAINS_RE = /(\w[\w.()\s]*(?:int4range|int8range|numrange|tsrange|tstzrange|daterange)\s*\([^)]+\)|[A-Za-z_]\w*)\s*(@>)\s*([A-Za-z_]\w*|\d+(?:\.\d+)?|'[^']*')/i;
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -128,7 +103,12 @@ export function detectRangeType(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
-  return RANGE_TYPE_RE.test(sql.trim());
+  // Protect string literals, quoted identifiers and comments so a range type
+  // name inside them (`SELECT 'int4range'`) is not reported as a reference.
+  // Use a fresh regex instance to avoid lastIndex leakage across calls.
+  return /\b(int4range|int8range|numrange|tsrange|tstzrange|daterange)\b/i.test(
+    protectSQL(sql.trim()).protectedSql,
+  );
 }
 
 /**
@@ -143,7 +123,9 @@ export function detectRangeOperator(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
-  return RANGE_OPERATOR_RE.test(sql.trim());
+  // Protect literals and comments so an operator inside them (`SELECT '@>'`)
+  // is not reported. Use a fresh regex to avoid lastIndex leakage.
+  return /(?:(?<![<>])@>|<@(?![<>])|\&\&|-\|-)/.test(protectSQL(sql.trim()).protectedSql);
 }
 
 /**
@@ -174,14 +156,10 @@ export function rewriteRangeType(sql: string): RangeResult {
     return { sql, rewritten: false };
   }
 
-  // Fast path — no range type present
-  if (!RANGE_TYPE_RE.test(sql.trim())) {
+  // Fast path — no range type present (outside literals/comments)
+  if (!detectRangeType(sql)) {
     return { sql, rewritten: false };
   }
-
-  // Reset regex lastIndex after test()
-  RANGE_TYPE_RE.lastIndex = 0;
-  DDL_RANGE_TYPE_RE.lastIndex = 0;
 
   // Detect DDL context — only rewrite in CREATE/ALTER TABLE or column definition context
   const trimmed = sql.trim();
@@ -192,8 +170,16 @@ export function rewriteRangeType(sql: string): RangeResult {
     return { sql: trimmed, rewritten: false };
   }
 
-  // Replace range type names with TEXT
-  const rewritten = trimmed.replace(DDL_RANGE_TYPE_RE, 'TEXT');
+  // Protect string literals, quoted identifiers and comments so a range type
+  // name inside them (`DEFAULT 'int4range'`) is never rewritten to TEXT.
+  const protectedSql = protectSQL(trimmed);
+  const rewritten = restoreSQL({
+    ...protectedSql,
+    protectedSql: protectedSql.protectedSql.replace(
+      /\b(int4range|int8range|numrange|tsrange|tstzrange|daterange)\b/gi,
+      'TEXT',
+    ),
+  });
 
   if (rewritten !== trimmed) {
     logger.debug({ original: trimmed, rewritten }, 'Rewrote range type columns to TEXT');
@@ -219,35 +205,45 @@ export function simplifyRangeExpr(sql: string): RangeResult {
 
   const trimmed = sql.trim();
 
-  // Fast path — no range function calls present
-  if (!RANGE_FUNC_CALL_RE.test(trimmed)) {
+  // Fast path — no range function calls present (outside literals/comments)
+  if (!/\b(int4range|int8range|numrange|tsrange|tstzrange|daterange)\s*\(/i.test(
+    protectSQL(trimmed).protectedSql,
+  )) {
     return { sql: trimmed, rewritten: false };
   }
 
-  // Reset regex lastIndex after test()
-  RANGE_FUNC_CALL_RE.lastIndex = 0;
-  SIMPLE_THREE_ARG_RANGE_RE.lastIndex = 0;
-  SIMPLE_TWO_ARG_RANGE_RE.lastIndex = 0;
-  SIMPLE_DATE_RANGE_RE.lastIndex = 0;
+  // Phase 1 — three-argument numeric range calls (bounds mode string). This MUST
+  // run on the *original* text because the third argument's bracket string
+  // (`'[]'`, `'[)'`, ...) is a literal that `protectSQL` would otherwise replace
+  // with a placeholder, making `SIMPLE_THREE_ARG_RANGE_RE` unable to match.
+  let result = trimmed.replace(
+    SIMPLE_THREE_ARG_RANGE_RE,
+    (_match, _func, lower, upper, bounds): string => {
+      const leftBound = bounds.length >= 1 ? bounds[0] : '[';
+      const rightBound = bounds.length >= 2 ? bounds[1] : ')';
+      return `'${leftBound}' || ${String(lower).trim()} || ',' || ${String(upper).trim()} || '${rightBound}'`;
+    },
+  );
 
-  let result = trimmed;
+  // Phase 2 — protect remaining literals/comments so a range constructor inside
+  // them (`SELECT 'int4range(1,2)'`) is never rewritten, then rewrite two-arg calls.
+  const protectedSql = protectSQL(result);
 
-  // ── Phase 1: Three-argument numeric range calls ────────────
-  result = result.replace(SIMPLE_THREE_ARG_RANGE_RE, (_match, _func, lower, upper, bounds): string => {
-    const leftBound = bounds.length >= 1 ? bounds[0] : '[';
-    const rightBound = bounds.length >= 2 ? bounds[1] : ')';
-    return `'${leftBound}' || ${String(lower).trim()} || ',' || ${String(upper).trim()} || '${rightBound}'`;
-  });
+  let working = protectedSql.protectedSql;
+  working = working.replace(
+    SIMPLE_TWO_ARG_RANGE_RE,
+    (_match, _func, lower, upper): string => {
+      return `'[' || ${String(lower).trim()} || ',' || ${String(upper).trim()} || ')'`;
+    },
+  );
+  working = working.replace(
+    SIMPLE_DATE_RANGE_RE,
+    (_match, _func, lower, upper): string => {
+      return `'[' || ${String(lower).trim()} || ',' || ${String(upper).trim()} || ')'`;
+    },
+  );
 
-  // ── Phase 2: Two-argument numeric range calls ──────────────
-  result = result.replace(SIMPLE_TWO_ARG_RANGE_RE, (_match, _func, lower, upper): string => {
-    return `'[' || ${String(lower).trim()} || ',' || ${String(upper).trim()} || ')'`;
-  });
-
-  // ── Phase 3: Two-argument date/timestamp range calls ──────
-  result = result.replace(SIMPLE_DATE_RANGE_RE, (_match, _func, lower, upper): string => {
-    return `'[' || ${String(lower).trim()} || ',' || ${String(upper).trim()} || ')'`;
-  });
+  result = restoreSQL({ ...protectedSql, protectedSql: working });
 
   const rewrote = result !== trimmed;
 
@@ -282,20 +278,27 @@ export function expandRangeOperators(sql: string): RangeResult {
 
   const trimmed = sql.trim();
 
-  // Fast path — no range operators present
-  if (!RANGE_OPERATOR_RE.test(trimmed)) {
+  // Fast path — no range operators present (outside literals/comments)
+  if (!/(?:(?<![<>])@>|<@(?![<>])|\&\&|-\|-)/.test(protectSQL(trimmed).protectedSql)) {
     return { sql: trimmed, rewritten: false };
   }
 
-  let result = trimmed;
+  // Protect string literals, quoted identifiers and comments so an operator
+  // inside them (`SELECT 'a @> b'`) is never expanded.
+  const protectedSql = protectSQL(trimmed);
+
+  let result = protectedSql.protectedSql;
   let rewritten = false;
 
   // ── Phase 1: Expand int4range(a,b) @> value → a <= value AND value < b ──
   // Only match simple scalar values (identifiers, numbers, strings) — NOT other function calls
   const SCALAR = /[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*|\d+(?:\.\d*)?|'[^']*'/;
   const SCALAR_SRC = SCALAR.source;
-  // Scalar that is NOT followed by ( — i.e. not a function call start
-  const SCALAR_NO_FUNC_SRC = `(?:${SCALAR_SRC})(?!\\s*\\()`;
+  // Scalar that is NOT followed by ( — i.e. not a function call start.
+  // The trailing `(?![\w])` prevents the greedy `[A-Za-z_]\w*` from backtracking
+  // one character at a time: without it, `foo(1,2)` would match `fo` (whose
+  // `(?!\s*\()` then succeeds against `o`) and corrupt the surrounding SQL.
+  const SCALAR_NO_FUNC_SRC = `(?:${SCALAR_SRC})(?![\\w]|\\s*\\()`;
 
   // ── Phase 1: Expand range @> range (contains range) ──
   // Must come BEFORE scalar @> to prevent greedy match of nested function call as value
@@ -354,6 +357,8 @@ export function expandRangeOperators(sql: string): RangeResult {
     },
   );
 
+  result = restoreSQL({ ...protectedSql, protectedSql: result });
+
   if (rewritten) {
     logger.debug({ original: trimmed, expanded: result }, 'Expanded range operators');
   }
@@ -385,8 +390,6 @@ const RANGE_MERGE_RE = /\brange_merge\s*\(([^,]+),([^)]+)\)/gi;
 const RANGE_INTERSECT_RE = /\brange_intersect\s*\(([^,]+),([^)]+)\)/gi;
 const RANGE_UNION_RE = /\brange_union\s*\(([^,]+),([^)]+)\)/gi;
 
-const ANY_RANGE_FUNC_RE = /\b(lower_inc|upper_inc|lower_inf|upper_inf|range_merge|range_intersect|range_union)\s*\(/i;
-
 /**
  * Detect whether the given SQL string contains PostgreSQL range boundary
  * functions (lower_inc, upper_inc, lower_inf, upper_inf, range_merge,
@@ -406,7 +409,10 @@ export function detectRangeFunc(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return false;
   }
-  return ANY_RANGE_FUNC_RE.test(sql.trim());
+  // Protect literals and comments so a function name inside them is not detected.
+  return /\b(lower_inc|upper_inc|lower_inf|upper_inf|range_merge|range_intersect|range_union)\s*\(/i.test(
+    protectSQL(sql.trim()).protectedSql,
+  );
 }
 
 /**
@@ -447,7 +453,11 @@ export function rewriteRangeFunc(sql: string): RangeResult {
     return { sql, rewritten: false };
   }
 
-  let working = sql;
+  // Protect string literals, quoted identifiers and comments so a boundary
+  // function inside them (`SELECT 'lower_inc(r)'`) is never rewritten.
+  const protectedSql = protectSQL(sql);
+
+  let working = protectedSql.protectedSql;
   let rewritten = false;
 
   // ── Phase 1: lower_inc(r) → SUBSTR(r, 1, 1) = '[' ──
@@ -544,6 +554,8 @@ export function rewriteRangeFunc(sql: string): RangeResult {
     const minUpper = `CASE WHEN ${upper1} <= ${upper2} THEN ${upper1} ELSE ${upper2} END`;
     return `CASE WHEN ${maxLower} <= ${minUpper} THEN ${lowerBound} || ${unionLower} || ',' || ${unionUpper} || ${upperBound} ELSE '' END`;
   });
+
+  working = restoreSQL({ ...protectedSql, protectedSql: working });
 
   if (rewritten) {
     logger.debug({ before: sql, after: working }, 'Range boundary function rewritten');
