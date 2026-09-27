@@ -12,6 +12,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('EnumShim');
 
@@ -31,9 +32,7 @@ export interface EnumDef {
 
 // ── Constants ────────────────────────────────────────────────────
 
-const CREATE_ENUM_RE = /^\s*CREATE\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+ENUM\s*\(([^)]*)\)\s*;?\s*$/i;
 const ALTER_ENUM_ADD_VALUE_RE = /^\s*ALTER\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+VALUE\s+/i;
-const ALTER_ENUM_RENAME_VALUE_RE = /^\s*ALTER\s+TYPE\s+(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))\s+RENAME\s+VALUE\s+'((?:[^']*))'\s+TO\s+'((?:[^']*))'\s*;?\s*$/i;
 const DROP_TYPE_RE = /^\s*DROP\s+TYPE\s+(?:IF\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*;?\s*$/i;
 const ENUM_DDL_RE = /^\s*(CREATE\s+TYPE.+AS\s+ENUM|ALTER\s+TYPE.+ADD\s+VALUE|ALTER\s+TYPE.+RENAME\s+VALUE|DROP\s+TYPE)\s/i;
 
@@ -60,9 +59,14 @@ export function handleEnumStmt(sql: string): EnumResult {
   if (!sql || typeof sql !== 'string') return { sql, rewritten: false };
   const trimmed = sql.trim();
 
-  const createMatch = trimmed.match(CREATE_ENUM_RE);
+  const createMatch = parseCreateEnum(trimmed);
   if (createMatch) {
-    return { sql: null, rewritten: true, values: extractEnumValues(createMatch[2]), typeName: createMatch[1] };
+    return {
+      sql: null,
+      rewritten: true,
+      values: createMatch.values,
+      typeName: createMatch.typeName,
+    };
   }
 
   const renameValueResult = handleAlterTypeRenameValue(trimmed);
@@ -81,6 +85,184 @@ export function handleEnumStmt(sql: string): EnumResult {
   }
 
   return { sql: trimmed, rewritten: false };
+}
+
+/**
+ * Literal-aware parser for `CREATE TYPE <name> AS ENUM ( 'v1', 'v2', ... )`.
+ *
+ * Unlike a bare regex, this correctly handles:
+ *   - quoted type names (`CREATE TYPE "my type" AS ENUM (...)`)
+ *   - enum values containing `)`, `,`, or escaped quotes (`''`)
+ *
+ * Returns the parsed type name and values, or `null` if the statement is not
+ * a well-formed `CREATE TYPE ... AS ENUM`.
+ */
+export function parseCreateEnum(sql: string): { typeName: string; values: string[] } | null {
+  let i = skipWs(sql, 0);
+
+  if (!matchKeyword(sql, i, 'CREATE')) return null;
+  i = skipWs(sql, i + 6);
+  if (!matchKeyword(sql, i, 'TYPE')) return null;
+  i = skipWs(sql, i + 4);
+
+  // Type name: quoted identifier or bare identifier.
+  let typeName: string;
+  if (sql[i] === '"') {
+    const qid = readQuotedIdentifier(sql, i);
+    if (!qid) return null;
+    typeName = qid.value;
+    i = skipWs(sql, qid.next);
+  } else {
+    const m = sql.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (!m) return null;
+    typeName = m[0];
+    i = skipWs(sql, i + m[0].length);
+  }
+  if (!typeName) return null;
+
+  if (!matchKeyword(sql, i, 'AS')) return null;
+  i = skipWs(sql, i + 2);
+  if (!matchKeyword(sql, i, 'ENUM')) return null;
+  i = skipWs(sql, i + 4);
+
+  if (sql[i] !== '(') return null;
+  i = skipWs(sql, i + 1);
+
+  const values: string[] = [];
+  // Parse the value list, allowing a trailing comma (PostgreSQL accepts it).
+  while (i < sql.length) {
+    i = skipWs(sql, i);
+    if (sql[i] === ')') {
+      i++;
+      break;
+    }
+    if (sql[i] !== "'") return null; // enum values must be string literals
+    const lit = readStringLiteral(sql, i);
+    if (!lit) return null;
+    values.push(lit.value);
+    i = skipWs(sql, lit.next);
+    if (sql[i] === ',') {
+      i++;
+      continue;
+    }
+    // Next must be the closing paren or end of statement.
+    if (sql[i] === ')') {
+      i++;
+      break;
+    }
+    return null;
+  }
+
+  // Trailing `;` and/or whitespace only.
+  i = skipWs(sql, i);
+  if (sql[i] === ';') i = skipWs(sql, i + 1);
+  if (i !== sql.length) return null;
+
+  return { typeName, values };
+}
+
+/** Skip whitespace starting at `pos`. */
+function skipWs(sql: string, pos: number): number {
+  while (pos < sql.length && /\s/.test(sql[pos])) pos++;
+  return pos;
+}
+
+/**
+ * Read a single-quoted string literal starting at `pos` (which must be `'`).
+ * Returns the decoded value and the index just past the closing quote, or
+ * `null` if the literal is unterminated.
+ */
+function readStringLiteral(sql: string, pos: number): { value: string; next: number } | null {
+  const end = skipSqlLiteral(sql, pos);
+  // skipSqlLiteral returns sql.length for an unterminated literal. A properly
+  // terminated literal ends with a closing `'` right before `end`.
+  if (end === sql.length && sql[sql.length - 1] !== "'") {
+    return null;
+  }
+  const value = sql.slice(pos + 1, end - 1).replace(/''/g, "'");
+  return { value, next: end };
+}
+
+/**
+ * Read a double-quoted identifier starting at `pos` (which must be `"`).
+ * Returns the decoded identifier and the index just past the closing quote,
+ * or `null` if the identifier is unterminated.
+ */
+function readQuotedIdentifier(sql: string, pos: number): { value: string; next: number } | null {
+  const end = skipSqlLiteral(sql, pos);
+  if (end === sql.length && sql[sql.length - 1] !== '"') {
+    return null;
+  }
+  const value = sql.slice(pos + 1, end - 1).replace(/""/g, '"');
+  return { value, next: end };
+}
+
+/** Case-insensitive keyword match at `pos`. */
+function matchKeyword(sql: string, pos: number, keyword: string): boolean {
+  const sub = sql.slice(pos, pos + keyword.length);
+  return sub.toLowerCase() === keyword.toLowerCase();
+}
+
+/**
+ * Literal-aware parser for `ALTER TYPE <name> RENAME VALUE 'old' TO 'new'`.
+ *
+ * Handles quoted type names and enum values containing escaped quotes (`''`),
+ * which the previous bare regex could not parse.
+ */
+export function parseAlterRenameValue(sql: string): {
+  typeName: string;
+  oldValue: string;
+  newValue: string;
+} | null {
+  let i = skipWs(sql, 0);
+
+  if (!matchKeyword(sql, i, 'ALTER')) return null;
+  i = skipWs(sql, i + 5);
+  if (!matchKeyword(sql, i, 'TYPE')) return null;
+  i = skipWs(sql, i + 4);
+
+  // Type name: quoted identifier or bare identifier.
+  let typeName: string;
+  if (sql[i] === '"') {
+    const qid = readQuotedIdentifier(sql, i);
+    if (!qid) return null;
+    typeName = qid.value;
+    i = skipWs(sql, qid.next);
+  } else {
+    const m = sql.slice(i).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (!m) return null;
+    typeName = m[0];
+    i = skipWs(sql, i + m[0].length);
+  }
+  if (!typeName) return null;
+
+  if (!matchKeyword(sql, i, 'RENAME')) return null;
+  i = skipWs(sql, i + 6);
+  if (!matchKeyword(sql, i, 'VALUE')) return null;
+  i = skipWs(sql, i + 5);
+
+  // old value literal
+  if (sql[i] !== "'") return null;
+  const oldLit = readStringLiteral(sql, i);
+  if (!oldLit) return null;
+  const oldValue = oldLit.value;
+  i = skipWs(sql, oldLit.next);
+
+  if (!matchKeyword(sql, i, 'TO')) return null;
+  i = skipWs(sql, i + 2);
+
+  // new value literal
+  if (sql[i] !== "'") return null;
+  const newLit = readStringLiteral(sql, i);
+  if (!newLit) return null;
+  const newValue = newLit.value;
+  i = skipWs(sql, newLit.next);
+
+  // Trailing `;` and/or whitespace only.
+  if (sql[i] === ';') i = skipWs(sql, i + 1);
+  if (i !== sql.length) return null;
+
+  return { typeName, oldValue, newValue };
 }
 
 export function detectEnumTypeRef(typeName: string): boolean {
@@ -115,7 +297,7 @@ export function extractEnumValues(raw: string): string[] {
   const valueRe = /'((?:[^']*(?:''[^']*)*))'/g;
   let match: RegExpExecArray | null;
   while ((match = valueRe.exec(raw)) !== null) {
-    const val = match[1].replace(/''/g, "'").trim();
+    const val = match[1].replace(/''/g, "'");
     if (val.length > 0) values.push(val);
   }
   return values;
@@ -313,15 +495,12 @@ export function handleAlterTypeRenameValue(sql: string): string | null {
     return null;
   }
 
-  const match = sql.trim().match(ALTER_ENUM_RENAME_VALUE_RE);
-  if (!match) {
+  const parsed = parseAlterRenameValue(sql.trim());
+  if (!parsed) {
     return null;
   }
 
-  // Type name: either quoted match[1] or unquoted match[2]
-  const typeName = (match[1] ?? match[2]).trim();
-  const oldValue = match[3];
-  const newValue = match[4];
+  const { typeName, oldValue, newValue } = parsed;
 
   if (!typeName || !oldValue || !newValue) {
     logger.warn(
