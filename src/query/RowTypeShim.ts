@@ -33,6 +33,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('RowTypeShim');
 
@@ -48,52 +49,42 @@ export interface RowTypeResult {
 }
 
 // ──────────────────────────────────────────────
-//  Constants — Regex patterns
+//  Constants
 // ──────────────────────────────────────────────
 
 /**
- * Detects the `ROW` keyword followed by an opening parenthesis —
- * the canonical ROW constructor form.
+ * Detects the `ROW` keyword — the canonical ROW constructor form.
+ * The keyword is matched as a whole identifier (not part of a larger
+ * identifier such as `row_number`).
  *
- * Matches:
- *   - `ROW(1, 'a')`
- *   - `ROW(a, b, c)`
- *   - `row(1, 2)` (case-insensitive)
- *   - `ROW ( 1, 2 )` (with whitespace)
- *
- * Does NOT match:
- *   - `row_number()` (ROW is whole word, not part of identifier)
- *   - `my_row` (not followed by `(`)
- *
- * Note: Because this is a global regex used with exec(), we provide
- * a separate non-global copy for the detect() fast-path to avoid
- * the JavaScript `lastIndex` state mutation bug with RegExp#test().
+ * The actual `ROW(` matching is done via a literal-aware scan in
+ * {@link findRowOccurrence} rather than a bare regex, so that `ROW`
+ * appearing inside string literals, quoted identifiers, or comments is
+ * never treated as a constructor.
  */
-const ROW_EXPR_RE = /\bROW\s*\(/i;
-
-/** Non-global copy for `test()` — avoids the `lastIndex` state mutation bug. */
-// eslint-disable-next-line require-unicode-regexp
-const ROW_EXPR_DETECT = new RegExp(ROW_EXPR_RE.source, 'i');
-
-/** Global copy for exec() loop — used when scanning all ROW occurrences. */
-// eslint-disable-next-line require-unicode-regexp
-const ROW_EXPR_GLOBAL = new RegExp(ROW_EXPR_RE.source, 'gi');
+const ROW_KEYWORD = 'ROW';
 
 // ──────────────────────────────────────────────
 //  Internal Helpers
 // ──────────────────────────────────────────────
 
+interface RowOccurrence {
+  /** Index of the `R` in the `ROW` keyword. */
+  start: number;
+  /** Index one past the closing `)`. */
+  end: number;
+  /** The argument list between the parentheses. */
+  args: string;
+}
+
 /**
  * Find the position of the matching closing parenthesis, accounting
- * for nesting depth.
+ * for nesting depth and skipping parentheses that appear inside string
+ * literals, quoted identifiers, and comments.
  *
- * Starts from `openPos` which should be the position of the `(`
- * character. Returns the position of the matching `)`, or `-1` if
- * the parentheses are unbalanced.
- *
- * This is a simple depth tracker and does NOT account for string
- * or comment literals; parens inside strings may cause false
- * matches. This is a known limitation of regex-based SQL processing.
+ * Starts from `openPos` which must be the position of the `(` character.
+ * Returns the position of the matching `)`, or `-1` if the parentheses
+ * are unbalanced.
  *
  * @param sql      The full SQL string
  * @param openPos  Position of the opening `(` character
@@ -105,6 +96,15 @@ function findMatchingParen(sql: string, openPos: number): number {
 
   while (idx < sql.length && depth > 0) {
     const ch = sql[idx];
+
+    // Skip whole literals/comments so parentheses inside them don't
+    // affect the depth tracking.
+    const skip = skipSqlLiteral(sql, idx);
+    if (skip !== -1) {
+      idx = skip;
+      continue;
+    }
+
     if (ch === '(') {
       depth++;
     } else if (ch === ')') {
@@ -116,6 +116,53 @@ function findMatchingParen(sql: string, openPos: number): number {
   }
 
   return depth === 0 ? idx : -1;
+}
+
+/**
+ * Scan `sql` for the first occurrence of a `ROW(...)` constructor outside
+ * any string literal, quoted identifier, or comment.
+ *
+ * Returns the occurrence (start, end, args) or `null` when no valid ROW
+ * constructor is present.
+ */
+function findRowOccurrence(sql: string): RowOccurrence | null {
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    // Only consider positions starting an identifier.
+    if (!/[A-Za-z_]/.test(c)) continue;
+    // Must be a standalone word: the preceding char cannot be part of an
+    // identifier (e.g., `my_row`, `row_number`).
+    if (i > 0 && /[A-Za-z0-9_$]/.test(sql[i - 1])) continue;
+
+    // Match `ROW` case-insensitively.
+    if (sql.slice(i, i + ROW_KEYWORD.length).toUpperCase() !== ROW_KEYWORD) continue;
+
+    // Token after ROW must be an opening paren (allowing whitespace).
+    let j = i + ROW_KEYWORD.length;
+    while (j < sql.length && /\s/.test(sql[j])) j++;
+    if (sql[j] !== '(') continue;
+
+    const close = findMatchingParen(sql, j);
+    if (close === -1) {
+      logger.warn(
+        { sql, pos: i },
+        'Unmatched parenthesis in ROW expression — skipping',
+      );
+      continue;
+    }
+
+    const args = sql.slice(j + 1, close);
+    return { start: i, end: close + 1, args };
+  }
+
+  return null;
 }
 
 // ──────────────────────────────────────────────
@@ -143,7 +190,7 @@ export function detectRowExpr(sql: string): boolean {
     return false;
   }
 
-  return ROW_EXPR_DETECT.test(sql.trim());
+  return findRowOccurrence(sql.trim()) !== null;
 }
 
 /**
@@ -189,59 +236,38 @@ export function rewriteRowExpr(sql: string): RowTypeResult {
 
   const trimmed = sql.trim();
 
-  // Fast path — no ROW expression present
-  if (!ROW_EXPR_DETECT.test(trimmed)) {
-    return { sql: trimmed, rewritten: false };
-  }
-
-  // Reset lastIndex after test()
-  ROW_EXPR_DETECT.lastIndex = 0;
-
-  // Collect all ROW(...) replacements, processing right-to-left
-  const replacements: Array<{ start: number; end: number; replacement: string }> = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = ROW_EXPR_GLOBAL.exec(trimmed)) !== null) {
-    const rowStart = match.index;
-    const keyword = match[0]; // e.g., "ROW(" or "row ("
-    const parenStart = trimmed.indexOf('(', rowStart);
-    const closeParen = findMatchingParen(trimmed, parenStart);
-
-    if (closeParen === -1) {
-      logger.warn(
-        { sql: trimmed, pos: rowStart },
-        'Unmatched parenthesis in ROW expression — skipping',
-      );
-      continue;
-    }
-
-    // Extract the inner content between the parentheses
-    const innerContent = trimmed.slice(parenStart + 1, closeParen).trim();
-    const replacement = `json_array(${innerContent})`;
-
-    replacements.push({
-      start: rowStart,
-      end: closeParen + 1,
-      replacement,
+  // Collect all ROW(...) replacements via literal-aware scanning.
+  const occurrences: RowOccurrence[] = [];
+  let cursor = 0;
+  while (cursor < trimmed.length) {
+    const occ = findRowOccurrence(trimmed.slice(cursor));
+    if (!occ) break;
+    occurrences.push({
+      start: cursor + occ.start,
+      end: cursor + occ.end,
+      args: occ.args,
     });
+    cursor += occ.end;
   }
 
   // No valid replacements found
-  if (replacements.length === 0) {
+  if (occurrences.length === 0) {
     return { sql: trimmed, rewritten: false };
   }
 
-  // Apply replacements in reverse order (right-to-left) to preserve offsets
+  // Apply replacements in reverse order (right-to-left) to preserve offsets.
   let result = trimmed;
-  for (const r of replacements.sort((a, b) => b.start - a.start)) {
-    result = result.slice(0, r.start) + r.replacement + result.slice(r.end);
+  for (const r of occurrences.slice().reverse()) {
+    const innerContent = r.args.trim();
+    const replacement = `json_array(${innerContent})`;
+    result = result.slice(0, r.start) + replacement + result.slice(r.end);
   }
 
   const modified = result !== trimmed;
 
   if (modified) {
     logger.debug(
-      { before: trimmed, after: result, count: replacements.length },
+      { before: trimmed, after: result, count: occurrences.length },
       'Rewrote ROW expressions to json_array',
     );
   }
