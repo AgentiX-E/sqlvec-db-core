@@ -707,7 +707,7 @@ describe('pg_get_indexdef / triggerdef / viewdef / constraintdef', () => {
 
 describe('network: inet_merge / inet_client_addr / inet_server_addr', () => {
   it('inet_merge', () => {
-    expect(ex('inet_merge', '192.168.1.1', '192.168.1.2')).toBe('128.0.0.0/1');
+    expect(ex('inet_merge', '192.168.1.1', '192.168.1.2')).toBe('192.168.1.0/30');
     expect(ex('inet_merge', null, '10.0.0.1')).toBeNull();
   });
   it('inet_client_addr / inet_server_addr', () => {

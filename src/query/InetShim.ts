@@ -23,6 +23,7 @@
 
 import { PinoLogger } from '../logger/PinoLogger';
 import { Address4, Address6 } from 'ip-address';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('InetShim');
 
@@ -43,11 +44,9 @@ export interface InetParseResult {
 
 // ── Regex Patterns ──────────────────────────────────────────────
 
-/**
- * Detect inet/cidr type references in SQL.
- */
-// eslint-disable-next-line require-unicode-regexp
-const INET_TYPE_RE = /\b(inet|cidr)\b/i;
+// (Removed bare INET_TYPE_RE — detection is now literal-aware via
+//  scanForInetToken, which ignores string literals, quoted identifiers,
+//  and comments.)
 
 // ── Internal Helpers ─────────────────────────────────────────────
 
@@ -173,8 +172,55 @@ export function cidrToMask(bits: number): number {
  */
 export function detectInetType(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
-  INET_TYPE_RE.lastIndex = 0;
-  return INET_TYPE_RE.test(sql);
+  return scanForInetToken(sql);
+}
+
+/**
+ * Literal-aware scan for the `inet` or `cidr` keyword, ignoring string
+ * literals, quoted identifiers, and comments so that column names or data
+ * values are not falsely reported as type references.
+ */
+function scanForInetToken(sql: string): boolean {
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const ch = sql[i];
+    // Skip string literals, quoted identifiers, dollar-quoted strings and
+    // comments atomically so keywords inside them are never detected.
+    if (
+      ch === "'" ||
+      ch === '"' ||
+      ch === '`' ||
+      ch === '$' ||
+      (ch === '-' && sql[i + 1] === '-') ||
+      (ch === '/' && sql[i + 1] === '*')
+    ) {
+      const skip = skipSqlLiteral(sql, i);
+      if (skip === -1) {
+        i++;
+        continue;
+      }
+      i = skip;
+      continue;
+    }
+    if (/[a-zA-Z_]/.test(ch)) {
+      let j = i + 1;
+      while (j < n && /[a-zA-Z0-9_]/.test(sql[j])) j++;
+      const word = sql.slice(i, j).toLowerCase();
+      if (word === 'inet' || word === 'cidr') {
+        // Require a word boundary so `inet6` or `mycidr` do not match.
+        const before = i === 0 ? '' : sql[i - 1];
+        const after = j >= n ? '' : sql[j];
+        const beforeOk = !/[a-zA-Z0-9_]/.test(before);
+        const afterOk = !/[a-zA-Z0-9_]/.test(after);
+        if (beforeOk && afterOk) return true;
+      }
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return false;
 }
 
 /**
@@ -203,7 +249,10 @@ export function inetToCidr(ip: string): string {
       const addr6 = new Address6(ip);
       if (addr6.isCorrect()) {
         const startAddr = addr6.startAddress();
-        return `${startAddr.addressMinusSuffix}/${parsed.prefixLength}`;
+        // Use correctForm() (compressed) rather than addressMinusSuffix
+        // (fully-expanded) — an expanded address with a `/prefix` suffix is
+        // not re-parseable by the ip-address library.
+        return `${startAddr.correctForm()}/${parsed.prefixLength}`;
       }
     } catch {
       // Fall through
@@ -279,8 +328,12 @@ export function inetContainedBy(addr: string, network: string): boolean {
     try {
       const addr6 = new Address6(addr);
       const net6 = new Address6(network);
-      // Strict containment: must be within but not equal to network address
-      return addr6.isInSubnet(net6) && addrParsed.address !== inetToCidr(network).split('/')[0];
+      // Strict containment: must be within but not equal to the network
+      // address itself. Compare as big-int values so compressed vs expanded
+      // representations cannot diverge.
+      const netAddr = new Address6(inetToCidr(network));
+      const isNetworkAddr = netAddr.isCorrect() && addr6.bigInt() === netAddr.bigInt();
+      return addr6.isInSubnet(net6) && !isNetworkAddr;
     } catch {
       return false;
     }
@@ -471,7 +524,7 @@ export function inetMerge(ip1: string, ip2: string): string {
       const mask = BigInt(2) ** BigInt(128) - BigInt(2) ** BigInt(128 - commonBits);
       const networkInt = a1Int & mask;
       const merged = Address6.fromBigInt(networkInt);
-      return `${merged.addressMinusSuffix}/${commonBits}`;
+      return `${merged.correctForm()}/${commonBits}`;
     } catch {
       return '::/0';
     }
@@ -483,16 +536,16 @@ export function inetMerge(ip1: string, ip2: string): string {
   const xorBits = (int1 ^ int2) >>> 0;
   if (xorBits === 0) return `${p1.address}/${p1.prefixLength}`;
 
-  // Count leading zero bits in xor result
-  let commonBits = 32;
+  // The common prefix length is the number of leading (most-significant) bits
+  // that are identical, i.e. the position of the highest set bit in the XOR
+  // (which is the first bit where the two addresses differ).
+  let commonBits = 0;
   for (let i = 31; i >= 0; i--) {
-    if ((xorBits >> i) & 1) {
+    if ((xorBits >>> i) & 1) {
       commonBits = 31 - i;
       break;
     }
   }
-  commonBits = 32 - commonBits - 1;
-  if (commonBits < 0) commonBits = 0;
 
   const mask = cidrToMask(commonBits);
   const networkInt = (int1 & mask) >>> 0;
@@ -561,44 +614,84 @@ export function inetServerPort(): number {
 export function rewriteInetOperator(sql: string): string {
   if (!sql || typeof sql !== 'string') return sql ?? '';
 
-  // eslint-disable-next-line require-unicode-regexp
-  const inetOpRe = /([a-zA-Z_][a-zA-Z0-9_.]*)\s*(<<=|<<|>>=|>>)\s*'([^']+)'/gi;
+  const ops = [
+    { token: '<<=', fn: 'inet_contains', swap: false },
+    { token: '<<', fn: 'inet_contained_by', swap: false },
+    { token: '>>=', fn: 'inet_contains', swap: true },
+    { token: '>>', fn: 'inet_contained_by', swap: true },
+  ];
+
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
+  let i = 0;
+  const n = sql.length;
 
-  inetOpRe.lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = inetOpRe.exec(sql)) !== null) {
-    const lhs = match[1];
-    const operator = match[2];
-    const rhs = match[3];
-
-    let replacement: string;
-    switch (operator) {
-      case '<<=':
-        replacement = `inet_contains(${lhs}, '${rhs}')`;
-        break;
-      case '<<':
-        replacement = `inet_contained_by(${lhs}, '${rhs}')`;
-        break;
-      case '>>=':
-        replacement = `inet_contains('${rhs}', ${lhs})`;
-        break;
-      case '>>':
-        replacement = `inet_contained_by('${rhs}', ${lhs})`;
-        break;
-      default:
+  while (i < n) {
+    const ch = sql[i];
+    if (
+      ch === "'" ||
+      ch === '"' ||
+      ch === '`' ||
+      ch === '$' ||
+      (ch === '-' && sql[i + 1] === '-') ||
+      (ch === '/' && sql[i + 1] === '*')
+    ) {
+      const skip = skipSqlLiteral(sql, i);
+      if (skip === -1) {
+        i++;
         continue;
+      }
+      i = skip;
+      continue;
     }
 
-    replacements.push({
-      start: match.index,
-      end: match.index + match[0].length,
-      replacement,
-    });
+    // Look for an operator token at the current position.
+    let matched: { token: string; fn: string; swap: boolean } | null = null;
+    for (const op of ops) {
+      if (sql.startsWith(op.token, i)) {
+        matched = op;
+        break;
+      }
+    }
+    if (!matched) {
+      i++;
+      continue;
+    }
+
+    const opStart = i;
+    const opEnd = i + matched.token.length;
+
+    // Extract LHS: scan backwards over an identifier / qualified name.
+    const lhsStart = scanBackWord(sql, opStart);
+    if (lhsStart < 0) {
+      i = opEnd;
+      continue;
+    }
+    const lhs = sql.slice(lhsStart, opStart).trim();
+
+    // Extract RHS: a string literal or a word (column reference).
+    const rhsStart = scanForwardWord(sql, opEnd).start;
+    const rhsEnd = scanForwardWord(sql, opEnd).end;
+    if (rhsStart < 0 || rhsEnd < 0 || rhsStart === rhsEnd) {
+      i = opEnd;
+      continue;
+    }
+    const rhs = sql.slice(rhsStart, rhsEnd).trim();
+    if (!rhs) {
+      i = opEnd;
+      continue;
+    }
+
+    // Build the function-call replacement. The `swap` variant places the RHS
+    // as the network argument, per PostgreSQL operator semantics.
+    const a = matched.swap ? rhs : lhs;
+    const b = matched.swap ? lhs : rhs;
+    const replacement = `${matched.fn}(${a}, ${b})`;
+
+    replacements.push({ start: lhsStart, end: rhsEnd, replacement });
+    i = rhsEnd;
   }
 
-  // Apply right-to-left
+  // Apply right-to-left to keep indices stable.
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
     sql = sql.slice(0, r.start) + r.replacement + sql.slice(r.end);
   }
@@ -608,4 +701,81 @@ export function rewriteInetOperator(sql: string): string {
   }
 
   return sql;
+}
+
+/**
+ * SQL reserved keywords that can never be inet operator operands. When a
+ * `<<=`/`<<`/`>>=`/`>>` token is preceded by one of these, it is not an inet
+ * operator (e.g. bit-shift in a WHERE clause position) and must not be
+ * rewritten.
+ */
+const RESERVED_KEYWORDS = new Set([
+  'where',
+  'and',
+  'or',
+  'from',
+  'select',
+  'on',
+  'set',
+  'as',
+  'by',
+  'join',
+  'into',
+  'not',
+  'in',
+  'is',
+  'like',
+  'between',
+  'case',
+  'when',
+  'then',
+  'else',
+  'end',
+  'having',
+  'group',
+  'order',
+  'limit',
+  'offset',
+  'union',
+  'intersect',
+  'except',
+  'values',
+  'update',
+  'delete',
+  'insert',
+]);
+
+/**
+ * Scan backwards from `pos` (exclusive) over a word / qualified identifier
+ * (letters, digits, `_`, `.`, and whitespace), returning the start index of
+ * that leading operand, or `-1` if none is found.
+ */
+function scanBackWord(sql: string, pos: number): number {
+  let j = pos - 1;
+  while (j >= 0 && /\s/.test(sql[j])) j--;
+  const wordStart = j;
+  while (j >= 0 && /[a-zA-Z0-9_.$]/.test(sql[j])) j--;
+  // If no identifier characters were consumed, there is no leading operand.
+  if (j === wordStart) return -1;
+  const word = sql.slice(j + 1, wordStart + 1);
+  if (RESERVED_KEYWORDS.has(word.toLowerCase())) return -1;
+  return j + 1;
+}
+
+/**
+ * Scan forward from `pos` (exclusive) over a word / string literal, returning
+ * the operand's [start, end) span. A string literal is consumed atomically
+ * (with quote escapes), otherwise a bare word is consumed.
+ */
+function scanForwardWord(sql: string, pos: number): { start: number; end: number } {
+  let j = pos;
+  const n = sql.length;
+  while (j < n && /\s/.test(sql[j])) j++;
+  const start = j;
+  if (j < n && (sql[j] === "'" || sql[j] === '"' || sql[j] === '`')) {
+    const skip = skipSqlLiteral(sql, j);
+    return { start, end: skip === -1 ? n : skip };
+  }
+  while (j < n && /[a-zA-Z0-9_.$]/.test(sql[j])) j++;
+  return { start, end: j };
 }
