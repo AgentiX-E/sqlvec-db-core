@@ -190,6 +190,7 @@ export function validate(value: any, domainName: string): boolean {
  * @returns Parsed DomainDef
  */
 export function parseDomainSQL(sql: string): DomainDef | null {
+  if (!sql || typeof sql !== 'string') return null;
   const trimmed = sql.trim();
   const match = trimmed.match(
     /^\s*CREATE\s+DOMAIN\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s+(\w+)(.*)$/i,
@@ -200,17 +201,134 @@ export function parseDomainSQL(sql: string): DomainDef | null {
   const baseType = match[2].toUpperCase();
   const rest = match[3];
 
-  // Extract CHECK constraints from the rest
-  const constraints: DomainConstraint[] = [];
-  const checkRe = /CHECK\s*\(\s*([^)]+)\s*\)/gi;
-  let checkMatch: RegExpExecArray | null;
-
-  while ((checkMatch = checkRe.exec(rest)) !== null) {
-    const expr = checkMatch[1].trim();
-    constraints.push({ expression: expr });
-  }
+  // Extract CHECK constraints from the rest. Scan literal-aware so a
+  // `CHECK (...)` fragment inside a string literal (e.g. a DEFAULT
+  // `'...CHECK (VALUE > 0)...'`) is never treated as a real constraint.
+  const constraints = extractCheckConstraints(rest);
 
   return { name, baseType, constraints };
+}
+
+/**
+ * Extract top-level `CHECK (expr)` clauses from a `CREATE DOMAIN` tail,
+ * skipping any `CHECK` keyword that sits inside a string literal, quoted
+ * identifier, or dollar-quoted string.
+ */
+function extractCheckConstraints(rest: string): DomainConstraint[] {
+  const constraints: DomainConstraint[] = [];
+  const len = rest.length;
+
+  let i = 0;
+  while (i < len) {
+    const ch = rest[i];
+
+    // Skip single-quoted string literals (with '' escaping).
+    if (ch === "'") {
+      i = skipSingleQuoted(rest, i);
+      continue;
+    }
+    // Skip double-quoted identifiers.
+    if (ch === '"') {
+      i = skipDoubleQuoted(rest, i);
+      continue;
+    }
+    // Skip dollar-quoted strings ($tag$ ... $tag$).
+    if (ch === '$' && /^\$[A-Za-z_]*\$/.test(rest.slice(i))) {
+      const tag = rest.slice(i).match(/^\$[A-Za-z_]*\$/)?.[0] ?? '$$';
+      i = skipDollarQuoted(rest, i, tag);
+      continue;
+    }
+    // Skip line comments.
+    if (ch === '-' && rest[i + 1] === '-') {
+      i = skipToNewline(rest, i);
+      continue;
+    }
+    // Skip block comments.
+    if (ch === '/' && rest[i + 1] === '*') {
+      i = skipBlockComment(rest, i);
+      continue;
+    }
+
+    // Match a CHECK keyword at the current position.
+    const checkMatch = /^CHECK\s*\(/i.exec(rest.slice(i));
+    if (checkMatch) {
+      const openParen = i + checkMatch[0].lastIndexOf('(');
+      const closeParen = findMatchingParen(rest, openParen);
+      if (closeParen === -1) break;
+      const expr = rest.slice(openParen + 1, closeParen).trim();
+      if (expr.length > 0) {
+        constraints.push({ expression: expr });
+      }
+      i = closeParen + 1;
+      continue;
+    }
+
+    i++;
+  }
+
+  return constraints;
+}
+
+function skipSingleQuoted(s: string, start: number): number {
+  let i = start + 1;
+  while (i < s.length) {
+    if (s[i] === "'" && s[i + 1] === "'") {
+      i += 2;
+      continue;
+    }
+    if (s[i] === "'") return i + 1;
+    i++;
+  }
+  return s.length;
+}
+
+function skipDoubleQuoted(s: string, start: number): number {
+  let i = start + 1;
+  while (i < s.length) {
+    if (s[i] === '"' && s[i + 1] === '"') {
+      i += 2;
+      continue;
+    }
+    if (s[i] === '"') return i + 1;
+    i++;
+  }
+  return s.length;
+}
+
+function skipDollarQuoted(s: string, start: number, tag: string): number {
+  const idx = s.indexOf(tag, start + tag.length);
+  return idx === -1 ? s.length : idx + tag.length;
+}
+
+function skipToNewline(s: string, start: number): number {
+  const nl = s.indexOf('\n', start);
+  return nl === -1 ? s.length : nl + 1;
+}
+
+function skipBlockComment(s: string, start: number): number {
+  const end = s.indexOf('*/', start + 2);
+  return end === -1 ? s.length : end + 2;
+}
+
+function findMatchingParen(s: string, openParen: number): number {
+  let depth = 0;
+  for (let i = openParen; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "'") {
+      i = skipSingleQuoted(s, i) - 1;
+      continue;
+    }
+    if (ch === '"') {
+      i = skipDoubleQuoted(s, i) - 1;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 /**
