@@ -24,6 +24,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('PgTrgmShim');
 
@@ -51,7 +52,7 @@ let currentLimit: number = 0.3;
  *   show_trgm(text) → text[]
  *
  * Edge cases:
- *   - Empty string → `['   ']` — 1 trigram (3 spaces)
+ *   - Empty string → `['   ', '   ']` — two space-only trigrams (2 borders)
  *   - Single character → `['  x', ' x ', 'x  ']` — 3 trigrams with padding
  *   - Two characters → `['  a', ' ab', 'ab ', 'b  ']` — 4 trigrams
  *
@@ -60,7 +61,12 @@ let currentLimit: number = 0.3;
  */
 export function showTrgm(text: string): string[] {
   if (text == null) return [];
-  const s = `  ${String(text).toLowerCase()} `;
+  // PostgreSQL pads a two-space border on BOTH ends before extracting
+  // trigrams (so `  text  `). The previous code only appended a single
+  // trailing space, dropping the final leading-space+tail trigram (e.g.
+  // `show_trgm('a')` should yield `['  a',' a ','a  ']`, not just the
+  // first two).
+  const s = `  ${String(text).toLowerCase()}  `;
   const trigrams: string[] = [];
   for (let i = 0; i <= s.length - 3; i++) {
     trigrams.push(s.substring(i, i + 3));
@@ -233,26 +239,63 @@ const PG_TRGM_FUNC_NAMES = [
 ];
 
 /**
- * Build a regex pattern to detect any pg_trgm function call in SQL.
- */
-const PG_TRGM_FUNC_RE = new RegExp(
-  `\\b(${PG_TRGM_FUNC_NAMES.map(f => f.replace(/_/g, '[_]?')).join('|')})\\s*\\(`,
-  'gi'
-);
-
-/**
  * Detect whether a SQL statement contains pg_trgm function calls.
  *
- * Matches both direct calls (`SELECT similarity(...)`) and
- * qualified calls (`SELECT public.similarity(...)`).
+ * This is a literal-aware scan: string literals, quoted identifiers,
+ * dollar-quoted strings, and comments are skipped, so a word like
+ * `similarity` appearing inside a string or comment is NOT reported. The
+ * function name must be a whole identifier (not `wordsimilarity` for
+ * `word_similarity`, nor `mysimilarity` for `similarity`) and must be
+ * followed by an opening parenthesis.
+ *
+ * Matches both direct calls (`SELECT similarity(...)`) and qualified calls
+ * (`SELECT public.similarity(...)`).
  *
  * @param sql - Raw SQL string
- * @returns true if any pg_trgm function is detected
+ * @returns true if any pg_trgm function is detected as a real call
  */
 export function detectPgTrgmFunction(sql: string): boolean {
-  if (!sql) return false;
-  PG_TRGM_FUNC_RE.lastIndex = 0;
-  return PG_TRGM_FUNC_RE.test(sql);
+  if (!sql || typeof sql !== 'string') return false;
+
+  const len = sql.length;
+  for (let i = 0; i < len; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    const c = sql[i];
+    if (!/[A-Za-z_]/.test(c)) continue;
+
+    // Whole-identifier boundary: the character before must not be an
+    // identifier character.
+    if (i > 0 && /[A-Za-z0-9_]/.test(sql[i - 1])) continue;
+
+    let matched = false;
+    for (const fn of PG_TRGM_FUNC_NAMES) {
+      if (sql.startsWith(fn, i)) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) continue;
+
+    // Skip the full identifier (including underscores and trailing digits).
+    let j = i;
+    while (j < len && /[A-Za-z0-9_]/.test(sql[j])) j++;
+
+    // Require an opening parenthesis, allowing whitespace.
+    let k = j;
+    while (k < len && /\s/.test(sql[k])) k++;
+    if (k < len && sql[k] === '(') {
+      return true;
+    }
+
+    i = j - 1;
+  }
+
+  return false;
 }
 
 // ── Catalog registration ─────────────────────────────────────────
