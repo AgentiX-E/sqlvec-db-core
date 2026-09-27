@@ -28,6 +28,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('CompositeTypeShim');
 
@@ -54,33 +55,6 @@ export interface CompositeResult {
  */
 const CREATE_COMPOSITE_TYPE_RE =
   /^\s*CREATE\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s+AS\s*\(/i;
-
-/**
- * Detects row-field access (expr).field pattern.
- *
- * Matches a parenthesized expression immediately followed by a dot and an
- * identifier.  Handles one level of nested parentheses inside the
- * expression (e.g., (func(x)).field).
- *
- * Groups:
- *   1 – Inner expression (the value before .field)
- *   2 – Field name
- *
- * @example
- *   (t).id         → group 1: "t",         group 2: "id"
- *   (func(x)).min  → group 1: "func(x)",   group 2: "min"
- */
-const ROW_FIELD_ACCESS_RE = /\(\s*((?:[^()]+|\([^()]*\))+)\s*\)\.([A-Za-z_][A-Za-z0-9_]*)/g;
-
-/**
- * Detects ROW(expr1, expr2, ...) constructor calls.
- *
- * Matches ROW() function calls and captures the arguments inside.
- *
- * Groups:
- *   1 – The full argument list
- */
-const ROW_CONSTRUCTOR_RE = /\bROW\s*\(([\s\S]*?)\)\s*(?![A-Za-z0-9_])/gi;
 
 // ── In-memory composite type registry ────────────────────────────
 
@@ -121,11 +95,16 @@ export function detectCompositeType(sql: string): boolean {
 
   const trimmed = sql.trim();
 
+  // A composite type DDL must start with a real `CREATE TYPE` token (outside
+  // any string/comment) followed by a name and `AS (`.
   if (!CREATE_COMPOSITE_TYPE_RE.test(trimmed)) {
     return false;
   }
 
-  // Exclude ENUM variant — handled by EnumShim
+  // Exclude ENUM variant — handled by EnumShim. We check the token following
+  // `AS` should be `(` (CREATE_COMPOSITE_TYPE_RE already requires `AS\s*\(`),
+  // so an `AS ENUM` statement will not have matched above in the first place.
+  // Keep the explicit guard for robustness against future regex changes.
   if (/AS\s+ENUM\b/i.test(trimmed)) {
     return false;
   }
@@ -137,6 +116,9 @@ export function detectCompositeType(sql: string): boolean {
  * Detect whether the given SQL contains row-field access syntax,
  * i.e., a parenthesized expression followed by ".field_name".
  *
+ * This is a literal-aware scan: the `(expr).field` pattern is only detected
+ * outside string literals, quoted identifiers, and comments.
+ *
  * @param sql - The SQL text to check.
  * @returns `true` if row-field access is detected.
  */
@@ -145,14 +127,15 @@ export function detectRowFieldAccess(sql: string): boolean {
     return false;
   }
 
-  // Reset global regex state
-  ROW_FIELD_ACCESS_RE.lastIndex = 0;
-
-  return ROW_FIELD_ACCESS_RE.test(sql.trim());
+  const trimmed = sql.trim();
+  return findRowFieldAccess(trimmed) !== null;
 }
 
 /**
  * Detect whether the given SQL contains a ROW(...) constructor.
+ *
+ * This is a literal-aware scan: `ROW(...)` is only detected outside string
+ * literals, quoted identifiers, and comments.
  *
  * @param sql - The SQL text to check.
  * @returns `true` if a ROW constructor is detected.
@@ -162,8 +145,8 @@ export function detectRowConstructor(sql: string): boolean {
     return false;
   }
 
-  ROW_CONSTRUCTOR_RE.lastIndex = 0;
-  return ROW_CONSTRUCTOR_RE.test(sql.trim());
+  const trimmed = sql.trim();
+  return findRowConstructor(trimmed) !== null;
 }
 
 /**
@@ -203,7 +186,7 @@ export function rewriteCompositeType(sql: string): CompositeResult {
     // Find the opening parenthesis position
     const asParenIdx = trimmed.indexOf('(', typeMatch.index + typeMatch[0].length - 1);
     if (asParenIdx !== -1) {
-      // Find matching close paren using balanced-paren tracking
+      // Find matching close paren using literal-aware balanced-paren tracking
       const closeParenIdx = findMatchingCloseParen(trimmed, asParenIdx);
       if (closeParenIdx !== -1) {
         // Extract and register attributes if possible
@@ -221,51 +204,179 @@ export function rewriteCompositeType(sql: string): CompositeResult {
     }
   }
 
-  // ── Phase 2: (expr).field → json_extract(expr, '$.field') (globally) ──
+  // ── Phase 2: (expr).field → json_extract(expr, '$.field') (literal-aware) ──
 
-  ROW_FIELD_ACCESS_RE.lastIndex = 0;
-  const fieldAccessCount = (result.match(ROW_FIELD_ACCESS_RE) || []).length;
-  if (fieldAccessCount > 0) {
-    ROW_FIELD_ACCESS_RE.lastIndex = 0;
-    result = result.replace(ROW_FIELD_ACCESS_RE, (_match, innerExpr, field): string => {
-      logger.debug(
-        { innerExpr, field },
-        'Rewriting field access .%s to json_extract',
-        field,
-      );
-      return `json_extract(${innerExpr.trim()}, '$.${field}')`;
-    });
-    rewritten = true;
-  }
-
-  // ── Phase 3: ROW(expr1, expr2, ...) → json_object('f1', expr1, 'f2', expr2, ...) ──
-
-  ROW_CONSTRUCTOR_RE.lastIndex = 0;
-  const rowConstructorCount = (result.match(ROW_CONSTRUCTOR_RE) || []).length;
-  if (rowConstructorCount > 0) {
-    ROW_CONSTRUCTOR_RE.lastIndex = 0;
-    let rowIdx = 1;
-    result = result.replace(ROW_CONSTRUCTOR_RE, (_match, args: string): string => {
-      const argList = splitTopLevelCommas(args.trim()).map((a: string) => a.trim());
-      const kvPairs: string[] = [];
-      for (const arg of argList) {
-        kvPairs.push(`'f${rowIdx}'`);
-        kvPairs.push(arg);
-        rowIdx++;
+  {
+    const occurrences = findAllRowFieldAccess(result);
+    if (occurrences.length > 0) {
+      // Replace right-to-left so earlier indices stay valid.
+      const parts: string[] = [];
+      let cursor = 0;
+      for (const occ of occurrences) {
+        parts.push(result.slice(cursor, occ.start));
+        parts.push(
+          `json_extract(${occ.innerExpr.trim()}, '$.${occ.field}')`,
+        );
+        cursor = occ.end;
       }
-      return `json_object(${kvPairs.join(', ')})`;
-    });
-    rewritten = true;
+      parts.push(result.slice(cursor));
+      result = parts.join('');
+      rewritten = true;
+    }
   }
 
-  // ── Phase 4: Expand nested json_extract calls (row).field.subfield → chain ──
-  // Already handled by Phase 2 for the first level; repeated passes would
-  // be needed for (expr).field.subfield syntax which is uncommon.
+  // ── Phase 3: ROW(expr1, ...) → json_object('f1', expr1, ...) (literal-aware) ──
+
+  {
+    const occurrences = findAllRowConstructors(result);
+    if (occurrences.length > 0) {
+      const parts: string[] = [];
+      let cursor = 0;
+      let rowIdx = 1;
+      for (const occ of occurrences) {
+        parts.push(result.slice(cursor, occ.start));
+        const argList = splitTopLevelCommas(occ.args.trim()).map((a: string) => a.trim());
+        const kvPairs: string[] = [];
+        for (const arg of argList) {
+          kvPairs.push(`'f${rowIdx}'`);
+          kvPairs.push(arg);
+          rowIdx++;
+        }
+        parts.push(`json_object(${kvPairs.join(', ')})`);
+        cursor = occ.end;
+      }
+      parts.push(result.slice(cursor));
+      result = parts.join('');
+      rewritten = true;
+    }
+  }
 
   return { sql: result, rewritten };
 }
 
 // ── Internal Helpers ─────────────────────────────────────────────
+
+interface RowFieldAccessOccurrence {
+  start: number;
+  end: number;
+  innerExpr: string;
+  field: string;
+}
+
+interface RowConstructorOccurrence {
+  start: number;
+  end: number;
+  args: string;
+}
+
+/**
+ * Find the first `(expr).field` occurrence in `sql` outside any string
+ * literal, quoted identifier, or comment. Returns the occurrence (with
+ * positions and decoded inner expression/field) or `null`.
+ *
+ * The expression may itself contain balanced nested parentheses, which are
+ * handled by matching the closing paren that balances the opening `(`.
+ */
+function findRowFieldAccess(sql: string): RowFieldAccessOccurrence | null {
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+    if (c !== '(') continue;
+
+    const close = findMatchingCloseParen(sql, i);
+    if (close === -1) continue;
+
+    // The character right after `)` must be a `.` followed by an identifier.
+    let j = close + 1;
+    if (sql[j] !== '.') continue;
+
+    // Read the field identifier.
+    const fieldMatch = sql.slice(j + 1).match(/^[A-Za-z_][A-Za-z0-9_]*/);
+    if (!fieldMatch) continue;
+
+    const innerExpr = sql.slice(i + 1, close);
+    return {
+      start: i,
+      end: j + 1 + fieldMatch[0].length,
+      innerExpr,
+      field: fieldMatch[0],
+    };
+  }
+  return null;
+}
+
+/**
+ * Find all `(expr).field` occurrences in order (left to right).
+ */
+function findAllRowFieldAccess(sql: string): RowFieldAccessOccurrence[] {
+  const out: RowFieldAccessOccurrence[] = [];
+  let idx = 0;
+  while (idx < sql.length) {
+    const occ = findRowFieldAccess(sql.slice(idx));
+    if (!occ) break;
+    out.push({
+      start: idx + occ.start,
+      end: idx + occ.end,
+      innerExpr: occ.innerExpr,
+      field: occ.field,
+    });
+    idx += occ.end;
+  }
+  return out;
+}
+
+/**
+ * Find the first `ROW(...)` constructor occurrence in `sql` outside any
+ * string literal, quoted identifier, or comment, returning its position and
+ * decoded argument list. The opening paren is matched with balanced-paren
+ * tracking so nested expressions inside the argument list are handled.
+ */
+function findRowConstructor(sql: string): RowConstructorOccurrence | null {
+  for (let i = 0; i < sql.length; i++) {
+    const c = sql[i];
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    // Match the keyword ROW as a whole identifier.
+    if (!/[A-Za-z_]/.test(c)) continue;
+    if (i > 0 && /[A-Za-z0-9_]/.test(sql[i - 1])) continue;
+    if (!sql.startsWith('ROW', i)) continue;
+
+    // The token after ROW must be an opening paren (allowing whitespace).
+    let j = i + 3;
+    while (j < sql.length && /\s/.test(sql[j])) j++;
+    if (sql[j] !== '(') continue;
+
+    const close = findMatchingCloseParen(sql, j);
+    if (close === -1) continue;
+
+    const args = sql.slice(j + 1, close);
+    return { start: i, end: close + 1, args };
+  }
+  return null;
+}
+
+/**
+ * Find all `ROW(...)` constructor occurrences in order (left to right).
+ */
+function findAllRowConstructors(sql: string): RowConstructorOccurrence[] {
+  const out: RowConstructorOccurrence[] = [];
+  let idx = 0;
+  while (idx < sql.length) {
+    const occ = findRowConstructor(sql.slice(idx));
+    if (!occ) break;
+    out.push({ start: idx + occ.start, end: idx + occ.end, args: occ.args });
+    idx += occ.end;
+  }
+  return out;
+}
 
 /**
  * Parse attribute definitions from composite type DDL content.
@@ -310,6 +421,15 @@ export function findMatchingCloseParen(sql: string, openIdx: number): number {
 
   for (let i = openIdx; i < sql.length; i++) {
     const ch = sql[i];
+
+    // Skip string literals, quoted identifiers, and comments so that a
+    // `(` or `)` appearing inside them does not affect depth tracking.
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
     if (ch === '(') {
       depth++;
     } else if (ch === ')') {
@@ -356,7 +476,10 @@ export function createNoOpResult(
 }
 
 /**
- * Split a string by top-level commas (respecting nested parentheses).
+ * Split a string by top-level commas (respecting nested parentheses and
+ * string literals). A comma inside a string literal, quoted identifier, or
+ * comment is NOT treated as a delimiter; only commas at depth 0 outside any
+ * literal are used to split.
  */
 function splitTopLevelCommas(s: string): string[] {
   const items: string[] = [];
@@ -365,9 +488,20 @@ function splitTopLevelCommas(s: string): string[] {
 
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
-    if (ch === '(' || ch === '[' || ch === '{') depth++;
-    else if (ch === ')' || ch === ']' || ch === '}') depth--;
-    else if (ch === ',' && depth === 0) {
+
+    // Skip literals/comments whole so their commas don't split.
+    const skip = skipSqlLiteral(s, i);
+    if (skip !== -1) {
+      current += s.slice(i, skip);
+      i = skip - 1;
+      continue;
+    }
+
+    if (ch === '(' || ch === '[' || ch === '{') {
+      depth++;
+    } else if (ch === ')' || ch === ']' || ch === '}') {
+      depth--;
+    } else if (ch === ',' && depth === 0) {
       items.push(current.trim());
       current = '';
       continue;
