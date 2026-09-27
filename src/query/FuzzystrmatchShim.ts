@@ -29,6 +29,7 @@
 
 import natural from 'natural';
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('FuzzystrmatchShim');
 
@@ -153,7 +154,11 @@ export function difference(a: string, b: string): number {
  * @returns Similarity score from 0.0 to 1.0
  */
 export function diceCoefficient(a: string, b: string): number {
-  return natural.DiceCoefficient(a, b);
+  // natural.DiceCoefficient returns NaN when either input is empty (no
+  // bigrams), and `null`/NaN for some degenerate cases. PostgreSQL's
+  // dice_coefficient returns 0.0 for empty inputs, so we normalize here.
+  const result = natural.DiceCoefficient(a, b);
+  return result == null || Number.isNaN(result) ? 0 : result;
 }
 
 // ── SQL-level detection and rewriting ────────────────────────────
@@ -175,23 +180,62 @@ const FUZZY_FUNCTIONS = [
 ];
 
 /**
- * Build a regex pattern to detect any fuzzystrmatch function call.
- */
-const FUZZY_FUNC_RE = new RegExp(
-  `\\b(${FUZZY_FUNCTIONS.map(f => f.replace(/_/g, '[_]?')).join('|')})\\s*\\(`,
-  'gi'
-);
-
-/**
  * Detect whether a SQL statement contains fuzzystrmatch function calls.
  *
+ * This is a literal-aware scan: string literals, quoted identifiers,
+ * dollar-quoted strings, and comments are skipped, so a word like
+ * `levenshtein` appearing inside a string or comment is NOT reported.
+ * The function name must be followed by an opening parenthesis (a call),
+ * and must be preceded by a non-identifier character (so `dicecoefficient`
+ * does not match `dice_coefficient`, and `mylevenshtein` does not match
+ * `levenshtein`).
+ *
  * @param sql - Raw SQL string
- * @returns true if any fuzzystrmatch function is detected
+ * @returns true if any fuzzystrmatch function is detected as a real call
  */
 export function detectFuzzyMatch(sql: string): boolean {
-  // Reset lastIndex to avoid cross-call interference with the global regex
-  FUZZY_FUNC_RE.lastIndex = 0;
-  return FUZZY_FUNC_RE.test(sql);
+  if (!sql || typeof sql !== 'string') return false;
+
+  const len = sql.length;
+  for (let i = 0; i < len; i++) {
+    const skip = skipSqlLiteral(sql, i);
+    if (skip !== -1) {
+      i = skip - 1;
+      continue;
+    }
+
+    const c = sql[i];
+    // Function names begin with a letter or underscore.
+    if (!/[A-Za-z_]/.test(c)) continue;
+
+    // A function name must be a whole identifier: the character before it
+    // must not be an identifier character (word boundary).
+    if (i > 0 && /[A-Za-z0-9_]/.test(sql[i - 1])) continue;
+
+    let matched = false;
+    for (const fn of FUZZY_FUNCTIONS) {
+      if (sql.startsWith(fn, i)) {
+        matched = true;
+        break;
+      }
+    }
+    if (!matched) continue;
+
+    // Skip past the identifier (including any underscores).
+    let j = i;
+    while (j < len && /[A-Za-z0-9_]/.test(sql[j])) j++;
+
+    // Require an opening parenthesis (a function call), allowing whitespace.
+    let k = j;
+    while (k < len && /\s/.test(sql[k])) k++;
+    if (k < len && sql[k] === '(') {
+      return true;
+    }
+
+    i = j - 1;
+  }
+
+  return false;
 }
 
 // ── Catalog registration ─────────────────────────────────────────
@@ -308,7 +352,10 @@ export function registerFuzzyFunctions(db: any): void {
   const opts = { deterministic: true } as const;
 
   db.function('levenshtein', opts, (a: any, b: any, ins?: any, del?: any, sub?: any) => {
-    // Dispatch: 2-arg or 5-arg
+    // Dispatch: 2-arg standard distance or 5-arg custom-cost distance.
+    // PostgreSQL exposes exactly two signatures — levenshtein(text, text)
+    // and levenshtein(text, text, int, int, int) — so we branch on whether
+    // any cost argument was supplied rather than on their individual values.
     if (ins == null && del == null && sub == null) {
       return levenshtein(String(a ?? ''), String(b ?? ''));
     }
@@ -343,27 +390,34 @@ export function registerFuzzyFunctions(db: any): void {
  * This is not exported via `natural`, so we implement it here.
  */
 function levenshteinCustom(a: string, b: string, ins: number, del: number, sub: number): number {
+  // PostgreSQL's 5-arg signature defaults each weight to 1 when omitted;
+  // normalize a missing (null/undefined) weight to its standard cost so a
+  // partial-cost invocation never produces NaN.
+  const wIns = ins == null ? 1 : Number(ins);
+  const wDel = del == null ? 1 : Number(del);
+  const wSub = sub == null ? 1 : Number(sub);
+
   const m = a.length;
   const n = b.length;
 
   // Ensure we iterate over the shorter dimension for memory efficiency
   if (m < n) {
-    return levenshteinCustom(b, a, del, ins, sub);
+    return levenshteinCustom(b, a, wDel, wIns, wSub);
   }
 
   let prev = new Array(n + 1);
   let curr = new Array(n + 1);
 
   for (let j = 0; j <= n; j++) {
-    prev[j] = j * ins;
+    prev[j] = j * wIns;
   }
 
   for (let i = 1; i <= m; i++) {
-    curr[0] = i * del;
+    curr[0] = i * wDel;
     for (let j = 1; j <= n; j++) {
-      const costDel = prev[j] + del;
-      const costIns = curr[j - 1] + ins;
-      const costSub = prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : sub);
+      const costDel = prev[j] + wDel;
+      const costIns = curr[j - 1] + wIns;
+      const costSub = prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : wSub);
       curr[j] = Math.min(costDel, costIns, costSub);
     }
     [prev, curr] = [curr, prev];
