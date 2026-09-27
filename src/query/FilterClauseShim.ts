@@ -142,7 +142,7 @@ export function rewriteFilter(sql: string): FilterClauseResult {
     if (filterOpen === -1) continue;
 
     // Find matching closing paren
-    const filterClose = findMatchingParen(sql, filterOpen);
+    const filterClose = _findMatchingParen(sql, filterOpen);
     if (filterClose === -1) continue;
 
     // Extract WHERE condition from within the FILTER parens
@@ -172,7 +172,7 @@ export function rewriteFilter(sql: string): FilterClauseResult {
     const aggCloseParen = pos;
 
     // Find matching opening paren for the agg function
-    const aggOpenParen = findMatchingOpenParen(sql, aggCloseParen);
+    const aggOpenParen = _findMatchingOpenParen(sql, aggCloseParen);
     if (aggOpenParen === -1) continue;
 
     const aggExpr = sql.slice(aggOpenParen + 1, aggCloseParen).trim();
@@ -189,7 +189,9 @@ export function rewriteFilter(sql: string): FilterClauseResult {
 
     // ── Check for optional OVER clause after FILTER ───────────
 
-    const afterFilter = sql.slice(filterClose + 1).trimStart();
+    const afterFilterRaw = sql.slice(filterClose + 1);
+    const filterSuffixTrimLen = afterFilterRaw.length - afterFilterRaw.trimStart().length;
+    const afterFilter = afterFilterRaw.trimStart();
     let overClause: string | null = null;
     let overLen = 0;
 
@@ -198,10 +200,10 @@ export function rewriteFilter(sql: string): FilterClauseResult {
       // Find the opening ( of OVER(...)
       const overOpen = afterFilter.indexOf('(', overMatch.index!);
       if (overOpen !== -1) {
-        const overClose = findMatchingParen(afterFilter, overOpen);
+        const overClose = _findMatchingParen(afterFilter, overOpen);
         if (overClose !== -1) {
           overClause = afterFilter.slice(overMatch.index!, overClose + 1);
-          overLen = overClose + 1;
+          overLen = filterSuffixTrimLen + overClose + 1;
         }
       }
     }
@@ -225,7 +227,7 @@ export function rewriteFilter(sql: string): FilterClauseResult {
     } else if (funcUpper === 'STRING_AGG') {
       // STRING_AGG(value_expr, delimiter) — only wrap the first argument
       // This handles cases like STRING_AGG(x, ',') and STRING_AGG(x ORDER BY y, sep)
-      const aggArgs = topLevelSplit(aggExpr, ',');
+      const aggArgs = _topLevelSplit(aggExpr, ',');
       if (aggArgs.length >= 2) {
         const valueExpr = aggArgs[0].trim();
         const delimiter = aggArgs.slice(1).join(',').trim();
@@ -305,16 +307,20 @@ export function rewriteFilter(sql: string): FilterClauseResult {
  *
  * Replaces matched content with same-length placeholder text (underscores)
  * to preserve character positions.
+ *
+ * Each token kind is matched with escape awareness so an embedded doubled
+ * quote (`''` / `""`) does not prematurely terminate the token and shift the
+ * placeholder alignment.
  */
 function stripSqlLiterals(sql: string): string {
   let result = sql;
-  // Replace single-quoted strings
-  result = result.replace(/'[^']*'/g, (m) => '_'.repeat(m.length));
-  // Replace double-quoted identifiers
-  result = result.replace(/"[^"]*"/g, (m) => '_'.repeat(m.length));
-  // Replace line comments
+  // Single-quoted strings (dollar-escaped '' → '')
+  result = result.replace(/'(?:[^']|'')*'/g, (m) => '_'.repeat(m.length));
+  // Double-quoted identifiers (doubled "" → "")
+  result = result.replace(/"(?:[^"]|"")*"/g, (m) => '_'.repeat(m.length));
+  // Line comments
   result = result.replace(/--[^\n]*/g, (m) => '_'.repeat(m.length));
-  // Replace block comments
+  // Block comments
   result = result.replace(/\/\*[\s\S]*?\*\//g, (m) => '_'.repeat(m.length));
   return result;
 }
@@ -322,8 +328,11 @@ function stripSqlLiterals(sql: string): string {
 /**
  * Find the matching closing parenthesis for the opening parenthesis at `openPos`.
  * Returns the index of the matching `)`, or -1 if not found.
+ *
+ * Exported (underscore-prefixed) for direct unit testing of its defensive
+ * guard branches.
  */
-function findMatchingParen(sql: string, openPos: number): number {
+export function _findMatchingParen(sql: string, openPos: number): number {
   if (openPos < 0 || openPos >= sql.length || sql[openPos] !== '(') {
     return -1;
   }
@@ -341,8 +350,11 @@ function findMatchingParen(sql: string, openPos: number): number {
 /**
  * Find the matching opening parenthesis for the closing parenthesis at `closePos`.
  * Returns the index of the matching `(`, or -1 if not found.
+ *
+ * Exported (underscore-prefixed) for direct unit testing of its defensive
+ * guard branches.
  */
-function findMatchingOpenParen(sql: string, closePos: number): number {
+export function _findMatchingOpenParen(sql: string, closePos: number): number {
   if (closePos < 0 || closePos >= sql.length || sql[closePos] !== ')') {
     return -1;
   }
@@ -365,11 +377,14 @@ function findMatchingOpenParen(sql: string, closePos: number): number {
  * expressions like STRING_AGG(x, ','), where the comma inside the string
  * literal should NOT be a split point.
  *
+ * Exported (underscore-prefixed) for direct unit testing of its defensive
+ * guard branches.
+ *
  * @param text - The string to split
  * @param delimiter - The delimiter character (typically ',')
  * @returns Array of trimmed substrings split at the top level
  */
-function topLevelSplit(text: string, delimiter: string): string[] {
+export function _topLevelSplit(text: string, delimiter: string): string[] {
   const parts: string[] = [];
   let depth = 0;
   let inString = false;
