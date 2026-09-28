@@ -30,18 +30,6 @@ type XmlResult = { sql: string; rewritten: boolean };
 // ── Regex Patterns ───────────────────────────────────────────────
 
 /**
- * Detect basic XML open tags (e.g., `<root>`, `<root attr="v">`).
- */
-// eslint-disable-next-line require-unicode-regexp
-const XML_OPEN_TAG_RE = /<([A-Za-z_][A-Za-z0-9_:.-]*)(?=[\s>])[^>]*>/g;
-
-/**
- * Detect XML close tags (e.g., `</root>`).
- */
-// eslint-disable-next-line require-unicode-regexp
-const XML_CLOSE_TAG_RE = /<\/([A-Za-z_][A-Za-z0-9_:.-]*)>/g;
-
-/**
  * Interface for tag entries during XML validation.
  */
 interface TagEntry {
@@ -101,12 +89,6 @@ function collectTagsInOrder(xml: string): TagEntry[] {
 }
 
 /**
- * Detect self-closing XML tags.
- */
-// eslint-disable-next-line require-unicode-regexp
-const XML_SELF_CLOSING_RE = /<([A-Za-z_][A-Za-z0-9_:.-]*)(?:\s+[^>]*)?\/>/;
-
-/**
  * Match a simple XPath expression like `/root/element` or `/root/element/sub`.
  * Only supports element name steps separated by `/`.
  */
@@ -157,21 +139,8 @@ export function xmlparse(input: string): string {
     throw new Error('Invalid XML: must start with \'<\'');
   }
 
-  // Collect all open tags in order
-  const openTags: string[] = [];
-  const openTagMatches = trimmed.matchAll(XML_OPEN_TAG_RE);
-  for (const m of openTagMatches) {
-    openTags.push(m[1]);
-  }
-
-  // Collect all close tags in order
-  const closeTags: string[] = [];
-  const closeTagMatches = trimmed.matchAll(XML_CLOSE_TAG_RE);
-  for (const m of closeTagMatches) {
-    closeTags.push(m[1]);
-  }
-
-  // Check for mismatched tags: each close tag must match the most recent open tag
+  // Collect all tags in document order and validate balanced open/close
+  // pairing using an explicit stack.
   const openStack: string[] = [];
   const allTags = collectTagsInOrder(trimmed);
 
@@ -191,7 +160,7 @@ export function xmlparse(input: string): string {
     }
   }
 
-  // If there are unclosed tags (self-closing tags don't appear in openTags)
+  // If there are unclosed tags (self-closing tags don't appear on the stack)
   if (openStack.length > 0) {
     throw new Error(
       `Invalid XML: unclosed tags: ${openStack.join(', ')}`,
@@ -428,15 +397,28 @@ export function rewriteXmlExtendedFunc(sql: string): XmlResult {
   // ── Phase 5: xpath_exists(xpath, xml[, nsarray]) → CASE WHEN ──
   working = working.replace(XPATH_EXISTS_RE, (_match: string, args: string) => {
     rewritten = true;
+    // `args` holds everything between the outer parentheses, e.g.
+    // `'/a/b', '<a><b/></a>'`. Split on the first top-level comma to separate
+    // the XPath expression from the XML document argument (a regex-based stub,
+    // so nested commas inside filtered-out subexpressions are not handled).
     const trimmedArgs = args.trim();
-    return `CASE WHEN ${trimmedArgs} LIKE '%//%' THEN 1 ELSE 0 END`;
+    const firstComma = trimmedArgs.indexOf(',');
+    const xmlArg = firstComma === -1
+      ? trimmedArgs
+      : trimmedArgs.slice(firstComma + 1).trim();
+    // Stub semantics: the path exists iff the XML document contains at least
+    // one element tag. This avoids emitting invalid SQL (the previous rewrite
+    // concatenated both operands into a single LIKE, producing `x, y LIKE ...`).
+    return `CASE WHEN ${xmlArg} LIKE '%<%>%' THEN 1 ELSE 0 END`;
   });
 
   // ── Phase 6: xml_is_well_formed(string) → CASE WHEN ──
   working = working.replace(XML_IS_WELL_FORMED_RE, (_match: string, arg: string) => {
     rewritten = true;
     const a = arg.trim();
-    return `CASE WHEN (${a} LIKE '<%%>%%' AND ${a} LIKE '%%</%%>') OR ${a} LIKE '<%%/>' THEN 1 ELSE 0 END`;
+    // Note: `%` is the SQL LIKE wildcard (SQLite does not use `%%` as an
+    // escape); a single `%` already matches zero-or-more characters.
+    return `CASE WHEN (${a} LIKE '<%>%' AND ${a} LIKE '%</%>') OR ${a} LIKE '<%/>' THEN 1 ELSE 0 END`;
   });
 
   if (rewritten) {
