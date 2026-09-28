@@ -15,6 +15,7 @@
 
 import { PinoLogger } from '../logger/PinoLogger';
 import { ConstraintEvaluator } from '../constraint/ConstraintEvaluator';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('CheckConstraintShim');
 
@@ -78,18 +79,28 @@ export function rewriteCheckConstraint(sql: string): CheckConstraintResult {
 
 export function extractCheckExpression(sql: string): string | null {
   if (!sql || typeof sql !== 'string') return null;
-  const match = CHECK_CONSTRAINT_RE.exec(sql.trim());
+  const trimmed = sql.trim();
+  const match = CHECK_CONSTRAINT_RE.exec(trimmed);
   if (!match) return null;
 
+  const text = trimmed;
   const startPos = match.index + match[0].length;
   let depth = 1;
   let pos = startPos;
-  const text = sql.trim();
 
   while (pos < text.length && depth > 0) {
+    // Skip string literals, quoted identifiers, dollar-quoted strings, and
+    // comments so parentheses inside them do not affect nesting depth.
+    const literalEnd = skipSqlLiteral(text, pos);
+    if (literalEnd !== -1) {
+      pos = literalEnd;
+      continue;
+    }
+
     const ch = text[pos];
-    if (ch === '(') depth++;
-    else if (ch === ')') {
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
       depth--;
       if (depth === 0) {
         const expression = text.slice(startPos, pos).trim();
