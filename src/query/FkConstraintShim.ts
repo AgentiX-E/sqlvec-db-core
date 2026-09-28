@@ -13,6 +13,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('FkConstraintShim');
 
@@ -61,19 +62,28 @@ const PG_FK_EXT_RE = /\bMATCH\s+(FULL|PARTIAL|SIMPLE)\b|\b(?:NOT\s+)?DEFERRABLE\
 
 export function detectPgFkExt(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
-  return PG_FK_EXT_RE.test(sql.trim());
+  // Protect string literals and comments so a MATCH/DEFERRABLE/INITIALLY token
+  // inside user data (e.g. a DEFAULT 'DEFERRABLE') is not mistaken for a real
+  // PG extension clause.
+  const protectedSql = protectSQL(sql.trim()).protectedSql;
+  return PG_FK_EXT_RE.test(protectedSql);
 }
 
 export function rewritePgFkExt(sql: string): FkConstraintResult {
   if (!sql || typeof sql !== 'string') return { sql, rewritten: false };
   const trimmed = sql.trim();
-  if (!PG_FK_EXT_RE.test(trimmed)) return { sql: trimmed, rewritten: false };
+  if (!detectPgFkExt(trimmed)) return { sql: trimmed, rewritten: false };
 
-  let rewritten = trimmed;
+  // Strip extension keywords on a literal-protected copy, then restore the
+  // literals. The placeholders contain no MATCH/DEFERRABLE/INITIALLY tokens, so
+  // the regexes below cannot corrupt user data.
+  const guarded = protectSQL(trimmed);
+  let rewritten = guarded.protectedSql;
   rewritten = rewritten.replace(MATCH_CLAUSE_RE, '');
   rewritten = rewritten.replace(DEFERRABLE_RE, '');
   rewritten = rewritten.replace(INITIALLY_RE, '');
   rewritten = rewritten.replace(/\s{2,}/g, ' ').trim();
+  rewritten = restoreSQL({ ...guarded, protectedSql: rewritten });
 
   logger.debug('Rewrote PG FK extension: original=%s rewritten=%s', trimmed, rewritten);
   return { sql: rewritten, rewritten: true };
@@ -255,6 +265,12 @@ export async function onDelete(
             `UPDATE "${def.table}" SET ${def.refColumns.map((c) => `"${c}" = NULL`).join(', ')} WHERE ${conditions.join(' AND ')}`,
           );
           break;
+        case 'SET DEFAULT':
+          // Let SQLite resolve each referencing column to its DEFAULT value.
+          await queryFn(
+            `UPDATE "${def.table}" SET ${def.refColumns.map((c) => `"${c}" = DEFAULT`).join(', ')} WHERE ${conditions.join(' AND ')}`,
+          );
+          break;
         case 'RESTRICT':
         case 'NO ACTION':
         default: {
@@ -330,10 +346,13 @@ export async function onUpdate(
     if (exists) {
       switch (action) {
         case 'CASCADE': {
-          // Update referencing rows to new values
+          // Update referencing rows to new values. As with oldConditions above,
+          // the new value lives on the *referenced* table's column (refCol);
+          // row[thisCol] is the referencing column name and is absent from the
+          // referenced row, so fall back to row[refCol].
           const setClause = def.refColumns.map((refCol, i) => {
             const thisCol = def.columns[i];
-            const newVal = row[thisCol];
+            const newVal = row[thisCol] ?? row[refCol];
             return `"${refCol}" = ${escapeValue(newVal)}`;
           });
           await queryFn(`UPDATE "${def.table}" SET ${setClause.join(', ')} WHERE ${oldConditions.join(' AND ')}`);
@@ -342,6 +361,13 @@ export async function onUpdate(
         case 'SET NULL': {
           await queryFn(
             `UPDATE "${def.table}" SET ${def.refColumns.map((c) => `"${c}" = NULL`).join(', ')} WHERE ${oldConditions.join(' AND ')}`,
+          );
+          break;
+        }
+        case 'SET DEFAULT': {
+          // Let SQLite resolve each referencing column to its DEFAULT value.
+          await queryFn(
+            `UPDATE "${def.table}" SET ${def.refColumns.map((c) => `"${c}" = DEFAULT`).join(', ')} WHERE ${oldConditions.join(' AND ')}`,
           );
           break;
         }
