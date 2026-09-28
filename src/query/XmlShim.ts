@@ -36,6 +36,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('XmlShim');
 
@@ -233,15 +234,16 @@ export function rewriteXmlFunc(sql: string): XmlResult {
 
 /**
  * Find the position of the matching closing parenthesis, accounting for
- * nesting depth.
+ * nesting depth and skipping string literals, quoted identifiers,
+ * dollar-quoted strings, and comments.
  *
  * Starts from `openPos` which should be the position of the opening
  * parenthesis character `(`. Returns the position of the matching closing
  * parenthesis `)`, or `-1` if no matching close is found (unbalanced).
  *
- * This is a simple depth tracker and does **not** account for string
- * literals; parentheses inside string literals may cause false matches.
- * This is a known limitation of regex-based SQL processing.
+ * Literal awareness prevents a `)` that appears *inside* a string literal
+ * (e.g. `xmlparse('a)b')`) from prematurely closing the call and producing
+ * invalid SQL.
  *
  * @param sql      - The full SQL string.
  * @param openPos  - Position of the opening parenthesis character.
@@ -253,6 +255,15 @@ function findMatchingParen(sql: string, openPos: number): number {
 
   while (idx < sql.length && depth > 0) {
     const ch = sql[idx];
+
+    // Skip string literals, quoted identifiers, dollar-quoted strings, and
+    // comments so their parentheses do not affect nesting depth.
+    const literalEnd = skipSqlLiteral(sql, idx);
+    if (literalEnd !== -1) {
+      idx = literalEnd;
+      continue;
+    }
+
     if (ch === '(') {
       depth++;
     } else if (ch === ')') {
