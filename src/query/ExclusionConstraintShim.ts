@@ -45,6 +45,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ExclusionConstraintShim');
 
@@ -73,20 +74,6 @@ export interface ExclusionResult {
  */
 const EXCLUDE_DETECT_RE = /\bEXCLUDE\s+(?:USING\s+\w+\s+)?\(/i;
 
-/**
- * Pattern for optional PG keywords that may follow the EXCLUDE column list.
- *
- * These are PG-specific modifiers appended after the parenthesized
- * column list of an EXCLUDE constraint:
- *   - INCLUDE (columns)
- *   - WITH (storage_params)
- *   - USING INDEX TABLESPACE name
- *   - WHERE (predicate)
- *   - (NOT)? DEFERRABLE
- *   - INITIALLY (DEFERRED|IMMEDIATE)
- */
-const EXCLUDE_TRAILING_RE = /(?:\s+INCLUDE\s*\([^)]*\)|\s+WITH\s*\([^)]*\)|\s+USING\s+INDEX\s+TABLESPACE\s+\w+|\s+WHERE\s*\([^)]*\)|\s+(?:NOT\s+)?DEFERRABLE|\s+INITIALLY\s+(?:DEFERRED|IMMEDIATE))+/i;
-
 // ── Helpers ──────────────────────────────────────────────────────
 
 /**
@@ -94,14 +81,12 @@ const EXCLUDE_TRAILING_RE = /(?:\s+INCLUDE\s*\([^)]*\)|\s+WITH\s*\([^)]*\)|\s+US
  * and return the index of the matching closing paren.
  *
  * @param sql - The full SQL string.
- * @param start - Index of the opening '(' character.
+ * @param start - Index of the opening '(' character. Callers pass a position
+ *   that is guaranteed to hold `'('` (see `parenPos` from `lastIndexOf('(')`
+ *   and the INCLUDE/WITH/WHERE sub-scans that land on their own `'('`).
  * @returns Index of the matching ')', or sql.length if unbalanced.
  */
 function findMatchingParen(sql: string, start: number): number {
-  if (start >= sql.length || sql[start] !== '(') {
-    return start;
-  }
-
   let depth = 1;
   let pos = start + 1;
 
@@ -247,8 +232,9 @@ function stripExcludeClauses(sql: string): string {
       break;
     }
 
-    // Consume any trailing comma and whitespace after the clause
+    // Consume any trailing comma and whitespace after the clause.
     const afterClause = result.slice(endPos).match(/^\s*,?\s*/);
+    const consumedTrailingComma = afterClause !== null && afterClause[0].includes(',');
     if (afterClause) {
       endPos += afterClause[0].length;
     }
@@ -257,9 +243,20 @@ function stripExcludeClauses(sql: string): string {
     // The regex \s*$ always matches (zero-length match at minimum),
     // so beforeClauseTrim is guaranteed non-null in practice.
     const beforeClauseTrim = result.slice(0, clauseStart).match(/\s*$/);
-    const trimStart: number = beforeClauseTrim
+    let trimStart: number = beforeClauseTrim
       ? clauseStart - beforeClauseTrim[0].length
       : clauseStart;
+
+    // When the EXCLUDE clause is the *last* element of a comma-separated list
+    // (no trailing comma was consumed), the comma that preceded it is left
+    // dangling and would produce invalid SQL like `..., x,)`. Remove that
+    // leading comma (and any whitespace around it) in this case.
+    if (!consumedTrailingComma) {
+      const leadingComma = result.slice(0, trimStart).match(/(\s*,)?\s*$/);
+      if (leadingComma && leadingComma[0].includes(',')) {
+        trimStart -= leadingComma[0].length;
+      }
+    }
 
     // Remove the clause
     result =
@@ -299,7 +296,11 @@ export function detectExclusionConstraint(sql: string): boolean {
     return false;
   }
 
-  return EXCLUDE_DETECT_RE.test(trimmed);
+  // Protect string literals and comments so an EXCLUDE-looking token inside
+  // user data (e.g. 'EXCLUDE USING gist (') is not mistaken for a real clause.
+  const protectedSql = protectSQL(trimmed).protectedSql;
+
+  return EXCLUDE_DETECT_RE.test(protectedSql);
 }
 
 /**
@@ -360,7 +361,7 @@ export function rewriteExclusionConstraint(sql: string): ExclusionResult {
 
   // ── Step 1: Fast-path detection ───────────────────────────────
 
-  if (!EXCLUDE_DETECT_RE.test(trimmed)) {
+  if (!detectExclusionConstraint(trimmed)) {
     return { sql: trimmed, rewritten: false };
   }
 
@@ -369,13 +370,19 @@ export function rewriteExclusionConstraint(sql: string): ExclusionResult {
     trimmed,
   );
 
-  // ── Step 2: Strip EXCLUDE clauses ─────────────────────────────
+  // ── Step 2: Strip EXCLUDE clauses on a literal-protected copy ──
 
-  const stripped = stripExcludeClauses(trimmed);
+  // Protect string literals and comments before scanning so the balanced-paren
+  // walk never mistakes parentheses/EXCLUDE keywords inside user data for the
+  // constraint boundary. The placeholders contain no parens or EXCLUDE tokens,
+  // so the scanner operates safely and we restore the literals afterwards.
+  const guarded = protectSQL(trimmed);
+  const stripped = stripExcludeClauses(guarded.protectedSql);
+  const restored = restoreSQL({ ...guarded, protectedSql: stripped });
 
   // ── Step 3: Clean up excess whitespace ────────────────────────
 
-  const rewritten = stripped.replace(/\s{2,}/g, ' ').trim();
+  const rewritten = restored.replace(/\s{2,}/g, ' ').trim();
 
   const changed = rewritten !== trimmed;
 
