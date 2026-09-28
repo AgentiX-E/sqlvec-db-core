@@ -13,6 +13,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('UniqueConstraintShim');
 
@@ -50,9 +51,21 @@ const INITIALLY_RE = /\bINITIALLY\s+(?:DEFERRED|IMMEDIATE)\b/i;
 const USING_INDEX_TABLESPACE_RE = /\bUSING\s+INDEX\s+TABLESPACE\s+[A-Za-z_][A-Za-z0-9_$]*\b/i;
 const WITH_OPTIONS_RE = /\bWITH\s*\([^)]*\)/i;
 const ANY_PG_EXTENSION_RE = /\b(?:NULLS\s+NOT\s+DISTINCT|DEFERRABLE|INITIALLY\s+(?:DEFERRED|IMMEDIATE)|USING\s+INDEX\s+TABLESPACE|WITH\s*\()/i;
-const UNIQUE_EXTENSION_DETECT_RE = /\bUNIQUE\b[\s\S]*?\b(?:NULLS\s+NOT\s+DISTINCT|DEFERRABLE|INITIALLY\s+(?:DEFERRED|IMMEDIATE)|USING\s+INDEX\s+TABLESPACE|WITH\s*\()/i;
 
 const PG_EXT_ALT = '(?:NULLS\\s+NOT\\s+DISTINCT|DEFERRABLE|INITIALLY\\s+(?:DEFERRED|IMMEDIATE)|USING\\s+INDEX\\s+TABLESPACE\\s+[A-Za-z_][A-Za-z0-9_$]*|WITH\\s*\\([^)]*\\))';
+
+/**
+ * Detect a UNIQUE constraint that is *directly* followed by one or more PG
+ * extension modifiers (either table-level `UNIQUE (...) EXT` or inline
+ * `UNIQUE EXT`). Unlike the previous `UNIQUE[\s\S]*?EXT` pattern, this does not
+ * span arbitrary intervening content, so an extension keyword that belongs to a
+ * different clause (or appears in unrelated SQL farther down the text) is no
+ * longer misattributed to an earlier UNIQUE.
+ */
+const UNIQUE_EXTENSION_DETECT_RE = new RegExp(
+  `\\bUNIQUE(?:\\s*\\([^)]+\\)(?:\\s+${PG_EXT_ALT})+|\\s+(?:${PG_EXT_ALT})(?:\\s+${PG_EXT_ALT})*)`,
+  'i',
+);
 
 const TABLE_LEVEL_WITH_EXT_RE = new RegExp(
   `(\\bUNIQUE\\s*\\([^)]+\\))\\s*((?:${PG_EXT_ALT})(?:\\s+(?:${PG_EXT_ALT}))*)\\s*`,
@@ -72,8 +85,9 @@ const uniqueDefs = new Map<string, UniqueConstraintDef>();
 
 export function detectUniqueExtension(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) return false;
-  if (!/\bUNIQUE\b/i.test(sql)) return false;
-  return UNIQUE_EXTENSION_DETECT_RE.test(sql);
+  const protectedSql = protectSQL(sql).protectedSql;
+  if (!/\bUNIQUE\b/i.test(protectedSql)) return false;
+  return UNIQUE_EXTENSION_DETECT_RE.test(protectedSql);
 }
 
 export function rewriteUniqueConstraint(sql: string): UniqueConstraintResult {
@@ -86,31 +100,43 @@ export function rewriteUniqueConstraint(sql: string): UniqueConstraintResult {
   }
 
   const constraints = extractUniqueConstraints(trimmed);
-  let rewritten = trimmed.replace(TABLE_LEVEL_WITH_EXT_RE, (match, baseConstraint: string) => {
+
+  // Protect string literals, quoted identifiers, and comments so the regex
+  // rewrite below never strips PG extension keywords that happen to appear
+  // inside user data (e.g. a DEFAULT 'UNIQUE DEFERRABLE').
+  const protectedSql = protectSQL(trimmed);
+
+  let rewritten = protectedSql.protectedSql.replace(TABLE_LEVEL_WITH_EXT_RE, (match, baseConstraint: string) => {
     logger.debug({ original: match, stripped: baseConstraint }, 'Rewriting table-level UNIQUE constraint');
     return baseConstraint;
   });
   rewritten = rewritten.replace(INLINE_WITH_EXT_RE, () => 'UNIQUE');
 
-  if (rewritten === trimmed) {
+  const result = restoreSQL({ ...protectedSql, protectedSql: rewritten });
+
+  if (result === trimmed) {
     return { sql: trimmed, rewritten: false, constraints };
   }
 
-  return { sql: rewritten, rewritten: true, constraints };
+  return { sql: result, rewritten: true, constraints };
 }
 
 export function extractUniqueConstraints(sql: string): string[] | undefined {
   if (typeof sql !== 'string' || sql.trim().length === 0) return undefined;
   const results: string[] = [];
 
+  // Protect literals/comments so extension keywords inside user data are not
+  // mistaken for real PG extensions.
+  const protectedSql = protectSQL(sql).protectedSql;
+
   const tableLevelRe = /(?:\bCONSTRAINT\s+\w+\s+)?\bUNIQUE\s*\([^)]+\)(?:\s+(?:NULLS\s+NOT\s+DISTINCT|DEFERRABLE|INITIALLY\s+(?:DEFERRED|IMMEDIATE)|USING\s+INDEX\s+TABLESPACE\s+\w+|WITH\s*\([^)]*\)))*/gi;
   let match: RegExpExecArray | null;
-  while ((match = tableLevelRe.exec(sql)) !== null) {
+  while ((match = tableLevelRe.exec(protectedSql)) !== null) {
     results.push(match[0].trim());
   }
 
   const inlineExtRe = /\bUNIQUE\s+(?!\()((?:NULLS\s+NOT\s+DISTINCT|DEFERRABLE|INITIALLY\s+(?:DEFERRED|IMMEDIATE)|USING\s+INDEX\s+TABLESPACE\s+\w+|WITH\s*\([^)]*\))(?:\s+(?:NULLS\s+NOT\s+DISTINCT|DEFERRABLE|INITIALLY\s+(?:DEFERRED|IMMEDIATE)|USING\s+INDEX\s+TABLESPACE\s+\w+|WITH\s*\([^)]*\)))*)/gi;
-  while ((match = inlineExtRe.exec(sql)) !== null) {
+  while ((match = inlineExtRe.exec(protectedSql)) !== null) {
     results.push(`UNIQUE ${match[1].trim()}`);
   }
   return results.length > 0 ? results : undefined;
