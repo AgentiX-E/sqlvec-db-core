@@ -154,9 +154,13 @@ export function maskEmail(value: string): string {
 export function applyMask(value: string, policy: MaskingPolicy): string {
   switch (policy.function) {
     case 'partial': {
-      const prefix = Number(policy.params[0]) || 1;
+      // `Number(...) || 1` would wrongly coerce a legitimate `0` (no prefix/
+      // suffix reveal) into `1`; fall back to the default only for NaN.
+      const rawPrefix = Number(policy.params[0]);
+      const prefix = Number.isFinite(rawPrefix) ? rawPrefix : 1;
       const mask = policy.params[1] || '***';
-      const suffix = Number(policy.params[2]) || 1;
+      const rawSuffix = Number(policy.params[2]);
+      const suffix = Number.isFinite(rawSuffix) ? rawSuffix : 1;
       return maskPartial(value, prefix, mask, suffix);
     }
     case 'full':
@@ -188,7 +192,7 @@ export function applyMask(value: string, policy: MaskingPolicy): string {
  */
 // eslint-disable-next-line require-unicode-regexp
 const ALTER_SET_MASKED_PATTERN =
-  /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?\S+\s+ALTER\s+(?:COLUMN\s+)?\S+\s+SET\s+MASKED\s+WITH\s*\(.*?\)\s*;?\s*$/i;
+  /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\S+)\s+ALTER\s+(?:COLUMN\s+)?(\S+)\s+SET\s+MASKED\s+WITH\s*\(.*?\)\s*;?\s*$/i;
 
 /**
  * Pattern 2: `ALTER TABLE ... ALTER COLUMN ... DROP MASKED`
@@ -199,7 +203,7 @@ const ALTER_SET_MASKED_PATTERN =
  */
 // eslint-disable-next-line require-unicode-regexp
 const ALTER_DROP_MASKED_PATTERN =
-  /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?\S+\s+ALTER\s+(?:COLUMN\s+)?\S+\s+DROP\s+MASKED\s*;?\s*$/i;
+  /^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\S+)\s+ALTER\s+(?:COLUMN\s+)?(\S+)\s+DROP\s+MASKED\s*;?\s*$/i;
 
 /**
  * Pattern 3: `SET masking.enabled = on|off`
@@ -212,19 +216,20 @@ const ALTER_DROP_MASKED_PATTERN =
  */
 // eslint-disable-next-line require-unicode-regexp
 const SET_MASKING_ENABLED_PATTERN =
-  /^\s*SET\s+(?:SESSION\s+|LOCAL\s+)?masking\.enabled\s*(?:=|TO)\s*\S+\s*;?\s*$/i;
+  /^\s*SET\s+(?:SESSION\s+|LOCAL\s+)?masking\.enabled\s*(?:=|\bTO)\s*(\S+)\s*;?\s*$/i;
 
 /**
  * Pattern 4: `SET masking.default_function = '...'`
  *
  * Matches:
  *   SET masking.default_function = 'partial(1,***,1)'
+ *   SET masking.default_function = "full"        (double-quoted value)
  *   SET SESSION masking.default_function TO 'full'
  *   SET LOCAL masking.default_function = 'none'
  */
 // eslint-disable-next-line require-unicode-regexp
 const SET_MASKING_DEFAULT_PATTERN =
-  /^\s*SET\s+(?:SESSION\s+|LOCAL\s+)?masking\.default_function\s*(?:=|TO)\s*'.*?'\s*;?\s*$/i;
+  /^\s*SET\s+(?:SESSION\s+|LOCAL\s+)?masking\.default_function\s*(?:=|\bTO)\s*('(?:[^']|'')*'|"(?:[^"]|"")*")\s*;?\s*$/i;
 
 /**
  * Pattern 5: `SHOW masking.enabled`
@@ -261,7 +266,7 @@ const SHOW_MASKING_DEFAULT_PATTERN =
  */
 // eslint-disable-next-line require-unicode-regexp
 const CREATE_MASKING_POLICY_PATTERN =
-  /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?MASKING\s+POLICY\s+\S+\s+AS\s*\(.+?\)\s+USING\s+'.*?'\s*;?\s*$/i;
+  /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?MASKING\s+POLICY\s+(\S+)\s+AS\s*\(.+?\)\s+USING\s+'(.*?)'\s*;?\s*$/i;
 
 /**
  * Pattern 8: `DROP MASKING POLICY name`
@@ -272,7 +277,7 @@ const CREATE_MASKING_POLICY_PATTERN =
  */
 // eslint-disable-next-line require-unicode-regexp
 const DROP_MASKING_POLICY_PATTERN =
-  /^\s*DROP\s+MASKING\s+POLICY\s+(?:IF\s+EXISTS\s+)?\S+\s*;?\s*$/i;
+  /^\s*DROP\s+MASKING\s+POLICY\s+(?:IF\s+EXISTS\s+)?(\S+)\s*;?\s*$/i;
 
 /**
  * Combined masking-related start-of-statement detection pattern.
@@ -429,8 +434,11 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
   }
 
   // SET masking.enabled = on|off — update real state
-  if (SET_MASKING_ENABLED_PATTERN.test(trimmed)) {
-    const val = (trimmed.match(/[=]\s*(\S+)/i)?.[1] ?? 'off').toLowerCase().replace(/['";]*$/, '').replace(/^['"]*/, '');
+  const setEnabledMatch = SET_MASKING_ENABLED_PATTERN.exec(trimmed);
+  if (setEnabledMatch) {
+    // The value is the single capture group guarded by the pattern itself, so
+    // it is always present when the pattern matches (no `??` fallback needed).
+    const val = setEnabledMatch[1].toLowerCase().replace(/['";]*$/, '').replace(/^['"]*/, '');
     const newState = val === 'on' || val === 'true' || val === '1';
     maskingEnabled = newState;
     logger.debug(
@@ -445,10 +453,14 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
   }
 
   // SET masking.default_function = '...' — update stored default
-  if (SET_MASKING_DEFAULT_PATTERN.test(trimmed)) {
-    const val = trimmed.match(/[']([^']*)[']/)?.[1]
-      ?? trimmed.match(/["]([^"]*)["]/)?.[1]
-      ?? '';
+  const setDefaultMatch = SET_MASKING_DEFAULT_PATTERN.exec(trimmed);
+  if (setDefaultMatch) {
+    // The captured value is guaranteed non-null by the pattern; unwrap the
+    // surrounding quote character (single or double) and collapse escapes.
+    const raw = setDefaultMatch[1];
+    const val = raw.startsWith("'")
+      ? raw.slice(1, -1).replace(/''/g, "'")
+      : raw.slice(1, -1).replace(/""/g, '"');
     defaultFunction = val;
     logger.debug(
       { original: trimmed, newDefault: val },
@@ -462,11 +474,12 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
   }
 
   // CREATE MASKING POLICY — parse and store policy
-  if (CREATE_MASKING_POLICY_PATTERN.test(trimmed)) {
-    // Parse: CREATE MASKING POLICY name AS (col type) USING 'function'
-    const policyName = trimmed.match(/MASKING\s+POLICY\s+(\S+)/i)?.[1] ?? 'unknown';
-    const usings = trimmed.match(/USING\s+'([^']+)'/i);
-    const usingExpr = usings?.[1] ?? defaultFunction;
+  const createMatch = CREATE_MASKING_POLICY_PATTERN.exec(trimmed);
+  if (createMatch) {
+    // Capture groups 1 and 2 (policy name and USING expression) are guaranteed
+    // present by the pattern.
+    const policyName = createMatch[1];
+    const usingExpr = createMatch[2] || defaultFunction;
     // Determine function type from expression
     let fn: 'partial' | 'full' | 'email' | 'custom' = 'full';
     if (usingExpr.startsWith('partial')) fn = 'partial';
@@ -474,12 +487,13 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
     else if (usingExpr === 'full') fn = 'full';
     else fn = 'custom';
 
-    // Parse params
-    const params: string[] = usingExpr.match(/'(.*?)'/)?.[1]
-      ? usingExpr.match(/'(.*?)'/)
-        ? [usingExpr.match(/'(.*?)'/)?.[1] ?? '']
-        : []
-      : [];
+    // Parse params from a `partial(...)`/`email(...)` style expression, matching
+    // the ALTER SET MASKED parser so args are preserved (not always empty).
+    const params: string[] = [];
+    const partialMatch = usingExpr.match(/^(?:partial|email)\((.+)\)/);
+    if (partialMatch) {
+      params.push(...partialMatch[1].split(',').map(s => s.trim().replace(/^['"]|['"]$/g, '')));
+    }
 
     const policyKey = policyName.toLowerCase();
     maskingPolicies.set(policyKey, {
@@ -501,8 +515,12 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
   }
 
   // DROP MASKING POLICY — remove stored policy
-  if (DROP_MASKING_POLICY_PATTERN.test(trimmed)) {
-    const policyName = trimmed.match(/DROP\s+MASKING\s+POLICY\s+(?:IF\s+EXISTS\s+)?(\S+)/i)?.[1] ?? '';
+  const dropMatch = DROP_MASKING_POLICY_PATTERN.exec(trimmed);
+  if (dropMatch) {
+    // Capture group 1 (policy name) is guaranteed present by the pattern.
+    const policyName = dropMatch[1];
+    // Defensive guard: only delete when a non-empty name was captured (the
+    // `\S+` capture already guarantees this, but the check documents intent).
     if (policyName) {
       const removed = maskingPolicies.delete(policyName.toLowerCase());
       logger.debug(
@@ -518,14 +536,14 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
   }
 
   // ALTER TABLE ... SET MASKED — store column-level policy
-  if (ALTER_SET_MASKED_PATTERN.test(trimmed)) {
-    // Parse: ALTER TABLE t ALTER [COLUMN] c SET MASKED WITH (FUNCTION = '...')
-    const tblMatch = trimmed.match(/ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\S+)/i);
-    const colMatch = trimmed.match(/ALTER\s+(?:COLUMN\s+)?(\S+)\s+SET\s+MASKED/i);
+  const alterSetMatch = ALTER_SET_MASKED_PATTERN.exec(trimmed);
+  if (alterSetMatch) {
+    // Capture groups 1 and 2 (table and column) are guaranteed present.
+    const tbl = alterSetMatch[1].replace(/['";]/g, '');
+    const col = alterSetMatch[2].replace(/['";]/g, '');
+    // FUNCTION assignment is optional inside the loose `\(.*?\)` clause, so
+    // fall back to the stored default when absent.
     const fnMatch = trimmed.match(/FUNCTION\s*=\s*'([^']+)'/i);
-
-    const tbl = tblMatch?.[1]?.replace(/['";]/g, '') ?? '';
-    const col = colMatch?.[1]?.replace(/['";]/g, '') ?? '';
     const fnExpr = fnMatch?.[1] ?? defaultFunction;
 
     if (tbl && col) {
@@ -557,11 +575,11 @@ export function rewriteDataMasking(sql: string): DataMaskingResult {
   }
 
   // ALTER TABLE ... DROP MASKED — remove column-level policy
-  if (ALTER_DROP_MASKED_PATTERN.test(trimmed)) {
-    const tblMatch = trimmed.match(/ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\S+)/i);
-    const colMatch = trimmed.match(/ALTER\s+(?:COLUMN\s+)?(\S+)\s+DROP\s+MASKED/i);
-    const tbl = tblMatch?.[1]?.replace(/['";]/g, '') ?? '';
-    const col = colMatch?.[1]?.replace(/['";]/g, '') ?? '';
+  const alterDropMatch = ALTER_DROP_MASKED_PATTERN.exec(trimmed);
+  if (alterDropMatch) {
+    // Capture groups 1 and 2 (table and column) are guaranteed present.
+    const tbl = alterDropMatch[1].replace(/['";]/g, '');
+    const col = alterDropMatch[2].replace(/['";]/g, '');
 
     if (tbl && col) {
       const key = `${tbl}.${col}`.toLowerCase();
