@@ -43,6 +43,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('TypeCastShim');
 
@@ -58,51 +59,17 @@ export interface TypeCastResult {
 // ── Constants ────────────────────────────────────────────────────
 
 /**
- * Detects expr::type syntax.
+ * The three PG cast syntaxes this shim rewrites:
  *
- * Examples:
- *   x::int
- *   x::text
- *   x::integer
- *   x::varchar(255)
- *   x::numeric(10,2)
- *   x::boolean
- *   x::date
- *   x::timestamp
- *   x::timestamptz
- *   x::bigint
- *   x::smallint
- *   x::double precision
- *   x::float
- *   x::real
- *   x::jsonb
- *   x::json
- *   (expr)::type
- *   COUNT(*)::int
- *   COUNT(DISTINCT x)::bigint
- *   MAX(x)::text
- */
-const CAST_OPERATOR_RE = /((?:\w+(?:\.\w+)*)\([^)]+\)|\([^)]+\)|\w+(?:\.\w+)*)\s*::\s*([A-Za-z_]\w*(?:\s*(?:PRECISION|precision))?(?:\s*\([^)]*\))?)/gi;
-
-/**
- * Detects CAST(expr AS type) syntax.
+ *   - expr::type            — `x::int`, `(a+b)::numeric(10,2)`, `COUNT(*)::bigint`
+ *   - CAST(expr AS type)    — `CAST(x AS integer)`
+ *   - type 'literal'        — `DATE '2024-01-01'`, `BOOLEAN 'true'`
  *
- * Handles standard SQL CAST syntax with various PG type names.
+ * These are matched by the scanner below (see `findNextTypeCast`), not by
+ * regex, so string literals, quoted identifiers, dollar-quoted strings and
+ * comments never fool the matcher, and nested parentheses in the operator's
+ * left operand (or a cast expression) are balanced correctly.
  */
-const CAST_FUNC_RE = /\bCAST\s*\(\s*([\s\S]*?)\s+AS\s+([A-Za-z_]\w*(?:\s+(?:PRECISION|precision))?(?:\s*\([^)]*\))?)\s*\)/gi;
-
-/**
- * Detects PG literal prefix syntax: type 'literal'
- *
- * Examples:
- *   DATE '2024-01-01'
- *   TIMESTAMP '2024-01-01 12:00:00'
- *   TIME '12:00:00'
- *   BOOLEAN 'true'
- *   INTEGER '42'
- *   REAL '3.14'
- */
-const LITERAL_PREFIX_RE = /\b(DATE|TIMESTAMP|TIME|BOOLEAN|INTEGER|INT|BIGINT|SMALLINT|REAL|FLOAT|DOUBLE\s+PRECISION|TEXT|VARCHAR|INTERVAL)\s+'([^']*)'/gi;
 
 // ── Type mapping ─────────────────────────────────────────────────
 
@@ -188,22 +155,7 @@ export function detectTypeCast(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
-
-  const trimmed = sql.trim();
-
-  // Check :: operator
-  CAST_OPERATOR_RE.lastIndex = 0;
-  if (CAST_OPERATOR_RE.test(trimmed)) return true;
-
-  // Check CAST function
-  CAST_FUNC_RE.lastIndex = 0;
-  if (CAST_FUNC_RE.test(trimmed)) return true;
-
-  // Check literal prefix
-  LITERAL_PREFIX_RE.lastIndex = 0;
-  if (LITERAL_PREFIX_RE.test(trimmed)) return true;
-
-  return false;
+  return findNextTypeCast(sql.trim(), 0) !== null;
 }
 
 /**
@@ -216,8 +168,7 @@ export function detectCastOperator(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
-  CAST_OPERATOR_RE.lastIndex = 0;
-  return CAST_OPERATOR_RE.test(sql.trim());
+  return findNextTypeCast(sql.trim(), 0, 'operator') !== null;
 }
 
 /**
@@ -230,8 +181,7 @@ export function detectCastFunction(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
-  CAST_FUNC_RE.lastIndex = 0;
-  return CAST_FUNC_RE.test(sql.trim());
+  return findNextTypeCast(sql.trim(), 0, 'function') !== null;
 }
 
 /**
@@ -244,8 +194,7 @@ export function detectLiteralPrefix(sql: string): boolean {
   if (!sql || typeof sql !== 'string') {
     return false;
   }
-  LITERAL_PREFIX_RE.lastIndex = 0;
-  return LITERAL_PREFIX_RE.test(sql.trim());
+  return findNextTypeCast(sql.trim(), 0, 'literal') !== null;
 }
 
 /**
@@ -266,69 +215,23 @@ export function rewriteTypeCast(sql: string): TypeCastResult {
 
   const trimmed = sql.trim();
 
-  // Fast path — no cast syntax present
-  if (!detectTypeCast(trimmed)) {
-    return { sql: trimmed, rewritten: false };
-  }
-
-  let result = trimmed;
+  let result = '';
+  let cursor = 0;
   let rewritten = false;
+  const len = trimmed.length;
 
-  // ── Phase 1: Literal prefix: type 'literal' ──────────────────
-
-  LITERAL_PREFIX_RE.lastIndex = 0;
-  result = result.replace(LITERAL_PREFIX_RE, (_match, typeName: string, literal: string) => {
-    rewritten = true;
-    const tn = typeName.toUpperCase();
-
-    switch (tn) {
-      case 'DATE':
-        return `DATE('${literal}')`;
-      case 'TIMESTAMP':
-        return `DATETIME('${literal}')`;
-      case 'TIME':
-        return `TIME('${literal}')`;
-      case 'BOOLEAN':
-        return literal.toLowerCase() === 'true' || literal === 't' ? '1' : '0';
-      case 'INTEGER':
-      case 'INT':
-      case 'BIGINT':
-      case 'SMALLINT':
-        return `CAST('${literal}' AS INTEGER)`;
-      case 'REAL':
-      case 'FLOAT':
-      case 'DOUBLE PRECISION':
-        return `CAST('${literal}' AS REAL)`;
-      case 'TEXT':
-      case 'VARCHAR':
-        return `'${literal}'`;
-      case 'INTERVAL':
-        // Pass through as string literal
-        return `'${literal}'`;
-      default:
-        return `'${literal}'`;
+  while (cursor < len) {
+    const found = findNextTypeCast(trimmed, cursor);
+    if (found === null) {
+      result += trimmed.slice(cursor);
+      break;
     }
-  });
 
-  // ── Phase 2: expr::type syntax ───────────────────────────────
-
-  CAST_OPERATOR_RE.lastIndex = 0;
-  result = result.replace(CAST_OPERATOR_RE, (_match, expr: string, typeName: string) => {
+    result += trimmed.slice(cursor, found.start);
+    result += found.replacement;
     rewritten = true;
-    const mapped = mapTypeToSQLite(expr.trim(), typeName.trim());
-    return mapped;
-  });
-
-  // ── Phase 3: CAST(expr AS type) syntax ──────────────────────
-
-  CAST_FUNC_RE.lastIndex = 0;
-  result = result.replace(CAST_FUNC_RE, (_match, expr: string, typeName: string) => {
-    rewritten = true;
-    const mapped = mapTypeToSQLite(expr.trim(), typeName.trim());
-    return mapped;
-  });
-
-  // ── Normalize whitespace ────────────────────────────────────
+    cursor = found.end;
+  }
 
   if (rewritten) {
     result = result.replace(/\s{2,}/g, ' ').trim();
@@ -338,18 +241,425 @@ export function rewriteTypeCast(sql: string): TypeCastResult {
   return { sql: result, rewritten };
 }
 
-// ── Internal Helpers ─────────────────────────────────────────────
+// ── Internal scanner ─────────────────────────────────────────────
+
+type CastSyntax = 'operator' | 'function' | 'literal';
+
+interface LocatedTypeCast {
+  /** Index of the first character of the matched construct. */
+  start: number;
+  /** Index just past the matched construct. */
+  end: number;
+  /** The SQLite-compatible replacement expression. */
+  replacement: string;
+}
+
+/**
+ * Literal-prefix type names, in order. `DOUBLE PRECISION` (two words) must be
+ * matched before the single word `DOUBLE`, so it is listed first.
+ */
+const LITERAL_PREFIX_TYPES = [
+  'DOUBLE PRECISION',
+  'TIMESTAMP',
+  'BOOLEAN',
+  'INTEGER',
+  'SMALLINT',
+  'BIGINT',
+  'VARCHAR',
+  'INTERVAL',
+  'DATE',
+  'TIME',
+  'FLOAT',
+  'REAL',
+  'TEXT',
+  'INT',
+];
+
+/**
+ * Find the next PG type-cast construct at or after `from`, skipping string
+ * literals, quoted identifiers, dollar-quoted strings and comments.
+ *
+ * When `only` is given, only that syntax kind is considered (used by the three
+ * `detect*` helpers).
+ *
+ * @returns The located construct, or `null` if none remain.
+ */
+function findNextTypeCast(sql: string, from: number, only?: CastSyntax): LocatedTypeCast | null {
+  const len = sql.length;
+
+  for (let i = from; i < len; ) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    const ch = sql[i];
+
+    // `::` operator.
+    if (ch === ':' && sql[i + 1] === ':' && (!only || only === 'operator')) {
+      const found = matchCastOperator(sql, i);
+      if (found) return found;
+    }
+
+    // CAST( ... AS ... ).
+    if (
+      (!only || only === 'function') &&
+      isWordStart(sql, i) &&
+      sql.slice(i, i + 4).toLowerCase() === 'cast'
+    ) {
+      const found = matchCastFunction(sql, i);
+      if (found) return found;
+    }
+
+    // type 'literal'.
+    if (!only || only === 'literal') {
+      const found = matchLiteralPrefix(sql, i);
+      if (found) return found;
+    }
+
+    i++;
+  }
+
+  return null;
+}
+
+/**
+ * Try to parse an `expr::type` operator whose `::` begins at `i`.
+ */
+function matchCastOperator(sql: string, i: number): LocatedTypeCast | null {
+  // Locate the left operand's start by scanning backwards.
+  const leftStart = backscanLeftOperand(sql, i);
+  if (leftStart === -1) return null;
+
+  const expr = sql.slice(leftStart, i).trim();
+  if (expr.length === 0) return null;
+
+  // Locate the type name after `::`.
+  const typeInfo = scanTypeName(sql, i + 2);
+  if (!typeInfo) return null;
+
+  const replacement = mapTypeToSQLite(expr, typeInfo.name);
+
+  return { start: leftStart, end: typeInfo.end, replacement };
+}
+
+/**
+ * Try to parse `CAST(expr AS type)` whose `CAST` keyword begins at `i`.
+ */
+function matchCastFunction(sql: string, i: number): LocatedTypeCast | null {
+  // Ensure the keyword is not a prefix of a longer identifier (e.g. `casted`).
+  if (i + 4 < sql.length && /[A-Za-z0-9_]/.test(sql[i + 4])) return null;
+
+  // Skip whitespace to the opening parenthesis.
+  let p = i + 4;
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+  if (p >= sql.length || sql[p] !== '(') return null;
+
+  const close = findMatchingParen(sql, p);
+  if (close === -1) return null;
+
+  const inner = sql.slice(p + 1, close);
+
+  // Split `expr AS type` at the top-level `AS`.
+  const asIdx = findTopLevelAs(inner);
+  if (asIdx === -1) return null;
+
+  const expr = inner.slice(0, asIdx).trim();
+  const typeName = inner.slice(asIdx + 2).trim();
+  if (expr.length === 0 || typeName.length === 0) return null;
+
+  const replacement = mapTypeToSQLite(expr, stripTypeParams(typeName));
+
+  return { start: i, end: close + 1, replacement };
+}
+
+/**
+ * Try to parse `TYPE 'literal'` whose type name begins at `i`.
+ */
+function matchLiteralPrefix(sql: string, i: number): LocatedTypeCast | null {
+  if (!isWordStart(sql, i)) return null;
+
+  for (const typeName of LITERAL_PREFIX_TYPES) {
+    const slice = sql.slice(i, i + typeName.length);
+    if (slice.toUpperCase() !== typeName) continue;
+
+    // Ensure the type name ends at a word boundary (not `DATE_x`).
+    const after = i + typeName.length;
+    if (after < sql.length && /[A-Za-z0-9_]/.test(sql[after])) continue;
+
+    // Skip whitespace to the string literal.
+    let p = after;
+    while (p < sql.length && /\s/.test(sql[p])) p++;
+
+    if (p >= sql.length || sql[p] !== "'") continue;
+
+    const litEnd = skipSqlLiteral(sql, p);
+    if (litEnd === -1) continue;
+
+    const raw = sql.slice(p, litEnd);
+    // An unterminated string literal (skipSqlLiteral returns `len`) yields a
+    // `raw` that does not end with a closing quote; skip it rather than
+    // slicing off a phantom character.
+    if (raw.length < 2 || !raw.endsWith("'")) continue;
+
+    // Extract the literal body (strip quotes), honoring `''` escapes.
+    const literal = raw.slice(1, -1).replace(/''/g, "'");
+
+    const replacement = renderLiteralPrefix(typeName, literal);
+    return { start: i, end: litEnd, replacement };
+  }
+
+  return null;
+}
+
+/**
+ * Render the SQLite equivalent of a PG `TYPE 'literal'` construct.
+ */
+function renderLiteralPrefix(typeName: string, literal: string): string {
+  switch (typeName) {
+    case 'DATE':
+      return `DATE('${literal.replace(/'/g, "''")}')`;
+    case 'TIMESTAMP':
+      return `DATETIME('${literal.replace(/'/g, "''")}')`;
+    case 'TIME':
+      return `TIME('${literal.replace(/'/g, "''")}')`;
+    case 'BOOLEAN': {
+      const v = literal.toLowerCase();
+      return v === 'true' || v === 't' ? '1' : '0';
+    }
+    case 'INTEGER':
+    case 'INT':
+    case 'BIGINT':
+    case 'SMALLINT':
+      return `CAST('${literal.replace(/'/g, "''")}' AS INTEGER)`;
+    case 'REAL':
+    case 'FLOAT':
+    case 'DOUBLE PRECISION':
+      return `CAST('${literal.replace(/'/g, "''")}' AS REAL)`;
+    case 'TEXT':
+    case 'VARCHAR':
+    case 'INTERVAL':
+      // Pass through as a string literal.
+      return `'${literal.replace(/'/g, "''")}'`;
+    default:
+      return `'${literal.replace(/'/g, "''")}'`;
+  }
+}
+
+/**
+ * SQL keywords that must never be treated as the left operand of a `::` cast.
+ * Without this guard, a malformed fragment like `SELECT ::int` would rewrite to
+ * `CAST(SELECT AS INTEGER)`. The list covers the keywords most likely to appear
+ * in the token position immediately before a stray `::`.
+ */
+const SQL_KEYWORDS = new Set([
+  'select', 'distinct', 'from', 'where', 'and', 'or', 'not', 'as', 'by',
+  'in', 'on', 'set', 'values', 'insert', 'update', 'delete', 'case', 'when',
+  'then', 'else', 'end', 'group', 'order', 'having', 'limit', 'offset',
+  'union', 'intersect', 'except', 'join', 'left', 'right', 'inner', 'outer',
+  'cross', 'full', 'null', 'is', 'like', 'between', 'exists', 'asc', 'desc',
+  'into', 'returning', 'using', 'natural',
+]);
+
+/**
+ * Scan backwards from the character before `::` to find the start of the left
+ * operand (an identifier chain, a parenthesized expression, or a function call).
+ *
+ * Returns the index of the first character of the operand, or `-1` if there is
+ * no valid left operand.
+ */
+function backscanLeftOperand(sql: string, opIdx: number): number {
+  let i = opIdx - 1;
+
+  // Skip trailing whitespace.
+  while (i >= 0 && /\s/.test(sql[i])) i--;
+  if (i < 0) return -1;
+
+  const ch = sql[i];
+
+  // Case 1: operand ends with `)` — a parenthesized expression or function call.
+  if (ch === ')') {
+    let depth = 0;
+    let j = i;
+    for (; j >= 0; j--) {
+      const c = sql[j];
+      if (c === ')') depth++;
+      else if (c === '(') {
+        depth--;
+        if (depth === 0) break;
+      }
+      // Reverse literal scan is not needed here: the operand is a `)`-terminated
+      // construct, and any literal inside it does not affect paren counting.
+    }
+    if (j < 0) return -1;
+
+    // Only continue back over an identifier chain when the `(` is immediately
+    // preceded by an identifier character (a function call like `COUNT(*)` or
+    // `schema.fn(...)`). A whitespace gap means the `(` is a standalone grouped
+    // expression ((a+b)), and the preceding token (e.g. `SELECT`) is NOT part
+    // of the operand.
+    const k = j - 1;
+    if (k >= 0 && /[A-Za-z0-9_$.]/.test(sql[k])) {
+      let m = k;
+      while (m >= 0 && /[A-Za-z0-9_$.]/.test(sql[m])) m--;
+      return m + 1;
+    }
+    return j;
+  }
+
+  // Case 2: operand ends with a string literal close quote.
+  if (ch === "'") {
+    // Back over a single-quoted string (handle `''` escapes).
+    let j = i; // points at closing `'`
+    let k = j - 1;
+    for (; k >= 0; k--) {
+      if (sql[k] === "'") {
+        if (k > 0 && sql[k - 1] === "'") {
+          k--; // doubled quote, keep going
+        } else {
+          break; // opening quote
+        }
+      }
+    }
+    if (k < 0) return -1;
+    return k;
+  }
+
+  // Case 3: a plain identifier chain (e.g. `x`, `t.col`).
+  if (/[A-Za-z0-9_$.]/.test(ch)) {
+    let j = i;
+    while (j >= 0 && /[A-Za-z0-9_$.]/.test(sql[j])) j--;
+    const operand = sql.slice(j + 1, i + 1);
+
+    // A SQL keyword preceding a stray `::` is not an operand.
+    if (SQL_KEYWORDS.has(operand.toLowerCase())) return -1;
+
+    return j + 1;
+  }
+
+  return -1;
+}
+
+/**
+ * Scan a type name beginning at `from` (just after `::` or `AS`), returning its
+ * text (without length parameters) and the index just past it.
+ */
+function scanTypeName(sql: string, from: number): { name: string; end: number } | null {
+  let p = from;
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+
+  const m = sql.slice(p).match(/^[A-Za-z_]\w*(?:\s+(?:PRECISION|precision))?/);
+  if (!m) return null;
+
+  const rawType = m[0];
+  p += rawType.length;
+
+  // Skip an optional length/precision parameter list like `(10,2)`. If the
+  // parameter list is unbalanced, the type name cannot be located reliably, so
+  // treat the whole construct as malformed and return null.
+  if (p < sql.length && sql[p] === '(') {
+    const close = findMatchingParen(sql, p);
+    if (close === -1) return null;
+    p = close + 1;
+  }
+
+  return { name: rawType.trim(), end: p };
+}
+
+/**
+ * Strip a type name of any length/precision parameters (e.g. `numeric(10,2)`).
+ */
+function stripTypeParams(typeName: string): string {
+  return typeName
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\s*\([^)]*\)\s*/g, '')
+    .trim();
+}
+
+/**
+ * Find the index of a top-level `AS` keyword (word-boundary delimited and
+ * outside any nested parentheses or literals) within a CAST argument list.
+ */
+function findTopLevelAs(content: string): number {
+  let depth = 0;
+  const len = content.length;
+
+  for (let i = 0; i < len; ) {
+    const skipped = skipSqlLiteral(content, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    const ch = content[i];
+    if (ch === '(') {
+      depth++;
+      i++;
+      continue;
+    }
+    if (ch === ')') {
+      depth--;
+      i++;
+      continue;
+    }
+
+    if (
+      depth === 0 &&
+      (content[i] === 'a' || content[i] === 'A') &&
+      isWordStart(content, i) &&
+      content.slice(i, i + 2).toUpperCase() === 'AS' &&
+      (i + 2 >= len || !/[A-Za-z0-9_]/.test(content[i + 2]))
+    ) {
+      return i;
+    }
+
+    i++;
+  }
+
+  return -1;
+}
+
+/**
+ * Return true if `pos` is a word boundary (previous char is not an identifier
+ * character).
+ */
+function isWordStart(sql: string, pos: number): boolean {
+  return pos === 0 || !/[A-Za-z0-9_]/.test(sql[pos - 1]);
+}
+
+/**
+ * Find the index of the `)` that balances the `(` at `openParen`, honoring
+ * literals, quoted identifiers, dollar-quoted strings and comments.
+ */
+function findMatchingParen(sql: string, openParen: number): number {
+  let depth = 0;
+  const len = sql.length;
+
+  for (let i = openParen; i < len; ) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    const ch = sql[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
 
 /**
  * Map a PG type name to a SQLite equivalent and generate the cast expression.
  */
 function mapTypeToSQLite(expr: string, typeName: string): string {
   // Normalize: lowercase, strip length parameters
-  const normalized = typeName
-    .toLowerCase()
-    .replace(/\s+/g, ' ')
-    .replace(/\s*\([^)]*\)\s*/g, '')
-    .trim();
+  const normalized = stripTypeParams(typeName);
 
   const mapping = PG_TO_SQLITE_TYPE[normalized];
 
