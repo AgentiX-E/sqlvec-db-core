@@ -36,6 +36,8 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ArrayConstructorShim');
 
@@ -136,9 +138,9 @@ const SQL_CLAUSE_KEYWORDS = /\s+(FROM|WHERE|GROUP\s+BY|HAVING|WINDOW|QUALIFY|ORD
  * character. Returns the position of the matching closing character,
  * or `-1` if not found.
  *
- * This is a simple depth tracker and does NOT account for string
- * literals; brackets inside strings may cause false matches. This is
- * a known limitation of regex-based SQL processing.
+ * Skips string literals, quoted identifiers, dollar-quoted strings and
+ * comments (via `skipSqlLiteral`) so a `[`, `]` or `(` inside a string does
+ * not corrupt depth tracking.
  *
  * @param sql       The full SQL string
  * @param openPos   Position of the opening bracket or parenthesis
@@ -155,19 +157,24 @@ function findMatchingClose(
   let depth = 1;
   let idx = openPos + 1;
 
-  while (idx < sql.length && depth > 0) {
+  while (idx < sql.length) {
+    const skipped = skipSqlLiteral(sql, idx);
+    if (skipped !== -1) {
+      idx = skipped;
+      continue;
+    }
+
     const ch = sql[idx];
     if (ch === openChar) {
       depth++;
     } else if (ch === closeChar) {
       depth--;
     }
-    if (depth > 0) {
-      idx++;
-    }
+    if (depth === 0) return idx;
+    idx++;
   }
 
-  return depth === 0 ? idx : -1;
+  return -1;
 }
 
 // ──────────────────────────────────────────────
@@ -199,15 +206,17 @@ export function detectArrayConstructor(sql: string): boolean {
     return false;
   }
 
-  const trimmed = sql.trim();
+  // Mask string literals and comments so array syntax inside them is never
+  // reported as a real constructor/type annotation.
+  const protectedSql = protectSQL(sql.trim()).protectedSql;
 
   // Check for DDL array type suffix (non-global regex to avoid `lastIndex` issues)
-  if (ARRAY_TYPE_SUFFIX_DETECT.test(trimmed)) {
+  if (ARRAY_TYPE_SUFFIX_DETECT.test(protectedSql)) {
     return true;
   }
 
   // Check for ARRAY[ or ARRAY( constructors
-  if (ARRAY_CONSTRUCTOR_RE.test(trimmed)) {
+  if (ARRAY_CONSTRUCTOR_RE.test(protectedSql)) {
     return true;
   }
 
@@ -259,14 +268,19 @@ export function rewriteArrayExpr(sql: string): ArrayResult {
     };
   }
 
-  let result = sql.trim();
+  // Mask string literals, quoted identifiers and comments up front so none of
+  // the phase-specific regexes or bracket matchers are fooled by array syntax
+  // appearing inside a literal. Original text is restored at the end.
+  const protectedSQL = protectSQL(sql.trim());
+
+  let result = protectedSQL.protectedSql;
   let modified = false;
   let prev: string;
 
   // ── Phase 1: Rewrite DDL array types ──────────────────────────
 
   prev = result;
-  result = stripArrayType(result);
+  result = replaceArrayTypes(result);
   if (result !== prev) {
     logger.debug(
       { before: prev, after: result },
@@ -300,7 +314,7 @@ export function rewriteArrayExpr(sql: string): ArrayResult {
   }
 
   return {
-    sql: result,
+    sql: restoreSQL({ ...protectedSQL, protectedSql: result }),
     rewritten: modified,
   };
 }
@@ -332,9 +346,26 @@ export function stripArrayType(sql: string): string {
     return sql ?? '';
   }
 
-  // Replace each array type annotation with TEXT.
-  // We use a replacer function so we only log when actual replacements happen.
-  return sql.replace(ARRAY_TYPE_SUFFIX_REPLACE, (_match: string): string => {
+  // Mask string literals and comments first so a `type[]` annotation inside
+  // them is never rewritten; restore them afterwards.
+  const protectedSQL = protectSQL(sql);
+  const stripped = replaceArrayTypes(protectedSQL.protectedSql);
+  return restoreSQL({ ...protectedSQL, protectedSql: stripped });
+}
+
+/**
+ * Replace every DDL array type annotation in an already-protected SQL string
+ * with `TEXT`.
+ *
+ * This is the literal-unaware core of {@link stripArrayType}: it must only be
+ * given SQL whose literals/comments are already masked (e.g. by `protectSQL`),
+ * otherwise a `type[]` inside a string would be rewritten too.
+ *
+ * @param protectedSql  SQL with literals/comments masked
+ * @returns             The SQL with array type annotations replaced by TEXT
+ */
+function replaceArrayTypes(protectedSql: string): string {
+  return protectedSql.replace(ARRAY_TYPE_SUFFIX_REPLACE, (_match: string): string => {
     logger.debug({ arrayType: _match }, 'Stripping array type annotation to TEXT');
     return 'TEXT';
   });
@@ -360,13 +391,20 @@ export function stripArrayType(sql: string): string {
  * @returns     The SQL string with ARRAY[...] rewritten to json_array(...)
  */
 function rewriteArrayLiterals(sql: string): string {
-  // Process right-to-left to maintain position correctness
+  // Collect replacements while skipping nested ARRAY[...] ranges.
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
   const re = /\bARRAY\s*\[\s*/gi;
   let match: RegExpExecArray | null;
 
   while ((match = re.exec(sql)) !== null) {
     const arrayStart = match.index;
+
+    // Skip a match that falls inside a previously-collected (outer) range so
+    // nested ARRAY[...] expressions are replaced once by their outer call.
+    if (replacements.some((r) => arrayStart >= r.start && arrayStart < r.end)) {
+      continue;
+    }
+
     const bracketStart = match.index + match[0].length - 1; // position of '['
     const closeBracket = findMatchingClose(sql, bracketStart, '[', ']');
 
