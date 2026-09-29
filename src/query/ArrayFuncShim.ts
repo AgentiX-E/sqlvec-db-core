@@ -33,6 +33,8 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
+import { protectSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ArrayFuncShim');
 
@@ -94,6 +96,30 @@ const ARRAY_FUNC_CALL_RE = new RegExp(
 // ──────────────────────────────────────────────
 
 /**
+ * Determine whether the character at `pos` lies inside a string literal,
+ * quoted identifier, dollar-quoted string or comment.
+ *
+ * Scans forward from the start of the string, jumping over literals via
+ * `skipSqlLiteral`; if any literal span covers `pos`, returns `true`.
+ *
+ * @param sql  The full SQL string
+ * @param pos  The character position to test
+ * @returns    `true` if `pos` is inside a literal/comment
+ */
+function isInsideLiteral(sql: string, pos: number): boolean {
+  for (let i = 0; i <= pos; ) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      if (skipped > pos) return true;
+      i = skipped;
+    } else {
+      i++;
+    }
+  }
+  return false;
+}
+
+/**
  * Find the position of the matching closing parenthesis, accounting for
  * nesting depth within parentheses and brackets.
  *
@@ -101,9 +127,10 @@ const ARRAY_FUNC_CALL_RE = new RegExp(
  * Returns the position of the matching `)`, or `-1` if the brackets are
  * unbalanced.
  *
- * This is a simple depth tracker and does NOT account for string literals;
- * parentheses/brackets inside strings may cause false matches. This is a
- * known limitation of regex-based SQL processing.
+ * Skips string literals, quoted identifiers, dollar-quoted strings and comments
+ * (via `skipSqlLiteral`) so an unbalanced `(`, `)` or `,` inside a string does
+ * not corrupt depth tracking. PostgreSQL `ARRAY[...]` square brackets are still
+ * tracked as nesting since they are not SQL string literals.
  *
  * @param sql      The full SQL string
  * @param openPos  Position of the opening parenthesis
@@ -113,27 +140,34 @@ function findMatchingParen(sql: string, openPos: number): number {
   let depth = 1;
   let idx = openPos + 1;
 
-  while (idx < sql.length && depth > 0) {
+  while (idx < sql.length) {
+    const skipped = skipSqlLiteral(sql, idx);
+    if (skipped !== -1) {
+      idx = skipped;
+      continue;
+    }
+
     const ch = sql[idx];
     if (ch === '(' || ch === '[') {
       depth++;
     } else if (ch === ')' || ch === ']') {
       depth--;
     }
-    if (depth > 0) {
-      idx++;
-    }
+    if (depth === 0) return idx;
+    idx++;
   }
 
-  return depth === 0 ? idx : -1;
+  return -1;
 }
 
 /**
  * Split a comma-separated argument list into individual argument strings,
- * respecting nested parentheses and brackets.
+ * respecting nested parentheses and brackets as well as string literals,
+ * quoted identifiers, dollar-quoted strings and comments (via `skipSqlLiteral`).
  *
  * This correctly handles cases like:
  *   `json_array(1, 2), some_func(x, y)` → [`json_array(1, 2)`, `some_func(x, y)`]
+ *   `arr, 'a,b'`                        → [`arr`, `'a,b'`]
  *
  * @param argsStr  The raw argument string (content between outer parens)
  * @returns        An array of trimmed argument strings
@@ -142,8 +176,17 @@ function splitFuncArgs(argsStr: string): string[] {
   const args: string[] = [];
   let depth = 0;
   let current = '';
+  let i = 0;
 
-  for (const ch of argsStr) {
+  while (i < argsStr.length) {
+    const skipped = skipSqlLiteral(argsStr, i);
+    if (skipped !== -1) {
+      current += argsStr.slice(i, skipped);
+      i = skipped;
+      continue;
+    }
+
+    const ch = argsStr[i];
     if (ch === '(' || ch === '[') {
       depth++;
       current += ch;
@@ -156,6 +199,7 @@ function splitFuncArgs(argsStr: string): string[] {
     } else {
       current += ch;
     }
+    i++;
   }
 
   const last = current.trim();
@@ -358,8 +402,10 @@ export function detectArrayFunc(sql: string): boolean {
     return false;
   }
 
+  // Mask string literals and comments so a mention of an array function name
+  // inside them is never reported as a real call.
   ARRAY_FUNC_CALL_RE.lastIndex = 0;
-  return ARRAY_FUNC_CALL_RE.test(sql.trim());
+  return ARRAY_FUNC_CALL_RE.test(protectSQL(sql.trim()).protectedSql);
 }
 
 /**
@@ -423,6 +469,13 @@ export function rewriteArrayFunc(sql: string): ArrayFuncResult {
 
   while ((match = funcRe.exec(sql)) !== null) {
     const funcStart = match.index;
+
+    // Skip matches whose opening position falls inside a string literal,
+    // quoted identifier, dollar-quoted string or comment.
+    if (isInsideLiteral(sql, funcStart)) {
+      continue;
+    }
+
     const funcName = match[0].trim().replace(/\s*\($/, '').toLowerCase();
     const parenPos = funcStart + match[0].indexOf('(');
 
