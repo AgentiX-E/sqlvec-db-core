@@ -409,11 +409,33 @@ export class DeferredConstraintManager {
       return violations;
     }
 
+    // Enforce PG MATCH semantics for NULL columns:
+    //   - MATCH SIMPLE / PARTIAL: any NULL column skips the check (NULL FK is allowed).
+    //   - MATCH FULL: all-NULL skips; partially-NULL is itself a violation.
+    const anyNull = check.values.some((v) => v === null || v === undefined);
+    if (anyNull) {
+      if (check.matchType !== 'FULL') {
+        return violations;
+      }
+      const allNull = check.values.every((v) => v === null || v === undefined);
+      if (allNull) {
+        return violations;
+      }
+      const valueStr = check.values.map((v) => escapeViolationValue(v)).join(', ');
+      violations.push({
+        constraintType: 'FOREIGN KEY',
+        table: check.childTable,
+        message: `insert or update on table "${check.childTable}" violates foreign key constraint: MATCH FULL does not allow mixing of null and nonnull values; key (${check.childColumns.join(', ')}) = (${valueStr})`,
+        sqlState: '23503', // foreign_key_violation
+      });
+      return violations;
+    }
+
     const exists = checkFkExistsFn(check.parentTable, check.parentColumns, check.values);
 
     if (!exists) {
       // Build a descriptive violation.
-      const valueStr = check.values.map((v) => `'${v}'`).join(', ');
+      const valueStr = check.values.map((v) => escapeViolationValue(v)).join(', ');
       violations.push({
         constraintType: 'FOREIGN KEY',
         table: check.childTable,
@@ -436,7 +458,7 @@ export class DeferredConstraintManager {
     const exists = checkUniqueExistsFn(check.table, check.columns, check.values, check.localRowId);
 
     if (exists) {
-      const valueStr = check.values.map((v) => `'${v}'`).join(', ');
+      const valueStr = check.values.map((v) => escapeViolationValue(v)).join(', ');
       violations.push({
         constraintType: 'UNIQUE',
         constraintName: check.constraintName,
@@ -448,4 +470,16 @@ export class DeferredConstraintManager {
 
     return violations;
   }
+}
+
+/**
+ * Render a value for a human-readable violation message.
+ *
+ * Unlike SQL literal escaping, this follows PG's DETAIL line convention: NULL is
+ * spelled as an empty render (unquoted) and single quotes are not doubled,
+ * because the message is diagnostic prose, not a SQL string.
+ */
+function escapeViolationValue(value: any): string {
+  if (value === null || value === undefined) return '';
+  return `'${String(value)}'`;
 }
