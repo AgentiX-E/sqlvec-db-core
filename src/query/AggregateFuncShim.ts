@@ -43,6 +43,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('AggregateFuncShim');
 
@@ -55,107 +56,135 @@ export interface AggFuncResult {
   rewritten: boolean;
 }
 
-// ── Constants – Regex patterns ───────────────────────────────────
+// ── Function registry ───────────────────────────────────────────
 
 /**
- * Detects `bool_and(expr)` — true if ALL inputs are true.
+ * A single aggregate-function rewrite rule.
+ *
+ * `arity` is the number of comma-separated arguments the SQL function takes
+ * (1 for `bool_and(expr)`, 2 for `covar_pop(y, x)`). `render` receives the
+ * trimmed argument expressions and returns the SQLite-compatible replacement.
  */
-const BOOL_AND_RE = /\bbool_and\s*\(([^)]+)\)/gi;
+interface AggRewriteRule {
+  arity: 1 | 2;
+  render: (args: string[]) => string;
+}
 
 /**
- * Detects `bool_or(expr)` — true if ANY input is true.
+ * Ordered registry of every PostgreSQL statistical aggregate function this shim
+ * rewrites. Ordering matters: `every` must be tested before any longer name
+ * would swallow it (none share a prefix here, so lookup is stable).
  */
-const BOOL_OR_RE = /\bbool_or\s*\(([^)]+)\)/gi;
+const AGG_REWRITE_RULES: Record<string, AggRewriteRule> = {
+  bool_and: {
+    arity: 1,
+    render: ([e]) => `MIN(CASE WHEN (${e}) THEN 1 ELSE 0 END) = 1`,
+  },
+  bool_or: {
+    arity: 1,
+    render: ([e]) => `MAX(CASE WHEN (${e}) THEN 1 ELSE 0 END) = 1`,
+  },
+  every: {
+    arity: 1,
+    render: ([e]) => `MIN(CASE WHEN (${e}) THEN 1 ELSE 0 END) = 1`,
+  },
+  stddev_pop: {
+    arity: 1,
+    render: ([e]) => `SQRT(AVG((${e})*(${e})) - AVG(${e})*AVG(${e}))`,
+  },
+  stddev_samp: {
+    arity: 1,
+    render: ([e]) =>
+      `SQRT((SUM((${e})*(${e})) - SUM(${e})*SUM(${e})/CAST(COUNT(${e}) AS REAL)) / CAST(MAX(COUNT(${e}) - 1, 1) AS REAL))`,
+  },
+  var_pop: {
+    arity: 1,
+    render: ([e]) => `(AVG((${e})*(${e})) - AVG(${e})*AVG(${e}))`,
+  },
+  var_samp: {
+    arity: 1,
+    render: ([e]) =>
+      `(SUM((${e})*(${e})) - SUM(${e})*SUM(${e})/CAST(COUNT(${e}) AS REAL)) / CAST(MAX(COUNT(${e}) - 1, 1) AS REAL)`,
+  },
+  covar_pop: {
+    arity: 2,
+    render: ([y, x]) => `(AVG(${y}*${x}) - AVG(${y})*AVG(${x}))`,
+  },
+  covar_samp: {
+    arity: 2,
+    render: ([y, x]) =>
+      `((AVG(${y}*${x}) - AVG(${y})*AVG(${x})) * CAST(COUNT(*) AS REAL) / CAST(MAX(COUNT(*) - 1, 1) AS REAL))`,
+  },
+  corr: {
+    arity: 2,
+    render: ([y, x]) => {
+      const n = `CAST(COUNT(*) AS REAL)`;
+      const sumX = `SUM(${x})`;
+      const sumY = `SUM(${y})`;
+      const sumXY = `SUM(${y}*${x})`;
+      const sumX2 = `SUM(${x}*${x})`;
+      const sumY2 = `SUM(${y}*${y})`;
+      return `((${n}*${sumXY} - ${sumX}*${sumY}) / SQRT(MAX((${n}*${sumX2} - ${sumX}*${sumX}) * (${n}*${sumY2} - ${sumY}*${sumY}), 1e-100)))`;
+    },
+  },
+  regr_avgx: {
+    arity: 2,
+    render: ([_y, x]) => `AVG(${x})`,
+  },
+  regr_avgy: {
+    arity: 2,
+    render: ([y]) => `AVG(${y})`,
+  },
+  regr_count: {
+    arity: 2,
+    render: ([y, x]) =>
+      `COUNT(CASE WHEN ${y} IS NOT NULL AND ${x} IS NOT NULL THEN 1 END)`,
+  },
+  regr_intercept: {
+    arity: 2,
+    render: ([y, x]) => {
+      const n = `CAST(COUNT(*) AS REAL)`;
+      return `(AVG(${y}) - ((${n}*SUM(${y}*${x}) - SUM(${y})*SUM(${x})) / MAX((${n}*SUM(${x}*${x}) - SUM(${x})*SUM(${x})), 1e-100)) * AVG(${x}))`;
+    },
+  },
+  regr_r2: {
+    arity: 2,
+    render: ([y, x]) => {
+      const n = `CAST(COUNT(*) AS REAL)`;
+      const corrExpr = `((${n}*SUM(${y}*${x}) - SUM(${y})*SUM(${x})) / SQRT(MAX((${n}*SUM(${x}*${x}) - SUM(${x})*SUM(${x})) * (${n}*SUM(${y}*${y}) - SUM(${y})*SUM(${y})), 1e-100)))`;
+      return `POWER(${corrExpr}, 2)`;
+    },
+  },
+  regr_slope: {
+    arity: 2,
+    render: ([y, x]) => {
+      const n = `CAST(COUNT(*) AS REAL)`;
+      return `((${n}*SUM(${y}*${x}) - SUM(${y})*SUM(${x})) / MAX((${n}*SUM(${x}*${x}) - SUM(${x})*SUM(${x})), 1e-100))`;
+    },
+  },
+  regr_sxx: {
+    arity: 2,
+    render: ([_y, x]) =>
+      `(SUM(${x}*${x}) - SUM(${x})*SUM(${x})/CAST(COUNT(*) AS REAL))`,
+  },
+  regr_sxy: {
+    arity: 2,
+    render: ([y, x]) =>
+      `(SUM(${x}*${y}) - SUM(${x})*SUM(${y})/CAST(COUNT(*) AS REAL))`,
+  },
+  regr_syy: {
+    arity: 2,
+    render: ([y]) =>
+      `(SUM(${y}*${y}) - SUM(${y})*SUM(${y})/CAST(COUNT(*) AS REAL))`,
+  },
+};
 
 /**
- * Detects `every(expr)` — same as bool_and.
+ * Names of every rewrite rule, sorted by length descending so a scanner that
+ * matches the longest candidate name first never mis-detects a shorter prefix
+ * (e.g. `stddev_samp` before `stddev`).
  */
-const EVERY_RE = /\bevery\s*\(([^)]+)\)/gi;
-
-/**
- * Detects `stddev_pop(expr)` — population standard deviation.
- */
-const STDDEV_POP_RE = /\bstddev_pop\s*\(([^)]+)\)/gi;
-
-/**
- * Detects `stddev_samp(expr)` — sample standard deviation.
- */
-const STDDEV_SAMP_RE = /\bstddev_samp\s*\(([^)]+)\)/gi;
-
-/**
- * Detects `var_pop(expr)` — population variance.
- */
-const VAR_POP_RE = /\bvar_pop\s*\(([^)]+)\)/gi;
-
-/**
- * Detects `var_samp(expr)` — sample variance.
- */
-const VAR_SAMP_RE = /\bvar_samp\s*\(([^)]+)\)/gi;
-
-/**
- * Detects `covar_pop(y, x)` — population covariance.
- */
-const COVAR_POP_RE = /\bcovar_pop\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `covar_samp(y, x)` — sample covariance.
- */
-const COVAR_SAMP_RE = /\bcovar_samp\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `corr(y, x)` — correlation coefficient.
- */
-const CORR_RE = /\bcorr\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_avgx(y, x)` — average of independent variable (x).
- */
-const REGR_AVGX_RE = /\bregr_avgx\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_avgy(y, x)` — average of dependent variable (y).
- */
-const REGR_AVGY_RE = /\bregr_avgy\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_count(y, x)` — number of rows where both are non-null.
- */
-const REGR_COUNT_RE = /\bregr_count\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_intercept(y, x)` — y-intercept of linear regression.
- */
-const REGR_INTERCEPT_RE = /\bregr_intercept\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_r2(y, x)` — R-squared.
- */
-const REGR_R2_RE = /\bregr_r2\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_slope(y, x)` — slope of linear regression.
- */
-const REGR_SLOPE_RE = /\bregr_slope\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_sxx(y, x)` — sum of squares of independent (x).
- */
-const REGR_SXX_RE = /\bregr_sxx\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_sxy(y, x)` — sum of products.
- */
-const REGR_SXY_RE = /\bregr_sxy\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Detects `regr_syy(y, x)` — sum of squares of dependent (y).
- */
-const REGR_SYY_RE = /\bregr_syy\s*\(([^,]+),([^)]+)\)/gi;
-
-/**
- * Combined pattern for detecting any aggregate function.
- */
-const ANY_AGG_FUNC_RE = /\b(bool_and|bool_or|every|stddev_pop|stddev_samp|var_pop|var_samp|covar_pop|covar_samp|corr|regr_avgx|regr_avgy|regr_count|regr_intercept|regr_r2|regr_slope|regr_sxx|regr_sxy|regr_syy)\s*\(/i;
+const AGG_FUNC_NAMES = Object.keys(AGG_REWRITE_RULES).sort((a, b) => b.length - a.length);
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -170,7 +199,7 @@ export function detectAggFunc(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return false;
   }
-  return ANY_AGG_FUNC_RE.test(sql.trim());
+  return findNextAggCall(sql.trim(), 0) !== null;
 }
 
 /**
@@ -200,166 +229,163 @@ export function rewriteAggFunc(sql: string): AggFuncResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  // Quick check first: bail early if no function is present
-  if (!detectAggFunc(sql)) {
-    return { sql, rewritten: false };
-  }
-
-  let working = sql;
+  let result = '';
+  let cursor = 0;
   let rewritten = false;
+  const len = sql.length;
 
-  // ── Phase 1: bool_and(expr) → MIN(CASE WHEN (expr) THEN 1 ELSE 0 END) = 1 ──
-  working = working.replace(BOOL_AND_RE, (_match: string, expr: string) => {
-    rewritten = true;
-    return `MIN(CASE WHEN (${expr.trim()}) THEN 1 ELSE 0 END) = 1`;
-  });
+  while (cursor < len) {
+    const found = findNextAggCall(sql, cursor);
+    if (found === null) {
+      result += sql.slice(cursor);
+      break;
+    }
 
-  // ── Phase 2: bool_or(expr) → MAX(CASE WHEN (expr) THEN 1 ELSE 0 END) = 1 ──
-  working = working.replace(BOOL_OR_RE, (_match: string, expr: string) => {
+    result += sql.slice(cursor, found.start);
+    result += found.replacement;
     rewritten = true;
-    return `MAX(CASE WHEN (${expr.trim()}) THEN 1 ELSE 0 END) = 1`;
-  });
-
-  // ── Phase 3: every(expr) → MIN(CASE WHEN (expr) THEN 1 ELSE 0 END) = 1 ──
-  working = working.replace(EVERY_RE, (_match: string, expr: string) => {
-    rewritten = true;
-    return `MIN(CASE WHEN (${expr.trim()}) THEN 1 ELSE 0 END) = 1`;
-  });
-
-  // ── Phase 4: stddev_pop(x) → SQRT(AVG(x*x) - AVG(x)*AVG(x)) ──
-  working = working.replace(STDDEV_POP_RE, (_match: string, expr: string) => {
-    rewritten = true;
-    const e = expr.trim();
-    return `SQRT(AVG((${e})*(${e})) - AVG(${e})*AVG(${e}))`;
-  });
-
-  // ── Phase 5: stddev_samp(x) → SQRT((AVG(x*x) - AVG(x)*AVG(x)) * cnt/(cnt-1)) ──
-  // Use SUM + COUNT to compute: SQRT((SUM(x²)-SUM(x)²/n)/(n-1))
-  working = working.replace(STDDEV_SAMP_RE, (_match: string, expr: string) => {
-    rewritten = true;
-    const e = expr.trim();
-    return `SQRT((SUM((${e})*(${e})) - SUM(${e})*SUM(${e})/CAST(COUNT(${e}) AS REAL)) / CAST(MAX(COUNT(${e}) - 1, 1) AS REAL))`;
-  });
-
-  // ── Phase 6: var_pop(x) → AVG(x*x) - AVG(x)*AVG(x) ──
-  working = working.replace(VAR_POP_RE, (_match: string, expr: string) => {
-    rewritten = true;
-    const e = expr.trim();
-    return `(AVG((${e})*(${e})) - AVG(${e})*AVG(${e}))`;
-  });
-
-  // ── Phase 7: var_samp(x) → (SUM(x²)-SUM(x)²/n)/(n-1) ──
-  working = working.replace(VAR_SAMP_RE, (_match: string, expr: string) => {
-    rewritten = true;
-    const e = expr.trim();
-    return `(SUM((${e})*(${e})) - SUM(${e})*SUM(${e})/CAST(COUNT(${e}) AS REAL)) / CAST(MAX(COUNT(${e}) - 1, 1) AS REAL)`;
-  });
-
-  // ── Phase 8: covar_pop(y, x) → AVG(y*x) - AVG(y)*AVG(x) ──
-  working = working.replace(COVAR_POP_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    return `(AVG(${yy}*${xx}) - AVG(${yy})*AVG(${xx}))`;
-  });
-
-  // ── Phase 9: covar_samp(y, x) → (AVG(y*x) - AVG(y)*AVG(x)) * n/(n-1) ──
-  working = working.replace(COVAR_SAMP_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    return `((AVG(${yy}*${xx}) - AVG(${yy})*AVG(${xx})) * CAST(COUNT(*) AS REAL) / CAST(MAX(COUNT(*) - 1, 1) AS REAL))`;
-  });
-
-  // ── Phase 10: corr(y, x) ──
-  working = working.replace(CORR_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    const n = `CAST(COUNT(*) AS REAL)`;
-    const sumX = `SUM(${xx})`;
-    const sumY = `SUM(${yy})`;
-    const sumXY = `SUM(${yy}*${xx})`;
-    const sumX2 = `SUM(${xx}*${xx})`;
-    const sumY2 = `SUM(${yy}*${yy})`;
-    return `((${n}*${sumXY} - ${sumX}*${sumY}) / SQRT(MAX((${n}*${sumX2} - ${sumX}*${sumX}) * (${n}*${sumY2} - ${sumY}*${sumY}), 1e-100)))`;
-  });
-
-  // ── Phase 11: regr_avgx(y, x) → AVG(x) ──
-  working = working.replace(REGR_AVGX_RE, (_match: string, _y: string, x: string) => {
-    rewritten = true;
-    return `AVG(${x.trim()})`;
-  });
-
-  // ── Phase 12: regr_avgy(y, x) → AVG(y) ──
-  working = working.replace(REGR_AVGY_RE, (_match: string, y: string, _x: string) => {
-    rewritten = true;
-    return `AVG(${y.trim()})`;
-  });
-
-  // ── Phase 13: regr_count(y, x) ──
-  working = working.replace(REGR_COUNT_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    return `COUNT(CASE WHEN ${y.trim()} IS NOT NULL AND ${x.trim()} IS NOT NULL THEN 1 END)`;
-  });
-
-  // ── Phase 14: regr_intercept(y, x) ──
-  // AVG(y) - regr_slope(y,x) * AVG(x)
-  // First we need to handle this in a special way since it references regr_slope
-  // For now, inline the formula: AVG(y) - (n*Σxy - Σx*Σy)/(n*Σx² - (Σx)²) * AVG(x)
-  working = working.replace(REGR_INTERCEPT_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    const n = `CAST(COUNT(*) AS REAL)`;
-    return `(AVG(${yy}) - ((${n}*SUM(${yy}*${xx}) - SUM(${yy})*SUM(${xx})) / MAX((${n}*SUM(${xx}*${xx}) - SUM(${xx})*SUM(${xx})), 1e-100)) * AVG(${xx}))`;
-  });
-
-  // ── Phase 15: regr_r2(y, x) → POWER(corr(y,x), 2) ──
-  // Inline the correlation formula
-  working = working.replace(REGR_R2_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    const n = `CAST(COUNT(*) AS REAL)`;
-    const corrExpr = `((${n}*SUM(${yy}*${xx}) - SUM(${yy})*SUM(${xx})) / SQRT(MAX((${n}*SUM(${xx}*${xx}) - SUM(${xx})*SUM(${xx})) * (${n}*SUM(${yy}*${yy}) - SUM(${yy})*SUM(${yy})), 1e-100)))`;
-    return `POWER(${corrExpr}, 2)`;
-  });
-
-  // ── Phase 16: regr_slope(y, x) ──
-  working = working.replace(REGR_SLOPE_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    const n = `CAST(COUNT(*) AS REAL)`;
-    return `((${n}*SUM(${yy}*${xx}) - SUM(${yy})*SUM(${xx})) / MAX((${n}*SUM(${xx}*${xx}) - SUM(${xx})*SUM(${xx})), 1e-100))`;
-  });
-
-  // ── Phase 17: regr_sxx(y, x) → SUM(x*x) - SUM(x)*SUM(x)/COUNT(*) ──
-  working = working.replace(REGR_SXX_RE, (_match: string, _y: string, x: string) => {
-    rewritten = true;
-    const xx = x.trim();
-    return `(SUM(${xx}*${xx}) - SUM(${xx})*SUM(${xx})/CAST(COUNT(*) AS REAL))`;
-  });
-
-  // ── Phase 18: regr_sxy(y, x) → SUM(x*y) - SUM(x)*SUM(y)/COUNT(*) ──
-  working = working.replace(REGR_SXY_RE, (_match: string, y: string, x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    const xx = x.trim();
-    return `(SUM(${xx}*${yy}) - SUM(${xx})*SUM(${yy})/CAST(COUNT(*) AS REAL))`;
-  });
-
-  // ── Phase 19: regr_syy(y, x) → SUM(y*y) - SUM(y)*SUM(y)/COUNT(*) ──
-  working = working.replace(REGR_SYY_RE, (_match: string, y: string, _x: string) => {
-    rewritten = true;
-    const yy = y.trim();
-    return `(SUM(${yy}*${yy}) - SUM(${yy})*SUM(${yy})/CAST(COUNT(*) AS REAL))`;
-  });
+    cursor = found.end;
+  }
 
   if (rewritten) {
-    logger.debug({ before: sql, after: working }, 'Statistical aggregate function rewritten');
+    logger.debug({ before: sql, after: result }, 'Statistical aggregate function rewritten');
   }
 
-  return { sql: working, rewritten };
+  return { sql: result, rewritten };
+}
+
+// ── Internal scanner helpers ─────────────────────────────────────
+
+interface LocatedAggCall {
+  /** Index of the function name's first character. */
+  start: number;
+  /** Index just past the closing parenthesis of the call. */
+  end: number;
+  /** The SQLite-compatible replacement expression. */
+  replacement: string;
+}
+
+/**
+ * Find the next rewriteable aggregate function call at or after `from`,
+ * skipping string literals, quoted identifiers, dollar-quoted strings and
+ * comments so keywords inside them never match.
+ *
+ * @returns The located call, or `null` if none remain.
+ */
+function findNextAggCall(sql: string, from: number): LocatedAggCall | null {
+  const len = sql.length;
+
+  for (let i = from; i < len; ) {
+    // Skip over any literal/comment so its contents never match a function name.
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    // A function name must start at a word boundary and be followed by `(`.
+    const boundaryOk = i === 0 || !/[A-Za-z0-9_]/.test(sql[i - 1]);
+    if (!boundaryOk) {
+      i++;
+      continue;
+    }
+
+    // Match the longest candidate name first (stable against shared prefixes).
+    for (const name of AGG_FUNC_NAMES) {
+      if (sql.slice(i, i + name.length).toLowerCase() !== name) continue;
+
+      // Require `(` after the name (allowing whitespace).
+      let j = i + name.length;
+      while (j < len && /\s/.test(sql[j])) j++;
+      if (j >= len || sql[j] !== '(') continue;
+
+      const closeParen = findMatchingParen(sql, j);
+      if (closeParen === -1) return null; // unbalanced — leave the rest untouched
+
+      const rule = AGG_REWRITE_RULES[name];
+      const rawArgs = sql.slice(j + 1, closeParen);
+      const args = rule.arity === 1
+        ? [rawArgs.trim()]
+        : splitTopLevelCommas(rawArgs).map((a) => a.trim());
+
+      // Defensive: if argument count doesn't match arity, or an argument is
+      // empty (e.g. `bool_and()`), skip — it is not a valid call to rewrite.
+      if (args.length !== rule.arity || args.some((a) => a.length === 0)) {
+        i = closeParen + 1;
+        break;
+      }
+
+      return {
+        start: i,
+        end: closeParen + 1,
+        replacement: rule.render(args),
+      };
+    }
+
+    i++;
+  }
+
+  return null;
+}
+
+/**
+ * Find the index of the `)` that balances the `(` at `openParen`, honoring
+ * string literals, quoted identifiers, dollar-quoted strings and comments.
+ * Returns `-1` if the parentheses are unbalanced.
+ */
+function findMatchingParen(sql: string, openParen: number): number {
+  let depth = 0;
+  const len = sql.length;
+
+  for (let i = openParen; i < len; ) {
+    const ch = sql[i];
+
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+
+  return -1;
+}
+
+/**
+ * Split an argument list by commas only at the top nesting level, honoring
+ * string literals, quoted identifiers, dollar-quoted strings and comments so
+ * commas inside them are not treated as separators.
+ */
+function splitTopLevelCommas(content: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  const len = content.length;
+
+  for (let i = 0; i < len; ) {
+    const skipped = skipSqlLiteral(content, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    const ch = content[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (ch === ',' && depth === 0) {
+      parts.push(content.slice(start, i).trim());
+      start = i + 1;
+    }
+    i++;
+  }
+
+  const last = content.slice(start).trim();
+  if (last.length > 0) parts.push(last);
+  return parts;
 }
