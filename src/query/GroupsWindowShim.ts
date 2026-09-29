@@ -36,6 +36,8 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('GroupsWindowShim');
 
@@ -89,7 +91,9 @@ const GROUPS_FALLBACK_WARNING =
  */
 export function hasGroupsFrame(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) return false;
-  return GROUPS_AS_FRAME_UNIT.test(sql) && GROUPS_OVER_CLAUSE_RE.test(sql);
+  // Mask literals/comments so GROUPS inside them is never treated as a frame.
+  const protectedSql = protectSQL(sql).protectedSql;
+  return GROUPS_AS_FRAME_UNIT.test(protectedSql) && GROUPS_OVER_CLAUSE_RE.test(protectedSql);
 }
 
 /**
@@ -125,7 +129,7 @@ export function rewriteGroupsFrame(sql: string): GroupsShimResult {
 
   // Check if CTE rewrite is feasible (must be simple SELECT)
   if (!isSimpleSelect(trimmed)) {
-    const fallback = trimmed.replace(/\bGROUPS\b/gi, 'ROWS') + GROUPS_FALLBACK_WARNING;
+    const fallback = rewriteGroupsToRows(trimmed) + GROUPS_FALLBACK_WARNING;
     logger.debug({ sql: trimmed }, 'GROUPS → ROWS fallback (not simple SELECT)');
     return { sql: fallback, rewritten: true };
   }
@@ -141,12 +145,24 @@ export function rewriteGroupsFrame(sql: string): GroupsShimResult {
     logger.warn({ err: err.message, sql: trimmed }, 'CTE rewrite failed');
   }
 
-  // Fallback: GROUPS → ROWS replacement
-  const fallback = trimmed.replace(/\bGROUPS\b/gi, 'ROWS') + GROUPS_FALLBACK_WARNING;
+  // Fallback: GROUPS → ROWS replacement (literal/comment aware)
+  const fallback = rewriteGroupsToRows(trimmed) + GROUPS_FALLBACK_WARNING;
   return { sql: fallback, rewritten: true };
 }
 
 // ── Internal: simple select check ────────────────────────────────
+
+/**
+ * Replace every GROUPS frame keyword with ROWS, skipping literals/comments.
+ *
+ * Used as the fallback when a CTE rewrite is not feasible; the resulting
+ * ROWS frame loses peer-group semantics but remains valid SQLite SQL.
+ */
+function rewriteGroupsToRows(sql: string): string {
+  const protectedSQL = protectSQL(sql);
+  const replaced = protectedSQL.protectedSql.replace(/\bGROUPS\b/gi, 'ROWS');
+  return restoreSQL({ ...protectedSQL, protectedSql: replaced });
+}
 
 function isSimpleSelect(sql: string): boolean {
   const trimmed = sql.trim();
@@ -164,21 +180,27 @@ interface FrameSpec {
 function parseGroupsFrameSpec(frameSpec: string): FrameSpec {
   const s = frameSpec.trim().toUpperCase();
 
-  // GROUPS BETWEEN N PRECEDING AND M FOLLOWING
+  // GROUPS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING (special-cased
+  // first so the more general BETWEEN matcher below does not shadow it).
+  if (/^BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+UNBOUNDED\s+FOLLOWING$/.test(s)) {
+    return { type: 'unbounded_both' };
+  }
+
+  // GROUPS BETWEEN N PRECEDING AND M FOLLOWING (N/M may be a number or
+  // UNBOUNDED on either side).
   const betweenMatch = s.match(
-    /^BETWEEN\s+(?:(\d+)\s+)?PRECEDING\s+AND\s+(?:(\d+)\s+)?FOLLOWING$/,
+    /^BETWEEN\s+(?:(\d+|UNBOUNDED)\s+)?PRECEDING\s+AND\s+(?:(\d+|UNBOUNDED)\s+)?FOLLOWING$/,
   );
   if (betweenMatch) {
     return {
       type: 'between',
-      lower: betweenMatch[1] ? parseInt(betweenMatch[1], 10) : 'UNBOUNDED',
-      upper: betweenMatch[2] ? parseInt(betweenMatch[2], 10) : 'UNBOUNDED',
+      lower: betweenMatch[1] && betweenMatch[1] !== 'UNBOUNDED'
+        ? parseInt(betweenMatch[1], 10)
+        : 'UNBOUNDED',
+      upper: betweenMatch[2] && betweenMatch[2] !== 'UNBOUNDED'
+        ? parseInt(betweenMatch[2], 10)
+        : 'UNBOUNDED',
     };
-  }
-
-  // GROUPS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
-  if (/^BETWEEN\s+UNBOUNDED\s+PRECEDING\s+AND\s+UNBOUNDED\s+FOLLOWING$/.test(s)) {
-    return { type: 'unbounded_both' };
   }
 
   // GROUPS UNBOUNDED PRECEDING
@@ -222,13 +244,21 @@ function rewriteWithCTE(sql: string): GroupsShimResult {
   // so they stay on the outer query (not inside the CTE)
   const { cteFrom, outerTail } = splitCteBody(fromBody);
 
+  // Mask literals/comments so the window-function regex never matches a
+  // GROUPS frame that appears inside a string or comment.
+  const protectedSelect = protectSQL(selectClause);
+
   // Reset regex state
   GROUPS_FN_SELECT_RE.lastIndex = 0;
 
-  let counter = 0;
-  let workingSelect = selectClause;
-  const cteDefs: string[] = [];
-  const cteAliasList: string[] = [];
+  const counters: string[] = [];
+  const denseRankCols: string[] = [];
+  let workingSelect = protectedSelect.protectedSql;
+
+  // Single shared CTE whose SELECT * adds one DENSE_RANK column per window
+  // function, so every window shares the same base rowset and rows stay
+  // aligned (fixes the bug where each window built its own isolated CTE).
+  const cteAlias = '__gws_cte_0';
   let found = false;
 
   let fnMatch: RegExpExecArray | null;
@@ -239,42 +269,38 @@ function rewriteWithCTE(sql: string): GroupsShimResult {
     const overContent = fnMatch[3].trim();
     const frameSpec = fnMatch[4].trim();
 
-    const cteAlias = `__gws_cte_${counter}`;
-    const grpAlias = `__gws_grp_${counter}`;
-    cteAliasList.push(cteAlias);
+    const grpAlias = `__gws_grp_${counters.length}`;
+    counters.push(grpAlias);
 
-    // Build DENSE_RANK clause
+    // Build DENSE_RANK column for this window.
     const partitionBy = extractPartitionBy(overContent);
     const orderBy = extractOrderBy(overContent);
     const denseRankPartition = partitionBy
       ? `PARTITION BY ${partitionBy}`
       : '';
-    const denseRankClause = `DENSE_RANK() OVER (${denseRankPartition} ORDER BY ${orderBy})`;
+    denseRankCols.push(
+      `DENSE_RANK() OVER (${denseRankPartition} ORDER BY ${orderBy}) AS ${grpAlias}`,
+    );
 
-    // CTE definition (same base data for each)
-    cteDefs.push(`${cteAlias} AS (SELECT *, ${denseRankClause} AS ${grpAlias} FROM ${cteFrom})`);
-
-    // Build the correlated subquery
+    // Build the correlated subquery referencing the shared CTE.
     const subquery = buildSubquery(aggFunc, aggArg, frameSpec, partitionBy, grpAlias, cteAlias);
 
-    // Escape the original function match for safe regex (only replace one occurrence)
+    // Replace the original function match (only one occurrence).
     const escapedFn = escapeRegex(fullMatch);
     workingSelect = workingSelect.replace(new RegExp(escapedFn), subquery);
     found = true;
-    counter++;
   }
 
   if (!found) {
     return { sql, rewritten: false };
   }
 
-  // Assemble final SQL
-  const ctePrefix = 'WITH ' + cteDefs.join(', ');
-  const fromCte = cteAliasList[0];
-  const resultSql = `${ctePrefix}\nSELECT ${workingSelect}\nFROM ${fromCte}` +
+  // Assemble final SQL: one CTE with all DENSE_RANK columns, outer SELECT.
+  const ctePrefix = `WITH ${cteAlias} AS (SELECT *, ${denseRankCols.join(', ')} FROM ${cteFrom})`;
+  const resultSql = `${ctePrefix}\nSELECT ${workingSelect}\nFROM ${cteAlias}` +
     (outerTail ? ` ${outerTail}` : '');
 
-  return { sql: resultSql, rewritten: true };
+  return { sql: restoreSQL({ ...protectedSelect, protectedSql: resultSql }), rewritten: true };
 }
 
 /**
