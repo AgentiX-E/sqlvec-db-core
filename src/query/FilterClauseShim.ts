@@ -39,6 +39,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('FilterClauseShim');
 
@@ -337,12 +338,18 @@ export function _findMatchingParen(sql: string, openPos: number): number {
     return -1;
   }
   let depth = 1;
-  for (let i = openPos + 1; i < sql.length; i++) {
+  for (let i = openPos + 1; i < sql.length; ) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
     if (sql[i] === '(') depth++;
     else if (sql[i] === ')') {
       depth--;
       if (depth === 0) return i;
     }
+    i++;
   }
   return -1;
 }
@@ -354,12 +361,40 @@ export function _findMatchingParen(sql: string, openPos: number): number {
  * Exported (underscore-prefixed) for direct unit testing of its defensive
  * guard branches.
  */
+/**
+ * Find the matching opening parenthesis for the closing parenthesis at `closePos`.
+ * Returns the index of the matching `(`, or -1 if not found.
+ *
+ * Walks right-to-left while skipping string literals (including `''` escapes)
+ * so an unbalanced `(` or `)` inside a string does not corrupt paren counting.
+ *
+ * Exported (underscore-prefixed) for direct unit testing of its defensive
+ * guard branches.
+ */
 export function _findMatchingOpenParen(sql: string, closePos: number): number {
   if (closePos < 0 || closePos >= sql.length || sql[closePos] !== ')') {
     return -1;
   }
   let depth = 1;
   for (let i = closePos - 1; i >= 0; i--) {
+    // Skip a string literal by scanning back over it in reverse. A trailing
+    // single quote marks the end of a literal; we walk back to its opening
+    // quote, honoring `''` escapes.
+    if (sql[i] === "'") {
+      let j = i - 1;
+      for (; j >= 0; j--) {
+        if (sql[j] === "'") {
+          if (j > 0 && sql[j - 1] === "'") {
+            j--; // doubled quote escape, keep going
+          } else {
+            break; // opening quote
+          }
+        }
+      }
+      i = j; // continue scanning before the opening quote
+      continue;
+    }
+
     if (sql[i] === ')') depth++;
     else if (sql[i] === '(') {
       depth--;
@@ -387,44 +422,28 @@ export function _findMatchingOpenParen(sql: string, closePos: number): number {
 export function _topLevelSplit(text: string, delimiter: string): string[] {
   const parts: string[] = [];
   let depth = 0;
-  let inString = false;
-  let charString = '';
   let current = '';
 
-  for (let i = 0; i < text.length; i++) {
+  for (let i = 0; i < text.length; ) {
+    const skipped = skipSqlLiteral(text, i);
+    if (skipped !== -1) {
+      current += text.slice(i, skipped);
+      i = skipped;
+      continue;
+    }
+
     const ch = text[i];
-
-    // Toggle string literal state
-    if (ch === "'" && !inString) {
-      inString = true;
-      current += ch;
-      continue;
-    } else if (ch === "'" && inString) {
-      // Check for escaped quote ''
-      if (i + 1 < text.length && text[i + 1] === "'") {
-        current += ch + "'";
-        i++; // skip next quote
-        continue;
-      }
-      inString = false;
-      current += ch;
-      continue;
-    }
-
-    if (inString) {
-      current += ch;
-      continue;
-    }
-
     if (ch === '(') depth++;
     else if (ch === ')') depth--;
     else if (ch === delimiter && depth === 0) {
       parts.push(current.trim());
       current = '';
+      i++;
       continue;
     }
 
     current += ch;
+    i++;
   }
 
   if (current.trim()) {

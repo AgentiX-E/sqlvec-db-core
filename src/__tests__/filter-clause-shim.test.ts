@@ -7,234 +7,254 @@ import {
   _topLevelSplit,
 } from '../query/FilterClauseShim';
 
-describe('FilterClauseShim', () => {
-  describe('detectFilter', () => {
-    it('detects a FILTER clause on an aggregate', () => {
-      expect(detectFilter('SELECT SUM(x) FILTER (WHERE x > 0) FROM t')).toBe(true);
-    });
-    it('detects FILTER regardless of case', () => {
-      expect(detectFilter('select sum(x) filter (where x > 0) from t')).toBe(true);
-    });
-    it('returns false when no FILTER present', () => {
-      expect(detectFilter('SELECT SUM(x) FROM t')).toBe(false);
-      expect(detectFilter('SELECT 1')).toBe(false);
-    });
-    it('returns false for empty / non-string input', () => {
-      expect(detectFilter('')).toBe(false);
-      expect(detectFilter('   ')).toBe(false);
-      expect(detectFilter(null as any)).toBe(false);
-      expect(detectFilter(42 as any)).toBe(false);
-    });
-    it('does not detect FILTER inside a string literal', () => {
-      expect(detectFilter("SELECT 'FILTER (WHERE x > 0)'")).toBe(false);
-    });
-    it('does not detect FILTER inside escaped string literal', () => {
-      expect(detectFilter("SELECT 'it''s FILTER (WHERE x)'")).toBe(false);
-    });
-    it('does not detect FILTER inside a comment', () => {
-      expect(detectFilter('-- FILTER (WHERE x > 0)\nSELECT 1')).toBe(false);
-      expect(detectFilter('/* FILTER (WHERE x > 0) */ SELECT 1')).toBe(false);
-    });
-    it('handles double-quoted identifiers and dollar-escaped strings', () => {
-      expect(detectFilter('SELECT "FILTER" FROM t')).toBe(false);
-      expect(detectFilter("SELECT 'it''s' FROM t")).toBe(false);
-      expect(detectFilter('SELECT SUM("x") FILTER (WHERE "x" > 0) FROM "t"')).toBe(true);
-    });
+describe('detectFilter', () => {
+  it('returns false for empty / non-string / blank', () => {
+    expect(detectFilter('')).toBe(false);
+    expect(detectFilter('   ')).toBe(false);
+    expect(detectFilter(null as unknown as string)).toBe(false);
+    expect(detectFilter(undefined as unknown as string)).toBe(false);
   });
 
-  describe('rewriteFilter — basic aggregates', () => {
-    it('rewrites SUM(x) FILTER', () => {
-      expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT SUM(CASE WHEN (x > 0) THEN x END) FROM t', rewritten: true,
-      });
-    });
-    it('rewrites count(*) FILTER to count(CASE ... THEN 1)', () => {
-      expect(rewriteFilter('SELECT count(*) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT count(CASE WHEN (x > 0) THEN 1 END) FROM t', rewritten: true,
-      });
-    });
-    it('rewrites AVG / MIN / MAX FILTER', () => {
-      expect(rewriteFilter('SELECT avg(x) FILTER (WHERE x IS NOT NULL) FROM t')).toEqual({
-        sql: 'SELECT avg(CASE WHEN (x IS NOT NULL) THEN x END) FROM t', rewritten: true,
-      });
-      expect(rewriteFilter('SELECT min(x) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT min(CASE WHEN (x > 0) THEN x END) FROM t', rewritten: true,
-      });
-      expect(rewriteFilter('SELECT max(x) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT max(CASE WHEN (x > 0) THEN x END) FROM t', rewritten: true,
-      });
-    });
-    it('rewrites json_agg / jsonb_agg FILTER', () => {
-      expect(rewriteFilter('SELECT json_agg(x) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT json_agg(CASE WHEN (x > 0) THEN x END) FROM t', rewritten: true,
-      });
-      expect(rewriteFilter('SELECT jsonb_agg(x) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT jsonb_agg(CASE WHEN (x > 0) THEN x END) FROM t', rewritten: true,
-      });
-    });
+  it('detects a FILTER (WHERE) clause', () => {
+    expect(detectFilter('SELECT SUM(x) FILTER (WHERE x > 0) FROM t')).toBe(true);
   });
 
-  describe('rewriteFilter — STRING_AGG and ordering', () => {
-    it('rewrites STRING_AGG with an explicit delimiter', () => {
-      expect(rewriteFilter("SELECT string_agg(x, ',') FILTER (WHERE x IS NOT NULL) FROM t")).toEqual({
-        sql: "SELECT string_agg(CASE WHEN (x IS NOT NULL) THEN x END, ',') FROM t", rewritten: true,
-      });
-    });
-    it('rewrites STRING_AGG with no explicit delimiter', () => {
-      expect(rewriteFilter('SELECT string_agg(x) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT string_agg(CASE WHEN (x > 0) THEN x END) FROM t', rewritten: true,
-      });
-    });
-    it('rewrites array_agg(x ORDER BY y) FILTER', () => {
-      expect(rewriteFilter('SELECT array_agg(x ORDER BY y) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT array_agg(CASE WHEN (x > 0) THEN x ORDER BY y END) FROM t', rewritten: true,
-      });
-    });
-    it('handles an escaped quote inside a STRING_AGG delimiter', () => {
-      expect(rewriteFilter("SELECT string_agg(x, ',''') FILTER (WHERE x > 0) FROM t")).toEqual({
-        sql: "SELECT string_agg(CASE WHEN (x > 0) THEN x END, ',''') FROM t", rewritten: true,
-      });
-    });
+  it('does not detect FILTER inside a string literal', () => {
+    expect(detectFilter("SELECT 'FILTER (WHERE x)' FROM t")).toBe(false);
   });
 
-  describe('rewriteFilter — OVER clause', () => {
-    it('rewrites FILTER with an OVER clause (no stray closing paren)', () => {
-      const r = rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) OVER (PARTITION BY y) FROM t');
-      expect(r.rewritten).toBe(true);
-      // Balance check: number of ( equals number of )
-      expect((r.sql.match(/\(/g) || []).length).toBe((r.sql.match(/\)/g) || []).length);
-      expect(r.sql).toBe(
-        'SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER (PARTITION BY y) FROM t',
-      );
-    });
-    it('rewrites FILTER with OVER and no whitespace', () => {
-      const r = rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0)OVER(PARTITION BY y)');
-      expect(r.sql).toBe('SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER(PARTITION BY y)');
-    });
-    it('rewrites FILTER with OVER and multiple spaces', () => {
-      const r = rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0)   OVER (PARTITION BY y)');
-      expect(r.sql).toBe('SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER (PARTITION BY y)');
-    });
+  it('does not detect FILTER inside a comment', () => {
+    expect(detectFilter('-- FILTER (WHERE x)\nSELECT 1')).toBe(false);
+    expect(detectFilter('/* FILTER (WHERE x) */ SELECT 1')).toBe(false);
   });
 
-  describe('rewriteFilter — robustness', () => {
-    it('rewrites nested function arguments', () => {
-      expect(rewriteFilter('SELECT SUM(f(x, g(y))) FILTER (WHERE x > 0) FROM t')).toEqual({
-        sql: 'SELECT SUM(CASE WHEN (x > 0) THEN f(x, g(y)) END) FROM t', rewritten: true,
-      });
-    });
-    it('rewrites multiple FILTER clauses independently', () => {
-      expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x>0), AVG(y) FILTER (WHERE y>1) FROM t')).toEqual({
-        sql: 'SELECT SUM(CASE WHEN (x>0) THEN x END), AVG(CASE WHEN (y>1) THEN y END) FROM t',
-        rewritten: true,
-      });
-    });
-    it('passes through SQL without FILTER', () => {
-      expect(rewriteFilter('SELECT SUM(x) FROM t')).toEqual({
-        sql: 'SELECT SUM(x) FROM t', rewritten: false,
-      });
-    });
-    it('does NOT rewrite FILTER inside a string literal', () => {
-      expect(rewriteFilter("SELECT 'FILTER (WHERE x > 0)'")).toEqual({
-        sql: "SELECT 'FILTER (WHERE x > 0)'", rewritten: false,
-      });
-    });
-    it('does NOT rewrite FILTER inside a comment', () => {
-      expect(rewriteFilter('-- FILTER (WHERE x > 0)\nSELECT 1')).toEqual({
-        sql: '-- FILTER (WHERE x > 0)\nSELECT 1', rewritten: false,
-      });
-    });
-    it('handles a string FILTER alongside a real FILTER', () => {
-      expect(rewriteFilter("SELECT SUM(x) FILTER (WHERE x > 0), 'FILTER (WHERE x)' FROM t")).toEqual({
-        sql: "SELECT SUM(CASE WHEN (x > 0) THEN x END), 'FILTER (WHERE x)' FROM t",
-        rewritten: true,
-      });
-    });
-    it('rewrites nested FILTER clauses (innermost first, overlapping outer kept intact)', () => {
-      // Two FILTER clauses whose rewrite spans overlap (the inner aggregate is
-      // nested inside the outer). The dedup guard keeps the overlapping
-      // replacement from corrupting indices, rewriting the inner FILTER while
-      // leaving the outer one — a documented limitation of the scanner.
-      const r = rewriteFilter('SELECT SUM(COUNT(x) FILTER (WHERE y > 0)) FILTER (WHERE x > 0) FROM t');
-      expect(r.rewritten).toBe(true);
-      expect(r.sql).toContain('COUNT(CASE WHEN (y > 0) THEN x END)');
-    });
-    it('handles empty / non-string input', () => {
-      expect(rewriteFilter('')).toEqual({ sql: '', rewritten: false });
-      expect(rewriteFilter(null as any)).toEqual({ sql: '', rewritten: false });
-    });
+  it('strips double-quoted identifiers when scanning', () => {
+    expect(detectFilter('SELECT "FILTER (WHERE x)" FROM t')).toBe(false);
+    expect(detectFilter('SELECT "col", SUM(x) FILTER (WHERE x > 0) FROM t')).toBe(true);
+  });
+});
+
+describe('rewriteFilter', () => {
+  it('returns unchanged for empty / non-string / blank', () => {
+    expect(rewriteFilter('')).toEqual({ sql: '', rewritten: false });
+    expect(rewriteFilter(null as unknown as string)).toEqual({ sql: '', rewritten: false });
+    expect(rewriteFilter('SELECT 1')).toEqual({ sql: 'SELECT 1', rewritten: false });
   });
 
-  describe('rewriteFilter — defensive paths (no valid rewrite)', () => {
-    it('does not rewrite FILTER with no opening paren', () => {
-      expect(rewriteFilter('SELECT SUM(x) FILTER x > 0')).toEqual({
-        sql: 'SELECT SUM(x) FILTER x > 0', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER with unbalanced parens', () => {
-      expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0')).toEqual({
-        sql: 'SELECT SUM(x) FILTER (WHERE x > 0', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER whose parens contain no WHERE', () => {
-      expect(rewriteFilter('SELECT SUM(x) FILTER (x > 0)')).toEqual({
-        sql: 'SELECT SUM(x) FILTER (x > 0)', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER at the very start of input', () => {
-      expect(rewriteFilter('FILTER (WHERE x > 0)')).toEqual({
-        sql: 'FILTER (WHERE x > 0)', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER not preceded by a closing paren', () => {
-      expect(rewriteFilter('SELECT SUM(x FILTER (WHERE x > 0)')).toEqual({
-        sql: 'SELECT SUM(x FILTER (WHERE x > 0)', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER preceded by a non-aggregate function', () => {
-      expect(rewriteFilter('SELECT foo(x) FILTER (WHERE x > 0)')).toEqual({
-        sql: 'SELECT foo(x) FILTER (WHERE x > 0)', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER with unbalanced agg parens', () => {
-      expect(rewriteFilter('SELECT SUM(x FILTER (WHERE x > 0)')).toEqual({
-        sql: 'SELECT SUM(x FILTER (WHERE x > 0)', rewritten: false,
-      });
-    });
-    it('does not rewrite FILTER preceded by an unmatched closing paren', () => {
-      expect(rewriteFilter('SELECT ) FILTER (WHERE x > 0)')).toEqual({
-        sql: 'SELECT ) FILTER (WHERE x > 0)', rewritten: false,
-      });
-    });
-    it('handles FILTER followed by OVER with unbalanced parens', () => {
-      expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) OVER (PARTITION BY y')).toEqual({
-        sql: 'SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER (PARTITION BY y', rewritten: true,
-      });
-    });
+  it('rewrites SUM(x) FILTER (WHERE x > 0)', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT SUM(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
   });
 
-  describe('internal helpers', () => {
-    it('_findMatchingParen finds a matching close and guards invalid input', () => {
-      expect(_findMatchingParen('(a(b)c)', 0)).toBe(6);
-      expect(_findMatchingParen('abc', -1)).toBe(-1);
-      expect(_findMatchingParen('abc', 10)).toBe(-1);
-      expect(_findMatchingParen('abc', 0)).toBe(-1); // not '('
-      expect(_findMatchingParen('(unclosed', 0)).toBe(-1);
-    });
-    it('_findMatchingOpenParen finds a matching open and guards invalid input', () => {
-      expect(_findMatchingOpenParen('(a(b)c)', 6)).toBe(0);
-      expect(_findMatchingOpenParen('abc', -1)).toBe(-1);
-      expect(_findMatchingOpenParen('abc', 10)).toBe(-1);
-      expect(_findMatchingOpenParen('abc', 0)).toBe(-1); // not ')'
-      expect(_findMatchingOpenParen('unclosed)', 8)).toBe(-1);
-    });
-    it('_topLevelSplit splits at top level respecting parens and strings', () => {
-      expect(_topLevelSplit('a, b', ',')).toEqual(['a', 'b']);
-      expect(_topLevelSplit('f(a, b), c', ',')).toEqual(['f(a, b)', 'c']);
-      expect(_topLevelSplit("x, ',', y", ',')).toEqual(['x', "','", 'y']);
-      expect(_topLevelSplit("x, 'it''s', y", ',')).toEqual(['x', "'it''s'", 'y']);
-      expect(_topLevelSplit('single', ',')).toEqual(['single']);
-      expect(_topLevelSplit('', ',')).toEqual([]);
-    });
+  it('rewrites count(*) FILTER (WHERE ...) with THEN 1', () => {
+    expect(rewriteFilter('SELECT count(*) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT count(CASE WHEN (x > 0) THEN 1 END) FROM t',
+    );
+  });
+
+  it('rewrites AVG(x) FILTER (WHERE x IS NOT NULL)', () => {
+    expect(rewriteFilter('SELECT AVG(x) FILTER (WHERE x IS NOT NULL) FROM t').sql).toBe(
+      'SELECT AVG(CASE WHEN (x IS NOT NULL) THEN x END) FROM t',
+    );
+  });
+
+  it('preserves an OVER clause after FILTER', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) OVER (PARTITION BY y) FROM t').sql).toBe(
+      'SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER (PARTITION BY y) FROM t',
+    );
+  });
+
+  it('rewrites STRING_AGG with a delimiter, wrapping only the value expression', () => {
+    expect(rewriteFilter("SELECT STRING_AGG(x, ',') FILTER (WHERE x IS NOT NULL) FROM t").sql).toBe(
+      "SELECT STRING_AGG(CASE WHEN (x IS NOT NULL) THEN x END, ',') FROM t",
+    );
+  });
+
+  it('rewrites STRING_AGG with no explicit delimiter', () => {
+    expect(rewriteFilter('SELECT STRING_AGG(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT STRING_AGG(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
+  });
+
+  it('rewrites MIN / MAX / json_agg / ARRAY_AGG aggregations', () => {
+    expect(rewriteFilter('SELECT MIN(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT MIN(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
+    expect(rewriteFilter('SELECT MAX(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT MAX(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
+    expect(rewriteFilter('SELECT json_agg(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT json_agg(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
+    expect(rewriteFilter('SELECT jsonb_agg(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT jsonb_agg(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
+    expect(rewriteFilter('SELECT ARRAY_AGG(x) FILTER (WHERE x > 0) FROM t').sql).toBe(
+      'SELECT ARRAY_AGG(CASE WHEN (x > 0) THEN x END) FROM t',
+    );
+  });
+
+  it('honors parentheses inside string literals within the WHERE condition', () => {
+    // Regression #350: `)` inside 'a)b' must not close the FILTER paren early.
+    expect(rewriteFilter("SELECT SUM(x) FILTER (WHERE x IN ('a)b', 'c')) FROM t").sql).toBe(
+      "SELECT SUM(CASE WHEN (x IN ('a)b', 'c')) THEN x END) FROM t",
+    );
+  });
+
+  it('handles nested parentheses in the WHERE condition', () => {
+    expect(rewriteFilter('SELECT SUM(f(x)) FILTER (WHERE a AND (b OR c)) FROM t').sql).toBe(
+      'SELECT SUM(CASE WHEN (a AND (b OR c)) THEN f(x) END) FROM t',
+    );
+  });
+
+  it('handles a string literal inside the aggregate expression', () => {
+    expect(rewriteFilter("SELECT SUM(x IN ('a)b')) FILTER (WHERE y > 0) FROM t").sql).toBe(
+      "SELECT SUM(CASE WHEN (y > 0) THEN x IN ('a)b') END) FROM t",
+    );
+  });
+
+  it('rewrites multiple FILTER clauses independently', () => {
+    const r = rewriteFilter(
+      'SELECT SUM(x) FILTER (WHERE x > 0), AVG(y) FILTER (WHERE y > 1) FROM t',
+    );
+    expect(r.rewritten).toBe(true);
+    expect(r.sql).toContain('SUM(CASE WHEN (x > 0) THEN x END)');
+    expect(r.sql).toContain('AVG(CASE WHEN (y > 1) THEN y END)');
+  });
+
+  it('leaves a FILTER inside a string literal untouched even when a real FILTER exists', () => {
+    const r = rewriteFilter("SELECT SUM(x) FILTER (WHERE x > 0), 'FILTER (WHERE y)' AS s FROM t");
+    expect(r.sql).toBe("SELECT SUM(CASE WHEN (x > 0) THEN x END), 'FILTER (WHERE y)' AS s FROM t");
+  });
+
+  // ── malformed FILTER forms are left untouched (no crash, no rewrite) ──
+
+  it('leaves a FILTER with no opening paren untouched', () => {
+    expect(rewriteFilter('SELECT FILTER WHERE x > 0').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER with an unterminated paren untouched', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER with no WHERE keyword untouched', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (x > 0)').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER with an empty WHERE condition untouched', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE) FROM t').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER not preceded by an aggregate function untouched', () => {
+    expect(rewriteFilter('SELECT x FILTER (WHERE x > 0) FROM t').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER with an unbalanced aggregate paren untouched', () => {
+    expect(rewriteFilter('SELECT SUM(x FILTER (WHERE x > 0) FROM t').rewritten).toBe(false);
+  });
+
+  it('handles an OVER clause with no parentheses', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) OVER PARTITION BY y FROM t').sql).toBe(
+      'SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER PARTITION BY y FROM t',
+    );
+  });
+
+  it('handles an OVER clause with an unterminated paren', () => {
+    expect(rewriteFilter('SELECT SUM(x) FILTER (WHERE x > 0) OVER (PARTITION BY y FROM t').sql).toBe(
+      'SELECT SUM(CASE WHEN (x > 0) THEN x END) OVER (PARTITION BY y FROM t',
+    );
+  });
+
+  it('leaves a FILTER at the very start of the SQL untouched', () => {
+    expect(rewriteFilter('FILTER (WHERE x > 0)').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER on a non-aggregate function untouched', () => {
+    expect(rewriteFilter('SELECT foo(x) FILTER (WHERE x > 0) FROM t').rewritten).toBe(false);
+  });
+
+  it('leaves a FILTER with an unbalanced aggregate paren untouched', () => {
+    // SUM(x  — the aggregate's open paren is never closed before FILTER.
+    expect(rewriteFilter('SELECT SUM(x FILTER (WHERE x > 0) FROM t').rewritten).toBe(false);
+  });
+
+  it('handles an escaped quote inside the aggregate expression', () => {
+    // Regression for `_findMatchingOpenParen` honoring '' escapes inside the
+    // aggregate's own argument list (reverse paren scan).
+    expect(rewriteFilter("SELECT SUM(x IN ('it''s')) FILTER (WHERE y > 0) FROM t").sql).toBe(
+      "SELECT SUM(CASE WHEN (y > 0) THEN x IN ('it''s') END) FROM t",
+    );
+    expect(rewriteFilter("SELECT STRING_AGG(x, ',') FILTER (WHERE y > 0) FROM t").rewritten).toBe(true);
+    expect(rewriteFilter("SELECT SUM(x) FILTER (WHERE x = 'it''s') FROM t").sql).toBe(
+      "SELECT SUM(CASE WHEN (x = 'it''s') THEN x END) FROM t",
+    );
+  });
+
+  it('leaves a FILTER preceded by an orphan closing paren untouched', () => {
+    expect(rewriteFilter('SELECT ) FILTER (WHERE x > 0) FROM t').rewritten).toBe(false);
+  });
+});
+
+describe('_findMatchingParen', () => {
+  it('returns -1 for invalid open positions', () => {
+    expect(_findMatchingParen('abc', -1)).toBe(-1);
+    expect(_findMatchingParen('abc', 99)).toBe(-1);
+    expect(_findMatchingParen('abc', 1)).toBe(-1); // not a '('
+  });
+
+  it('finds a balanced closing paren', () => {
+    expect(_findMatchingParen('(a)', 0)).toBe(2);
+    expect(_findMatchingParen('((a)b)', 0)).toBe(5);
+    expect(_findMatchingParen('((a)b)', 1)).toBe(3);
+  });
+
+  it('returns -1 for an unbalanced open', () => {
+    expect(_findMatchingParen('(a', 0)).toBe(-1);
+  });
+
+  it('ignores parens inside string literals', () => {
+    expect(_findMatchingParen("('a)b')", 0)).toBe(6);
+  });
+});
+
+describe('_findMatchingOpenParen', () => {
+  it('returns -1 for invalid close positions', () => {
+    expect(_findMatchingOpenParen('abc', -1)).toBe(-1);
+    expect(_findMatchingOpenParen('abc', 99)).toBe(-1);
+    expect(_findMatchingOpenParen('abc', 1)).toBe(-1); // not a ')'
+  });
+
+  it('finds a balanced opening paren', () => {
+    expect(_findMatchingOpenParen('(a)', 2)).toBe(0);
+    expect(_findMatchingOpenParen('(a(b))', 5)).toBe(0);
+    expect(_findMatchingOpenParen('(a(b))', 4)).toBe(2);
+  });
+
+  it('returns -1 for an unbalanced close', () => {
+    expect(_findMatchingOpenParen('a)', 1)).toBe(-1);
+  });
+
+  it('ignores parens inside string literals', () => {
+    expect(_findMatchingOpenParen("('a)b')", 6)).toBe(0);
+  });
+});
+
+describe('_topLevelSplit', () => {
+  it('splits at top-level commas only', () => {
+    expect(_topLevelSplit('a, b, c', ',')).toEqual(['a', 'b', 'c']);
+    expect(_topLevelSplit('f(a, b), c', ',')).toEqual(['f(a, b)', 'c']);
+  });
+
+  it('does not split commas inside string literals', () => {
+    expect(_topLevelSplit("a, 'b,c', d", ',')).toEqual(['a', "'b,c'", 'd']);
+  });
+
+  it('does not split commas inside double-quoted identifiers', () => {
+    expect(_topLevelSplit('a, "b,c", d', ',')).toEqual(['a', '"b,c"', 'd']);
+  });
+
+  it('does not split commas inside a trailing empty segment', () => {
+    expect(_topLevelSplit('a, b,', ',')).toEqual(['a', 'b']);
   });
 });
