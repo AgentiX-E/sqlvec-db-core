@@ -61,12 +61,6 @@ const AGG_FUNC_NAMES = [
   'json_agg', 'jsonb_agg',
 ];
 
-/** Compiled regex for aggregate function name detection at end of string segment. */
-const AGG_FUNC_AT_END_RE = new RegExp(
-  `(${AGG_FUNC_NAMES.join('|')})\\s*\\(\\s*$`,
-  'i',
-);
-
 /**
  * Regex to find `FILTER (WHERE ...)` clause positions.
  * Used as the scanner anchor; each match is then processed via balanced-paren walking.
@@ -97,7 +91,6 @@ export function detectFilter(sql: string): boolean {
   FILTER_WHERE_RE.lastIndex = 0;
   return FILTER_WHERE_RE.test(stripped);
 }
-
 /**
  * Rewrite a SQL string, replacing FILTER (WHERE) clauses on aggregate/window
  * functions with CASE WHEN expressions.
@@ -129,27 +122,45 @@ export function rewriteFilter(sql: string): FilterClauseResult {
   }
   const replacements: Replacement[] = [];
 
-  FILTER_WHERE_RE.lastIndex = 0;
+  // Scan forward for each `FILTER ( WHERE` occurrence, skipping string
+  // literals, quoted identifiers, dollar-quoted strings, and comments so a
+  // `FILTER` keyword inside any of them is never treated as a real clause.
+  let scanFrom = 0;
+  while (scanFrom < sql.length) {
+    const skipped = skipSqlLiteral(sql, scanFrom);
+    if (skipped !== -1) {
+      scanFrom = skipped;
+      continue;
+    }
 
-  while (true) {
-    const filterMatch = FILTER_WHERE_RE.exec(sql);
-    if (!filterMatch) break;
+    const filterWhereStart = indexOfFilterWhere(sql, scanFrom);
+    if (filterWhereStart === -1) break;
 
-    const filterWhereStart = filterMatch.index;
+    // We skipped a literal that might have contained a false `FILTER`; the
+    // keyword here is genuinely outside literals/comments, so proceed.
     const filterFullStart = filterWhereStart; // "FILTER" starts here
 
     // Find the opening paren of FILTER(...)
     const filterOpen = sql.indexOf('(', filterWhereStart);
-    if (filterOpen === -1) continue;
+    if (filterOpen === -1) {
+      scanFrom = filterWhereStart + 'FILTER'.length;
+      continue;
+    }
 
     // Find matching closing paren
     const filterClose = _findMatchingParen(sql, filterOpen);
-    if (filterClose === -1) continue;
+    if (filterClose === -1) {
+      scanFrom = filterWhereStart + 'FILTER'.length;
+      continue;
+    }
 
     // Extract WHERE condition from within the FILTER parens
     const filterInner = sql.slice(filterOpen + 1, filterClose).trim();
     const whereContentMatch = filterInner.match(/^WHERE\s+(.*)$/is);
-    if (!whereContentMatch) continue;
+    if (!whereContentMatch) {
+      scanFrom = filterClose + 1;
+      continue;
+    }
     const cond = whereContentMatch[1].trim();
 
     // ── Walk backward to find the aggregate function ──────────
@@ -157,16 +168,16 @@ export function rewriteFilter(sql: string): FilterClauseResult {
     // Skip whitespace backward
     let pos = filterWhereStart - 1;
     while (pos >= 0 && /\s/.test(sql[pos])) pos--;
-    if (pos < 0) continue;
+    if (pos < 0) {
+      scanFrom = filterWhereStart + 'FILTER'.length;
+      continue;
+    }
 
     // The char right before FILTER should be ')' (the agg func's closing paren)
     if (sql[pos] !== ')') {
-      // It could also be a function call like FUNC()FILTER(WHERE...) without space
-      // OR it could be a standalone FILTER not associated with an agg function
-      // Let's try to find a closing paren nearby (within reasonable distance)
-      // For the scanner, if there's no ')' nearby, skip this FILTER
-      // Check if it's preceded by something like "COUNT(*)...FILTER"
-      // The regex-based approach in AGG_FUNC_AT_END might help
+      // A standalone FILTER not associated with an aggregate function is not
+      // a rewrite candidate; skip past this occurrence and keep scanning.
+      scanFrom = filterWhereStart + 'FILTER'.length;
       continue;
     }
 
@@ -174,7 +185,10 @@ export function rewriteFilter(sql: string): FilterClauseResult {
 
     // Find matching opening paren for the agg function
     const aggOpenParen = _findMatchingOpenParen(sql, aggCloseParen);
-    if (aggOpenParen === -1) continue;
+    if (aggOpenParen === -1) {
+      scanFrom = filterWhereStart + 'FILTER'.length;
+      continue;
+    }
 
     const aggExpr = sql.slice(aggOpenParen + 1, aggCloseParen).trim();
 
@@ -183,7 +197,10 @@ export function rewriteFilter(sql: string): FilterClauseResult {
     const funcMatch = beforeOpen.match(
       new RegExp(`(${AGG_FUNC_NAMES.join('|')})\\s*$`, 'i'),
     );
-    if (!funcMatch) continue;
+    if (!funcMatch) {
+      scanFrom = filterClose + 1;
+      continue;
+    }
 
     const func = funcMatch[1];
     const funcStart = funcMatch.index!;
@@ -256,8 +273,8 @@ export function rewriteFilter(sql: string): FilterClauseResult {
       text: replacement,
     });
 
-    // Advance regex lastIndex past this match to continue scanning
-    FILTER_WHERE_RE.lastIndex = fullEnd;
+    // Advance the scan cursor past this match to continue scanning.
+    scanFrom = fullEnd;
   }
 
   // ── Apply replacements in reverse (bottom-up) ───────────────
@@ -303,27 +320,40 @@ export function rewriteFilter(sql: string): FilterClauseResult {
 // ══════════════════════════════════════════════════════════════════
 
 /**
- * Strip SQL string literals, identifiers, and comments to prevent false matches
- * on FILTER keywords inside strings or comments.
- *
- * Replaces matched content with same-length placeholder text (underscores)
- * to preserve character positions.
- *
- * Each token kind is matched with escape awareness so an embedded doubled
- * quote (`''` / `""`) does not prematurely terminate the token and shift the
- * placeholder alignment.
+ * Strip SQL string literals, identifiers, dollar-quoted strings, and comments
+ * to prevent false matches on FILTER keywords inside them. Uses the shared
+ * `skipSqlLiteral` scanner (which understands single/double/backtick quotes,
+ * `E''` backslash escapes, `$...$` dollar-quoting, and comments) and replaces
+ * each construct with same-length underscores so character positions are
+ * preserved.
  */
 function stripSqlLiterals(sql: string): string {
-  let result = sql;
-  // Single-quoted strings (dollar-escaped '' → '')
-  result = result.replace(/'(?:[^']|'')*'/g, (m) => '_'.repeat(m.length));
-  // Double-quoted identifiers (doubled "" → "")
-  result = result.replace(/"(?:[^"]|"")*"/g, (m) => '_'.repeat(m.length));
-  // Line comments
-  result = result.replace(/--[^\n]*/g, (m) => '_'.repeat(m.length));
-  // Block comments
-  result = result.replace(/\/\*[\s\S]*?\*\//g, (m) => '_'.repeat(m.length));
-  return result;
+  const chars = sql.split('');
+  let i = 0;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped === -1) {
+      i++;
+      continue;
+    }
+    for (let j = i; j < skipped && j < chars.length; j++) {
+      chars[j] = '_';
+    }
+    i = skipped;
+  }
+  return chars.join('');
+}
+
+/**
+ * Find the next occurrence of `FILTER ( WHERE` at or after `from`, returning
+ * its start index or `-1`. Does not skip literals itself — the caller is
+ * responsible for advancing past literals via `skipSqlLiteral` before invoking
+ * this to guarantee the match lies in real SQL tokens.
+ */
+function indexOfFilterWhere(sql: string, from: number): number {
+  FILTER_WHERE_RE.lastIndex = from;
+  const m = FILTER_WHERE_RE.exec(sql);
+  return m ? m.index : -1;
 }
 
 /**
