@@ -16,66 +16,71 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('JsonStandardFuncShim');
 
 // ──────────────────────────────────────────────
-//  Regex patterns
+//  Function rewrite registry
 // ──────────────────────────────────────────────
 
 /**
- * Detects the JSON_EXISTS(json, path) function with optional whitespace.
+ * A single SQL/JSON standard function rewrite rule. `arity` is the number of
+ * comma-separated arguments the function accepts (1 or 2); `render` builds the
+ * SQLite-compatible replacement from the trimmed argument list.
  */
-const JSON_EXISTS_PATTERN = /\bJSON_EXISTS\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/i;
+interface JsonStdRewriteRule {
+  arity: 1 | 2;
+  render(args: string[]): string;
+}
+
+/** Case-normalised name → rule. Longest names are tried first by the scanner. */
+const JSON_STD_RULES: Record<string, JsonStdRewriteRule> = {
+  JSON_EXISTS: {
+    arity: 2,
+    render: ([json, path]) => `(json_extract(${json}, ${path}) IS NOT NULL)`,
+  },
+  JSON_VALUE: {
+    arity: 2,
+    render: ([json, path]) => `json_extract(${json}, ${path})`,
+  },
+  JSON_QUERY: {
+    arity: 2,
+    render: ([json, path]) => `json_extract(${json}, ${path})`,
+  },
+  JSON_SCALAR: {
+    arity: 1,
+    render: ([json]) =>
+      `(CASE WHEN json_type(${json}) IN ('array','object') THEN ${json} ELSE json_extract('{"val":'||${json}||'}','$.val') END)`,
+  },
+  JSON_SERIALIZE: {
+    arity: 1,
+    render: ([json]) => `CAST(${json} AS TEXT)`,
+  },
+};
+
+/** Function names sorted longest-first so `JSON_*` matching is greedy and exact. */
+const JSON_STD_NAMES = Object.keys(JSON_STD_RULES).sort((a, b) => b.length - a.length);
 
 /**
- * Detects the JSON_VALUE(json, path) function.
- */
-const JSON_VALUE_PATTERN = /\bJSON_VALUE\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/i;
-
-/**
- * Detects the JSON_QUERY(json, path) function.
- */
-const JSON_QUERY_PATTERN = /\bJSON_QUERY\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/i;
-
-/**
- * Detects the JSON_SCALAR(json) function.
- */
-const JSON_SCALAR_PATTERN = /\bJSON_SCALAR\s*\(\s*([^)]+)\s*\)/i;
-
-/**
- * Detects the JSON_SERIALIZE(json) function.
- */
-const JSON_SERIALIZE_PATTERN = /\bJSON_SERIALIZE\s*\(\s*([^)]+)\s*\)/i;
-
-/**
- * Detects JSON_OBJECT(KEY 'k' VALUE v, ...)  — SQL standard JSON constructor
- */
-const JSON_OBJECT_RE = /\bJSON_OBJECT\s*\(/i;
-
-/**
- * Detects JSON_ARRAY(v1, v2, ...) — SQL standard JSON array constructor
- */
-const JSON_ARRAY_RE = /\bJSON_ARRAY\s*\(/i;
-
-/**
- * Combined pattern to detect ANY SQL/JSON standard function.
- */
-const ANY_JSON_STD_PATTERN = /\bJSON_(?:EXISTS|VALUE|QUERY|SCALAR|SERIALIZE|OBJECT|ARRAY)\s*\(/i;
-
-// ──────────────────────────────────────────────
-//  Public API
-// ──────────────────────────────────────────────
-
-/**
- * Detect whether the given SQL contains any SQL/JSON standard functions
- * (JSON_EXISTS, JSON_VALUE, JSON_QUERY, JSON_SCALAR, JSON_SERIALIZE).
+ * Detect whether the given SQL contains any SQL/JSON standard function
+ * (JSON_EXISTS, JSON_VALUE, JSON_QUERY, JSON_SCALAR, JSON_SERIALIZE, or the
+ * JSON_OBJECT / JSON_ARRAY constructors) outside of string literals, quoted
+ * identifiers, dollar-quoted strings, and comments.
  */
 export function detectJsonStdFunc(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return false;
   }
-  return ANY_JSON_STD_PATTERN.test(sql);
+  // Scalar/tuple functions (JSON_EXISTS/VALUE/QUERY/SCALAR/SERIALIZE).
+  if (findNextJsonStdCall(sql, 0) !== -1) {
+    return true;
+  }
+  // Constructors (JSON_OBJECT / JSON_ARRAY).
+  return (
+    findNextConstructorCall(sql, 'JSON_OBJECT', 0) !== null ||
+    findNextConstructorCall(sql, 'JSON_ARRAY', 0) !== null
+  );
 }
 
 /**
@@ -87,82 +92,160 @@ export function detectJsonStdFunc(sql: string): boolean {
  *   JSON_QUERY(json, path)   → json_extract(json, path)
  *   JSON_SCALAR(json)        → CASE WHEN json_type(json) IN ('array','object') THEN json ELSE json_extract('{"val":'||json||'}','$.val') END
  *   JSON_SERIALIZE(json)     → CAST(json AS TEXT)
+ *   JSON_OBJECT(...)         → json_object(key, val, ...)
+ *   JSON_ARRAY(...)          → json_array(...)
  */
 export function rewriteJsonStdFunc(sql: string): string {
-  if (!detectJsonStdFunc(sql)) {
+  if (typeof sql !== 'string' || sql.trim().length === 0) {
     return sql;
   }
 
-  let rewrittenSql = sql;
+  let result = sql;
 
-  // 1. JSON_EXISTS(json, path) → (json_extract(json, path) IS NOT NULL)
-  rewrittenSql = rewrittenSql.replace(
-    JSON_EXISTS_PATTERN,
-    (match, jsonExpr: string, pathExpr: string) => {
-      const json = jsonExpr.trim();
-      const path = pathExpr.trim();
-      return `(json_extract(${json}, ${path}) IS NOT NULL)`;
-    },
-  );
-
-  // 2. JSON_VALUE(json, path) → json_extract(json, path)
-  rewrittenSql = rewrittenSql.replace(
-    JSON_VALUE_PATTERN,
-    (match, jsonExpr: string, pathExpr: string) => {
-      const json = jsonExpr.trim();
-      const path = pathExpr.trim();
-      return `json_extract(${json}, ${path})`;
-    },
-  );
-
-  // 3. JSON_QUERY(json, path) → json_extract(json, path)
-  rewrittenSql = rewrittenSql.replace(
-    JSON_QUERY_PATTERN,
-    (match, jsonExpr: string, pathExpr: string) => {
-      const json = jsonExpr.trim();
-      const path = pathExpr.trim();
-      return `json_extract(${json}, ${path})`;
-    },
-  );
-
-  // 4. JSON_SCALAR(json) → CASE WHEN json_type(json) IN ('array','object') THEN json ELSE json_extract('{"val":'||json||'}','$.val') END
-  rewrittenSql = rewrittenSql.replace(
-    JSON_SCALAR_PATTERN,
-    (match, jsonExpr: string) => {
-      const json = jsonExpr.trim();
-      return `(CASE WHEN json_type(${json}) IN ('array','object') THEN ${json} ELSE json_extract('{"val":'||${json}||'}','$.val') END)`;
-    },
-  );
-
-  // 5. JSON_SERIALIZE(json) → CAST(json AS TEXT)
-  rewrittenSql = rewrittenSql.replace(
-    JSON_SERIALIZE_PATTERN,
-    (match, jsonExpr: string) => {
-      const json = jsonExpr.trim();
-      return `CAST(${json} AS TEXT)`;
-    },
-  );
-
-  // ──────────────────────────────────────────────
-  //  JSON_OBJECT rewrite
-  // ──────────────────────────────────────────────
-
-  rewrittenSql = rewriteJsonObjectCalls(rewrittenSql);
-
-  // ──────────────────────────────────────────────
-  //  JSON_ARRAY rewrite
-  // ──────────────────────────────────────────────
-
-  rewrittenSql = rewriteJsonArrayCalls(rewrittenSql);
-
-  if (rewrittenSql !== sql) {
+  // Phase 1: rewrite the scalar/tuple functions via the scanner registry.
+  result = rewriteScalarFuncs(result);
+  if (result !== sql) {
     logger.debug(
-      { original: sql, rewritten: rewrittenSql },
+      { original: sql, rewritten: result },
       'SQL/JSON standard functions rewritten',
     );
   }
 
-  return rewrittenSql;
+  // Phase 2: JSON_OBJECT(...) → json_object(key, val, ...)
+  result = rewriteJsonObjectCalls(result);
+
+  // Phase 3: JSON_ARRAY(...) → json_array(...)
+  result = rewriteJsonArrayCalls(result);
+
+  return result;
+}
+
+// ──────────────────────────────────────────────
+//  Scalar function scanner (JSON_EXISTS/VALUE/QUERY/SCALAR/SERIALIZE)
+// ──────────────────────────────────────────────
+
+/**
+ * Locate the next SQL/JSON standard function call at or after `from`, returning
+ * the starting index of the function name, or `-1` when none remain. Skips
+ * string literals, quoted identifiers, dollar-quoted strings, and comments so
+ * occurrences inside them are never mistaken for real function calls.
+ */
+function findNextJsonStdCall(sql: string, from: number): number {
+  let i = from;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    const name = longestJsonStdNameAt(sql, i);
+    if (name === null) {
+      i++;
+      continue;
+    }
+
+    // The name must be followed by an opening paren to be a call.
+    let j = i + name.length;
+    while (j < sql.length && /\s/.test(sql[j])) j++;
+    if (j < sql.length && sql[j] === '(') {
+      return i;
+    }
+    // Not a call (a column/index named like a function); advance past the name.
+    i += name.length;
+  }
+  return -1;
+}
+
+/**
+ * Return the longest JSON_STD rule name that begins at `pos` with a word
+ * boundary on both sides, or `null` if none matches.
+ */
+function longestJsonStdNameAt(sql: string, pos: number): string | null {
+  for (const name of JSON_STD_NAMES) {
+    const end = pos + name.length;
+    if (end > sql.length) continue;
+    if (sql.slice(pos, end).toUpperCase() !== name) continue;
+    // Word boundary before: preceded by a non-identifier char (or start).
+    if (pos > 0 && isIdentChar(sql[pos - 1])) continue;
+    // Word boundary after: followed by a non-identifier char (or end).
+    if (end < sql.length && isIdentChar(sql[end])) continue;
+    return name;
+  }
+  return null;
+}
+
+function isIdentChar(ch: string): boolean {
+  return /[A-Za-z0-9_$]/.test(ch);
+}
+
+/**
+ * Rewrite every JSON_EXISTS/VALUE/QUERY/SCALAR/SERIALIZE call in `sql` using
+ * literal-aware balanced-paren scanning.
+ */
+function rewriteScalarFuncs(sql: string): string {
+  interface Replacement {
+    start: number;
+    end: number;
+    text: string;
+  }
+  const replacements: Replacement[] = [];
+
+  let from = 0;
+  while (true) {
+    const callStart = findNextJsonStdCall(sql, from);
+    if (callStart === -1) break;
+
+    const name = longestJsonStdNameAt(sql, callStart)!;
+    const openIdx = callStart + name.length;
+    // Skip whitespace between name and '(' (guaranteed by findNextJsonStdCall).
+    let open = openIdx;
+    while (open < sql.length && /\s/.test(sql[open])) open++;
+    if (open >= sql.length || sql[open] !== '(') {
+      from = openIdx;
+      continue;
+    }
+
+    const close = findMatchingParen(sql, open);
+    if (close === -1) {
+      // Unbalanced call — leave the remainder untouched.
+      break;
+    }
+
+    const rawArgs = sql.slice(open + 1, close);
+    const rule = JSON_STD_RULES[name];
+
+    const args =
+      rule.arity === 1
+        ? [rawArgs.trim()]
+        : splitTopLevelCommas(rawArgs);
+
+    if (args.length !== rule.arity) {
+      from = close + 1;
+      continue;
+    }
+
+    // Reject empty arguments (arity-1 with no content, or arity-2 with an
+    // empty slot) — they are invalid calls and should be left alone.
+    if (args.some((a) => a.length === 0)) {
+      from = close + 1;
+      continue;
+    }
+
+    replacements.push({ start: callStart, end: close + 1, text: rule.render(args) });
+    from = close + 1;
+  }
+
+  if (replacements.length === 0) {
+    return sql;
+  }
+
+  replacements.sort((a, b) => b.start - a.start);
+  let result = sql;
+  for (const r of replacements) {
+    result = result.slice(0, r.start) + r.text + result.slice(r.end);
+  }
+  return result;
 }
 
 // ──────────────────────────────────────────────
@@ -170,25 +253,28 @@ export function rewriteJsonStdFunc(sql: string): string {
 // ──────────────────────────────────────────────
 
 /**
- * Find the matching closing parenthesis for an opening paren at startIdx.
- * Handles nested parens and single-quoted string literals.
+ * Find the matching closing parenthesis for an opening paren at `startIdx`.
+ * Skips string literals, quoted identifiers, dollar-quoted strings, and
+ * comments via `skipSqlLiteral` so a `)` inside any of them does not terminate
+ * the scan. Returns the index of the matching `)` or `-1` if unbalanced.
  */
 function findMatchingParen(sql: string, startIdx: number): number {
+  if (startIdx < 0 || startIdx >= sql.length || sql[startIdx] !== '(') {
+    return -1;
+  }
   let depth = 1;
-  let inStr = false;
-  // Start AFTER the opening paren so we don't double-count it
   let i = startIdx + 1;
   while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
     const ch = sql[i];
-    if (inStr) {
-      if (ch === "'") inStr = false;
-    } else {
-      if (ch === "'") inStr = true;
-      else if (ch === '(') depth++;
-      else if (ch === ')') {
-        depth--;
-        if (depth === 0) return i;
-      }
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
     }
     i++;
   }
@@ -196,28 +282,30 @@ function findMatchingParen(sql: string, startIdx: number): number {
 }
 
 /**
- * Split content by commas only at the top nesting level.
- * Respects single-quoted strings and nested parens/brackets/braces.
+ * Split content by commas only at the top nesting level. Skips string
+ * literals, quoted identifiers, dollar-quoted strings, and comments, and
+ * tracks `(`/`[`/`{` depth so commas inside nested expressions are preserved.
  */
 function splitTopLevelCommas(content: string): string[] {
   const parts: string[] = [];
   let depth = 0;
-  let inStr = false;
   let start = 0;
 
-  for (let i = 0; i < content.length; i++) {
-    const ch = content[i];
-    if (inStr) {
-      if (ch === "'") inStr = false;
-    } else {
-      if (ch === "'") inStr = true;
-      else if (ch === '(' || ch === '[' || ch === '{') depth++;
-      else if (ch === ')' || ch === ']' || ch === '}') depth--;
-      else if (ch === ',' && depth === 0) {
-        parts.push(content.slice(start, i).trim());
-        start = i + 1;
-      }
+  let i = 0;
+  while (i < content.length) {
+    const skipped = skipSqlLiteral(content, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
     }
+    const ch = content[i];
+    if (ch === '(' || ch === '[' || ch === '{') depth++;
+    else if (ch === ')' || ch === ']' || ch === '}') depth--;
+    else if (ch === ',' && depth === 0) {
+      parts.push(content.slice(start, i).trim());
+      start = i + 1;
+    }
+    i++;
   }
   const last = content.slice(start).trim();
   if (last.length > 0) parts.push(last);
@@ -269,20 +357,20 @@ function parseJsonObjectPair(pair: string): { key: string; value: string } | nul
  * Rewrite one JSON_OBJECT(...) call to json_object(key, val, ...).
  * Handles the outermost call only — called in a loop for nested calls.
  */
-function rewriteOneJsonObject(sql: string): string {
-  const match = sql.match(JSON_OBJECT_REWRITE_RE);
-  if (!match) return sql;
-
-  const fnCallStart = match.index!;
-  const fnNameLen = match[0].length;
-  // Find the opening '(' — after JSON_OBJECT + optional whitespace
-  const parenIdx = fnCallStart + fnNameLen - 1; // position of '('
-
-  const closeParen = findMatchingParen(sql, parenIdx);
-  if (closeParen < 0) return sql;
+function rewriteOneJsonObject(
+  sql: string,
+  loc: { nameStart: number; openIdx: number },
+): { result: string; nextFrom: number } {
+  const { nameStart, openIdx } = loc;
+  const closeParen = findMatchingParen(sql, openIdx);
+  if (closeParen < 0) {
+    // Unbalanced call: leave it untouched and advance past the name start so
+    // the caller does not re-scan the same malformed construct forever.
+    return { result: sql, nextFrom: nameStart + 1 };
+  }
 
   // Extract content between parens
-  const content = sql.slice(parenIdx + 1, closeParen);
+  const content = sql.slice(openIdx + 1, closeParen);
   const pairs = splitTopLevelCommas(content);
   const args: string[] = [];
 
@@ -296,23 +384,32 @@ function rewriteOneJsonObject(sql: string): string {
   }
 
   const rewritten = `json_object(${args.join(', ')})`;
-  return sql.slice(0, fnCallStart) + rewritten + sql.slice(closeParen + 1);
+  return {
+    result: sql.slice(0, nameStart) + rewritten + sql.slice(closeParen + 1),
+    // Advance just past the original name start so a nested JSON_OBJECT that
+    // lives *inside* this call's arguments (now preserved verbatim in the
+    // rewritten value) is still found by the next scan.
+    nextFrom: nameStart + 1,
+  };
 }
 
 /**
- * Rewrite all JSON_OBJECT(...) calls to json_object(key, val, ...).
- * Handles nested calls by iterating until no more matches.
- * Uses case-sensitive matching to avoid re-matching rewritten lowercase json_object(.
+ * Rewrite all JSON_OBJECT(...) calls to json_object(key, val, ...), including
+ * nested calls. The rewritten `json_object(` is lowercase so the case-sensitive
+ * constructor scan does not re-match it. Advancing the cursor just past each
+ * name start (rather than past the rewritten span) lets nested calls inside
+ * arguments be discovered on the next pass while an unbalanced call is skipped
+ * without causing an unbounded re-scan.
  */
-const JSON_OBJECT_REWRITE_RE = /\bJSON_OBJECT\s*\(/;
-
 function rewriteJsonObjectCalls(sql: string): string {
   let result = sql;
-  let iterations = 0;
-  const MAX_ITERATIONS = 100;
-  while (JSON_OBJECT_REWRITE_RE.test(result) && iterations < MAX_ITERATIONS) {
-    result = rewriteOneJsonObject(result);
-    iterations++;
+  let from = 0;
+  while (true) {
+    const loc = findNextConstructorCall(result, 'JSON_OBJECT', from);
+    if (loc === null) break;
+    const { result: next, nextFrom } = rewriteOneJsonObject(result, loc);
+    result = next;
+    from = nextFrom;
   }
   return result;
 }
@@ -321,36 +418,75 @@ function rewriteJsonObjectCalls(sql: string): string {
  * Rewrite one JSON_ARRAY(...) call to json_array(...).
  * Simple pass-through of the inner content.
  */
-function rewriteOneJsonArray(sql: string): string {
-  const match = sql.match(JSON_ARRAY_RE);
-  if (!match) return sql;
+function rewriteOneJsonArray(
+  sql: string,
+  loc: { nameStart: number; openIdx: number },
+): { result: string; nextFrom: number } {
+  const { nameStart, openIdx } = loc;
+  const closeParen = findMatchingParen(sql, openIdx);
+  if (closeParen < 0) {
+    return { result: sql, nextFrom: nameStart + 1 };
+  }
 
-  const fnCallStart = match.index!;
-  const fnNameLen = match[0].length;
-  const parenIdx = fnCallStart + fnNameLen - 1; // position of '('
-
-  const closeParen = findMatchingParen(sql, parenIdx);
-  if (closeParen < 0) return sql;
-
-  const content = sql.slice(parenIdx + 1, closeParen);
+  const content = sql.slice(openIdx + 1, closeParen);
   const rewritten = `json_array(${content})`;
-  return sql.slice(0, fnCallStart) + rewritten + sql.slice(closeParen + 1);
+  return {
+    result: sql.slice(0, nameStart) + rewritten + sql.slice(closeParen + 1),
+    nextFrom: nameStart + 1,
+  };
 }
 
 /**
- * Rewrite all JSON_ARRAY(...) calls to json_array(...).
- * Handles nested calls by iterating until no more matches.
- * Uses case-sensitive matching to avoid re-matching rewritten lowercase json_array(.
+ * Rewrite all JSON_ARRAY(...) calls to json_array(...), including nested calls.
+ * See {@link rewriteJsonObjectCalls} for the cursor-driven strategy.
  */
-const JSON_ARRAY_REWRITE_RE = /\bJSON_ARRAY\s*\(/;
-
 function rewriteJsonArrayCalls(sql: string): string {
   let result = sql;
-  let iterations = 0;
-  const MAX_ITERATIONS = 100;
-  while (JSON_ARRAY_REWRITE_RE.test(result) && iterations < MAX_ITERATIONS) {
-    result = rewriteOneJsonArray(result);
-    iterations++;
+  let from = 0;
+  while (true) {
+    const loc = findNextConstructorCall(result, 'JSON_ARRAY', from);
+    if (loc === null) break;
+    const { result: next, nextFrom } = rewriteOneJsonArray(result, loc);
+    result = next;
+    from = nextFrom;
   }
   return result;
+}
+
+/**
+ * Locate the next uppercase constructor call (JSON_OBJECT / JSON_ARRAY) at or
+ * after `from`, outside of literals/comments, returning its name start index
+ * and the index of its opening paren, or `null` when none remains. Matching is
+ * case-sensitive so a previously rewritten lowercase `json_object(`/
+ * `json_array(` is never re-matched.
+ */
+function findNextConstructorCall(
+  sql: string,
+  constructorName: 'JSON_OBJECT' | 'JSON_ARRAY',
+  from: number,
+): { nameStart: number; openIdx: number } | null {
+  let i = from;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    if (sql.slice(i, i + constructorName.length) === constructorName) {
+      // Word boundary before.
+      if (i > 0 && isIdentChar(sql[i - 1])) {
+        i++;
+        continue;
+      }
+      // Find the opening paren after the name + optional whitespace.
+      let open = i + constructorName.length;
+      while (open < sql.length && /\s/.test(sql[open])) open++;
+      if (open < sql.length && sql[open] === '(') {
+        return { nameStart: i, openIdx: open };
+      }
+    }
+    i++;
+  }
+  return null;
 }
