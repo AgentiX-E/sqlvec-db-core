@@ -46,6 +46,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('CreateTableLikeShim');
 
@@ -59,67 +60,6 @@ export interface CreateTableLikeResult {
 }
 
 // ── Constants — Regex Patterns ──────────────────────────────────
-
-/**
- * Detects a CREATE TABLE statement that contains a LIKE clause inside
- * its column definition list.
- *
- * Cases matched (whitespace-tolerant):
- *   CREATE TABLE t (LIKE src)
- *   CREATE TABLE t (col1 INT, LIKE src)
- *   CREATE TABLE IF NOT EXISTS t (LIKE src INCLUDING ALL)
- *   CREATE TEMP TABLE t (LIKE src)
- *   CREATE TEMPORARY TABLE t (LIKE src)
- *
- * The regex checks for:
- *   1. `CREATE TABLE` at the start (optional IF NOT EXISTS, TEMP/TEMPORARY)
- *   2. A valid table name (unquoted or double-quoted identifier)
- *   3. An opening `(`
- *   4. The `LIKE` keyword somewhere inside the parens
- *
- * False-positive risk is minimal because `LIKE` as a keyword inside a
- * CREATE TABLE column list is a PG-only construct. Columns with `LIKE`
- * in a DEFAULT expression (e.g., `col TEXT DEFAULT ('LIKE this')`) are
- * possible but extremely rare in practice.
- */
-const CREATE_TABLE_LIKE_DETECT_RE =
-  /^\s*CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+")(?:\s*\.\s*(?:[A-Za-z_][A-Za-z0-9_]*|"[^"]+"))?\s*\([^)]*\bLIKE\s+/i;
-
-/**
- * Matches a single LIKE clause inside a CREATE TABLE column definition.
- *
- * This is used to:
- *   1. Extract the source table name (capture group 1).
- *   2. Remove LIKE clauses when rewriting a mixed column list.
- *
- * The clause format:
- *   LIKE source_table [INCLUDING|EXCLUDING DEFAULTS|CONSTRAINTS|INDEXES|STORAGE|COMMENTS|ALL] ...
- *
- * The `INCLUDING` / `EXCLUDING` keywords can repeat with different options.
- *
- * Capture groups:
- *   [1] Source table name (may be double-quoted), e.g. `users`, `"My Table"`, `public.users`
- */
-const LIKE_CLAUSE_RE =
-  /\bLIKE\s+((?:"[^"]+")|(?:[A-Za-z_][A-Za-z0-9_.]*))\s*(?:(?:INCLUDING|EXCLUDING)\s+(?:DEFAULTS|CONSTRAINTS|INDEXES|STORAGE|COMMENTS|ALL)\s*)*/gi;
-
-/**
- * Simplified regex to extract the source table name from the first LIKE clause.
- *
- * Capture group 1 – Source table name (may be double-quoted).
- */
-const LIKE_TABLE_NAME_SIMPLE_RE = /\bLIKE\s+((?:"[^"]+")|(?:[A-Za-z_][A-Za-z0-9_.]*))/i;
-
-/**
- * Matches a LIKE clause with its preceding comma and surrounding whitespace.
- * Used to strip LIKE elements from a mixed column definition list while
- * preserving the comma separation between remaining custom columns.
- *
- * This ensures that `col1 INT, LIKE src, col2 TEXT` correctly becomes
- * `col1 INT, col2 TEXT`.
- */
-const LIKE_CLAUSE_WITH_COMMA_RE =
-  /\s*,\s*\bLIKE\s+((?:"[^"]+")|(?:[A-Za-z_][A-Za-z0-9_.]*))\s*(?:(?:INCLUDING|EXCLUDING)\s+(?:DEFAULTS|CONSTRAINTS|INDEXES|STORAGE|COMMENTS|ALL)\s*)*/gi;
 
 /**
  * Detects whether any INCLUDING or EXCLUDING options are present in the LIKE clause.
@@ -154,11 +94,65 @@ const TRAILING_SEMICOLON_RE = /\s*;+\s*$/;
  * ```
  */
 export function detectCreateTableLike(sql: string): boolean {
+  return analyzeCreateTableLike(sql) !== null;
+}
+
+/**
+ * Structural analysis of a `CREATE TABLE ... LIKE` statement.
+ *
+ * Returns `null` when the input is not a CREATE TABLE statement containing a
+ * LIKE clause. Otherwise returns the source table name (with quoting preserved)
+ * and whether INCLUDING/EXCLUDING options are present.
+ */
+interface LikeAnalysis {
+  /** Source table name with quoting preserved (e.g. `users`, `"My Table"`). */
+  sourceTable: string;
+  /** True when INCLUDING/EXCLUDING options are present. */
+  hasOptions: boolean;
+  /** The string before the opening paren (e.g. `CREATE TABLE t`). */
+  beforeOpen: string;
+  /** Raw content between the outermost parens. */
+  colContent: string;
+  /** True when the column list is entirely LIKE clauses (no custom columns). */
+  isPureLike: boolean;
+}
+
+function analyzeCreateTableLike(sql: string): LikeAnalysis | null {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
-    return false;
+    return null;
+  }
+  const trimmed = sql.trim();
+
+  // Must start with CREATE [TEMP|TEMPORARY] TABLE [IF NOT EXISTS].
+  const headMatch = /^\s*CREATE\s+(?:TEMP\s+|TEMPORARY\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?/i.exec(
+    trimmed,
+  );
+  if (headMatch === null) {
+    return null;
   }
 
-  return CREATE_TABLE_LIKE_DETECT_RE.test(sql.trim());
+  // Extract the outermost parenthesized column list (literal-aware).
+  const paren = extractParenContent(trimmed);
+  if (paren === null) {
+    return null;
+  }
+
+  // Locate the first LIKE clause within the column content, ignoring literals.
+  const like = findLikeClause(paren.colContent);
+  if (like === null) {
+    return null;
+  }
+
+  const hasOptions = INCLUDING_OPTIONS_RE.test(paren.colContent);
+  const isPureLike = isOnlyLikeClauses(paren.colContent);
+
+  return {
+    sourceTable: like.sourceTable,
+    hasOptions,
+    beforeOpen: paren.beforeOpen,
+    colContent: paren.colContent,
+    isPureLike,
+  };
 }
 
 /**
@@ -218,98 +212,27 @@ export function rewriteCreateTableLike(sql: string): CreateTableLikeResult {
 
   const trimmed = sql.trim();
 
-  // ── Early exit: no LIKE clause found ──────────────────────────
-  if (!detectCreateTableLike(trimmed)) {
+  const analysis = analyzeCreateTableLike(trimmed);
+  if (analysis === null) {
     return { sql: trimmed, rewritten: false };
   }
 
-  // ── Extract source table name from the first LIKE clause ──────
-
-  const sourceTable = extractLikeTableName(trimmed);
-
-  // Safety check: if detection passed but extraction failed, pass through.
-  // This shouldn't happen in practice but guards against regex edge cases.
-  if (sourceTable === null) {
-    logger.warn(
-      { sql: trimmed },
-      'detectCreateTableLike() returned true but extractLikeTableName() returned null; passing through',
-    );
-    return { sql: trimmed, rewritten: false };
-  }
-
-  // ── Determine the LIMIT clause strategy ───────────────────────
-
-  // When INCLUDING/EXCLUDING options are present, use LIMIT 0 to signal
-  // that structure-related options were involved in the original syntax.
-  const hasOptions = INCLUDING_OPTIONS_RE.test(trimmed);
+  const { sourceTable, hasOptions, beforeOpen, colContent, isPureLike } = analysis;
   const zeroRowsClause = hasOptions ? 'LIMIT 0' : 'WHERE 1=0';
-
-  // ── Extract the column definition content between parens ──────
-
-  const parenResult = extractParenContent(trimmed);
-
-  if (parenResult === null) {
-    // Malformed SQL — unbalanced or missing parens. Pass through.
-    logger.warn({ sql: trimmed }, 'Could not find balanced parentheses; passing through');
-    return { sql: trimmed, rewritten: false };
-  }
-
-  const columnContent = parenResult.colContent.trim();
-
-  // ── Determine if this is a pure-LIKE or mixed column list ─────
-
-  const isPureLike = isOnlyLikeClauses(columnContent);
-
-  // ── Apply the rewrite ─────────────────────────────────────────
 
   let result: string;
 
   if (isPureLike) {
-    // ── Pure LIKE case ──────────────────────────────────────────
-    //
-    // The entire column definition block is one or more LIKE clauses.
-    // Replace `(...)` with `AS SELECT * FROM source_table WHERE 1=0`.
-    //
-    // Examples:
-    //   CREATE TABLE t (LIKE users)
-    //     → CREATE TABLE t AS SELECT * FROM users WHERE 1=0
-    //
-    //   CREATE TABLE t (LIKE users INCLUDING DEFAULTS INCLUDING CONSTRAINTS)
-    //     → CREATE TABLE t AS SELECT * FROM users LIMIT 0
-
-    result = `${parenResult.beforeOpen} AS SELECT * FROM ${sourceTable} ${zeroRowsClause}`;
+    // Pure LIKE case: replace the entire column block with an AS SELECT.
+    result = `${beforeOpen} AS SELECT * FROM ${sourceTable} ${zeroRowsClause}`;
   } else {
-    // ── Mixed case ──────────────────────────────────────────────
-    //
-    // Custom column definitions exist alongside LIKE clause(s).
-    // Strip all LIKE clauses from the column list and rebuild.
-    //
-    // Examples:
-    //   CREATE TABLE t (col1 INT, LIKE users)
-    //     → CREATE TABLE t (col1 INT)
-    //
-    //   CREATE TABLE t (col1 INT, LIKE a, col2 TEXT, LIKE b)
-    //     → CREATE TABLE t (col1 INT, col2 TEXT)
-
-    let cleanedCols = columnContent
-      .replace(LIKE_CLAUSE_WITH_COMMA_RE, '') // Remove `, LIKE src ...`
-      .replace(LIKE_CLAUSE_RE, '')            // Remove any remaining bare `LIKE src ...`
-      .trim();
-
-    // Clean up any dangling commas or double commas
-    cleanedCols = cleanedCols
-      .replace(/,\s*,/g, ',')   // Double comma → single comma
-      .replace(/^\s*,/, '')     // Leading comma → removed
-      .replace(/,\s*$/, '')     // Trailing comma → removed
-      .trim();
-
-    result = `${parenResult.beforeOpen} (${cleanedCols})`;
+    // Mixed case: strip all LIKE clauses, preserving custom columns.
+    const cleanedCols = stripLikeClauses(colContent);
+    result = `${beforeOpen} (${cleanedCols})`;
   }
 
-  // Strip trailing semicolons for cleanliness
+  // Strip trailing semicolons for cleanliness.
   result = result.replace(TRAILING_SEMICOLON_RE, '');
-
-  // ── Log and return ────────────────────────────────────────────
 
   const hasChanged = result !== trimmed.replace(TRAILING_SEMICOLON_RE, '');
 
@@ -320,10 +243,105 @@ export function rewriteCreateTableLike(sql: string): CreateTableLikeResult {
     );
   }
 
-  return {
-    sql: result,
-    rewritten: hasChanged,
+  return { sql: result, rewritten: hasChanged };
+}
+
+/**
+ * Strip all LIKE clauses from a column definition list (mixed case), returning
+ * the remaining custom-column text with comma artifacts cleaned up.
+ *
+ * @param colContent - Raw text between the outermost parens.
+ * @returns The column content with LIKE clauses removed.
+ */
+function stripLikeClauses(colContent: string): string {
+  // Remove each LIKE clause (with its preceding comma when applicable) by
+  // scanning left-to-right and skipping literal spans.
+  const spans: Array<{ start: number; end: number }> = [];
+  const len = colContent.length;
+  let i = 0;
+
+  while (i < len) {
+    const skipped = skipSqlLiteral(colContent, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    // Detect a LIKE clause at `i`.
+    if (/\bLIKE\b/i.test(colContent.slice(i, i + 4)) && isWordBoundaryStart(colContent, i)) {
+      let clauseEnd = scanLikeClauseEnd(colContent, i);
+      if (clauseEnd === -1) {
+        // A `LIKE` keyword with no parseable source name is still a LIKE
+        // fragment; treat just the keyword as the removable span so it does
+        // not linger as a stray identifier.
+        clauseEnd = i + 'LIKE'.length;
+      }
+
+      // Extend the span backwards over a preceding comma.
+      let start = i;
+      let j = i;
+      while (j > 0 && /\s/.test(colContent[j - 1])) j--;
+      if (j > 0 && colContent[j - 1] === ',') {
+        start = j - 1;
+      }
+
+      spans.push({ start, end: clauseEnd });
+      i = clauseEnd;
+      continue;
+    }
+
+    i++;
+  }
+
+  // Apply spans right-to-left.
+  let out = colContent;
+  for (const s of spans.slice().sort((a, b) => b.start - a.start)) {
+    out = out.slice(0, s.start) + out.slice(s.end);
+  }
+
+  // Clean up dangling/double commas and normalize comma spacing.
+  return out
+    .replace(/,\s*,/g, ',')
+    .replace(/^\s*,/, '')
+    .replace(/,\s*$/, '')
+    .replace(/\s*,\s*/g, ', ')
+    .trim();
+}
+
+/** True when `at` is a valid start-of-word boundary for the LIKE keyword. */
+function isWordBoundaryStart(sql: string, at: number): boolean {
+  return at === 0 || !/[A-Za-z0-9_$]/.test(sql[at - 1]);
+}
+
+/**
+ * Scan a `LIKE source [options...]` clause beginning at `start` (which points
+ * at the `L` of LIKE). Returns the index just past the clause, or `-1` when the
+ * clause cannot be parsed.
+ */
+function scanLikeClauseEnd(sql: string, start: number): number {
+  let i = start + 'LIKE'.length;
+
+  const skipWs = () => {
+    while (i < sql.length && /\s/.test(sql[i])) i++;
   };
+
+  // Source table name: quoted identifier or qualified dotted name. Reuse the
+  // same reader as findLikeClause so extraction and stripping stay consistent.
+  const read = readSourceTableName(sql, i);
+  if (read === null) return -1;
+  i = read.end;
+
+  // Optionally consume INCLUDING/EXCLUDING <option> sequences.
+  for (;;) {
+    skipWs();
+    const opt = /^(INCLUDING|EXCLUDING)\s+(DEFAULTS|CONSTRAINTS|INDEXES|STORAGE|COMMENTS|ALL)\b/i.exec(
+      sql.slice(i),
+    );
+    if (opt === null) break;
+    i += opt[0].length;
+  }
+
+  return i;
 }
 
 /**
@@ -344,20 +362,8 @@ export function rewriteCreateTableLike(sql: string): CreateTableLikeResult {
  * ```
  */
 export function extractLikeTableName(sql: string): string | null {
-  if (typeof sql !== 'string' || sql.trim().length === 0) {
-    return null;
-  }
-
-  const match = sql.trim().match(LIKE_TABLE_NAME_SIMPLE_RE);
-
-  if (!match || !match[1]) {
-    return null;
-  }
-
-  // Strip double quotes if present (quoted identifier), preserving
-  // schema-qualified names like "schema"."table" or public.users
-  const raw = match[1];
-  return raw.replace(/^"|"$/g, '');
+  const analysis = analyzeCreateTableLike(sql);
+  return analysis === null ? null : analysis.sourceTable;
 }
 
 // ── Internal Helpers ─────────────────────────────────────────────
@@ -378,8 +384,21 @@ export function extractLikeTableName(sql: string): string | null {
 function extractParenContent(
   sql: string,
 ): { beforeOpen: string; colContent: string; afterClose: string } | null {
-  const openIdx = sql.indexOf('(');
-
+  // Locate the first opening paren outside any literal/comment.
+  let openIdx = -1;
+  let pos = 0;
+  while (pos < sql.length) {
+    const skipped = skipSqlLiteral(sql, pos);
+    if (skipped !== -1) {
+      pos = skipped;
+      continue;
+    }
+    if (sql[pos] === '(') {
+      openIdx = pos;
+      break;
+    }
+    pos++;
+  }
   if (openIdx === -1) {
     return null;
   }
@@ -387,9 +406,13 @@ function extractParenContent(
   let depth = 0;
   let closeIdx = -1;
 
-  for (let i = openIdx; i < sql.length; i++) {
+  for (let i = openIdx; i < sql.length; ) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
     const ch = sql[i];
-
     if (ch === '(') {
       depth++;
     } else if (ch === ')') {
@@ -399,6 +422,7 @@ function extractParenContent(
         break;
       }
     }
+    i++;
   }
 
   if (closeIdx === -1) {
@@ -431,10 +455,102 @@ function extractParenContent(
  * ```
  */
 function isOnlyLikeClauses(columnContent: string): boolean {
-  const withoutLike = columnContent
-    .replace(LIKE_CLAUSE_RE, '')   // Remove LIKE clauses
-    .replace(/\s*,\s*/g, '')       // Remove commas
-    .trim();
+  const stripped = stripLikeClauses(columnContent);
+  // After removing LIKE clauses, only commas/whitespace remain → pure LIKE.
+  return stripped.replace(/\s*,\s*/g, '').trim().length === 0;
+}
 
-  return withoutLike.length === 0;
+/**
+ * Locate the first LIKE clause in column-list content, returning its source
+ * table name (quoting preserved). Returns `null` when no LIKE clause is found.
+ */
+function findLikeClause(content: string): { sourceTable: string } | null {
+  const len = content.length;
+  let i = 0;
+  while (i < len) {
+    const skipped = skipSqlLiteral(content, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    if (
+      /^LIKE\b/i.test(content.slice(i, i + 4)) &&
+      isWordBoundaryStart(content, i)
+    ) {
+      const read = readSourceTableName(content, i + 'LIKE'.length);
+      if (read === null) return null;
+      return { sourceTable: read.name };
+    }
+
+    i++;
+  }
+  return null;
+}
+
+/**
+ * Read a (possibly schema-qualified, possibly quoted) source table name
+ * starting at `pos` (just past the LIKE keyword). Returns the verbatim name
+ * (quoting preserved) plus the index just past the name, or `null` when no
+ * valid name follows.
+ */
+function readSourceTableName(
+  content: string,
+  pos: number,
+): { name: string; end: number } | null {
+  const len = content.length;
+  let i = pos;
+  while (i < len && /\s/.test(content[i])) i++;
+  if (i >= len) return null;
+
+  const start = i;
+  if (content[i] === '"') {
+    const close = findQuotedIdentifierEnd(content, i);
+    if (close === -1) return null;
+    i = close;
+  } else {
+    const ident = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(content.slice(i));
+    if (ident === null) return null;
+    i += ident[0].length;
+  }
+
+  // Consume a dotted chain of quoted/unquoted identifiers (`a.b`, `"a"."b"`).
+  // A trailing `.` with no following identifier makes the whole name invalid.
+  for (;;) {
+    let j = i;
+    while (j < len && /\s/.test(content[j])) j++;
+    if (j >= len || content[j] !== '.') break;
+    j++; // consume '.'
+    while (j < len && /\s/.test(content[j])) j++;
+    if (j >= len) return null; // dangling dot
+    if (content[j] === '"') {
+      const close = findQuotedIdentifierEnd(content, j);
+      if (close === -1) return null;
+      i = close;
+    } else if (/[A-Za-z_]/.test(content[j])) {
+      const ident = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(content.slice(j));
+      if (ident === null) return null;
+      i = j + ident[0].length;
+    } else {
+      return null;
+    }
+  }
+
+  return { name: content.slice(start, i), end: i };
+}
+
+/** Index just past the closing double-quote of a quoted identifier (V.. V""). */
+function findQuotedIdentifierEnd(sql: string, open: number): number {
+  let i = open + 1;
+  while (i < sql.length) {
+    if (sql[i] === '"') {
+      if (i + 1 < sql.length && sql[i + 1] === '"') {
+        i += 2;
+        continue;
+      }
+      return i + 1;
+    }
+    i++;
+  }
+  return -1;
 }
