@@ -12,6 +12,7 @@
 
 import { PinoLogger } from '../logger/PinoLogger';
 import { detectArrayFunc, rewriteArrayFunc } from './ArrayFuncShim';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 export type {
   ArrayFuncResult,
@@ -23,18 +24,49 @@ const logger = PinoLogger.forComponent('ArrayFuncShimAddition');
 
 /**
  * Find the matching closing bracket for an opening bracket at `openPos`,
- * accounting for nesting.
+ * accounting for nesting and skipping string literals, quoted identifiers and
+ * comments so brackets inside them are not miscounted.
  */
 function findMatchingBracket(sql: string, openPos: number): number {
   let depth = 1;
-  let idx = openPos + 1;
-  while (idx < sql.length && depth > 0) {
+  for (let idx = openPos + 1; idx < sql.length; ) {
+    const skipped = skipSqlLiteral(sql, idx);
+    if (skipped !== -1) {
+      idx = skipped;
+      continue;
+    }
     const ch = sql[idx];
     if (ch === '[') depth++;
-    else if (ch === ']') depth--;
-    if (depth > 0) idx++;
+    else if (ch === ']') {
+      depth--;
+      if (depth === 0) return idx;
+    }
+    idx++;
   }
-  return depth === 0 ? idx : -1;
+  return -1;
+}
+
+/**
+ * Find the matching closing parenthesis for an opening parenthesis at
+ * `openPos`, accounting for nesting and skipping literals/comments.
+ */
+function findMatchingParen(sql: string, openPos: number): number {
+  let depth = 1;
+  for (let idx = openPos + 1; idx < sql.length; ) {
+    const skipped = skipSqlLiteral(sql, idx);
+    if (skipped !== -1) {
+      idx = skipped;
+      continue;
+    }
+    const ch = sql[idx];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return idx;
+    }
+    idx++;
+  }
+  return -1;
 }
 
 /**
@@ -52,38 +84,80 @@ function isWhitespace(ch: string): boolean {
 }
 
 /**
- * Find the start of the identifier before the given position.
- * The character at `end` should be the one right before `[`.
+ * Find the start of the identifier immediately before position `end` (which is
+ * the index of the `[`).
  */
-function findIdentStart(sql: string, end: number): number {
-  let idx = end;
-  while (idx > 0 && (isIdentChar(sql[idx - 1]))) {
-    idx--;
-  }
-  return idx;
+function findIdentStartBackward(sql: string, before: number): number {
+  let idx = before;
+  while (idx > 0 && /[A-Za-z0-9_]/.test(sql[idx - 1])) idx--;
+  return idx < before ? idx : -1;
 }
 
-// ── Regex patterns ───────────────────────────────────────────────
+/**
+ * Split a comma-separated argument list, respecting nested parentheses and
+ * brackets and skipping string literals, quoted identifiers and comments so
+ * commas or brackets inside them are never treated as separators.
+ */
+function splitFuncArgs(argsStr: string): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (let i = 0; i < argsStr.length; ) {
+    const skipped = skipSqlLiteral(argsStr, i);
+    if (skipped !== -1) {
+      current += argsStr.slice(i, skipped);
+      i = skipped;
+      continue;
+    }
+    const ch = argsStr[i];
+    if (ch === '(' || ch === '[') { depth++; current += ch; }
+    else if (ch === ')' || ch === ']') { depth--; current += ch; }
+    else if (ch === ',' && depth === 0) { args.push(current.trim()); current = ''; }
+    else { current += ch; }
+    i++;
+  }
+  const last = current.trim();
+  if (last.length > 0) args.push(last);
+  return args;
+}
 
 /**
- * Pattern matching array subscript access like `arr[1]`, `arr[1:3]`, `arr[1][2]`.
- *
- * This matches: identifier, optional whitespace, `[`, then content until `]`.
+ * Locate the next occurrence of a function name followed by `(` at or after
+ * `from`, skipping literals/comments, and return the positions of the name
+ * start and opening paren, or `null` when no further call exists.
  */
-// eslint-disable-next-line require-unicode-regexp
-const ARRAY_SUBSCRIPT_RE = /([A-Za-z_][A-Za-z0-9_]*)\s*\[(\d+(?:\s*:\s*\d+)?)\]/g;
+function findNextCall(
+  sql: string,
+  name: string,
+  from: number,
+): { nameStart: number; parenPos: number } | null {
+  const lower = sql.toLowerCase();
+  const needle = name.toLowerCase();
+  const len = sql.length;
 
-/**
- * Pattern for unnest function calls.
- */
-// eslint-disable-next-line require-unicode-regexp
-const UNNEST_FUNC_RE = /\bunnest\s*\(/gi;
+  for (let i = from; i < len; ) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
 
-/**
- * Pattern for array_to_string function calls.
- */
-// eslint-disable-next-line require-unicode-regexp
-const ARRAY_TO_STRING_RE = /\barray_to_string\s*\(/gi;
+    const boundaryOk = i === 0 || !isIdentChar(sql[i - 1]);
+    if (boundaryOk && lower.slice(i, i + needle.length) === needle) {
+      let open = i + needle.length;
+      while (open < len && isWhitespace(sql[open])) open++;
+      if (open < len && sql[open] === '(') {
+        return { nameStart: i, parenPos: open };
+      }
+    }
+    i++;
+  }
+
+  return null;
+}
+
+
+// ── Regex patterns have been removed in favor of literal-aware scanning ──
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -124,63 +198,74 @@ export function rewriteArraySubscript(sql: string): string {
     return sql ?? '';
   }
 
-  // Collect replacements (right-to-left to preserve offsets)
+  // Collect replacements (right-to-left to preserve offsets).
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
-  ARRAY_SUBSCRIPT_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
+  const len = sql.length;
 
-  while ((match = ARRAY_SUBSCRIPT_RE.exec(sql)) !== null) {
-    const ident = match[1];
-    const subscript = match[2]; // e.g., "1", "1:3", "1"
+  for (let i = 0; i < len; ) {
+    // Skip literal/comment spans so `[` inside them is never matched.
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
 
-    // Handle multi-dim: check if there's a chain like [1][2]
-    // We already matched the first [d], now scan for subsequent [d]
-    let fullEnd = match.index + match[0].length;
-    const subscriptChain: string[] = [subscript];
+    if (sql[i] !== '[') {
+      i++;
+      continue;
+    }
+
+    // Find the identifier immediately before `[`.
+    const identStart = findIdentStartBackward(sql, i);
+    if (identStart === -1) {
+      i++;
+      continue;
+    }
+    const ident = sql.slice(identStart, i);
+
+    // Match the first subscript: `[` digits (`: digit`) `]`.
+    const first = matchSubscriptDigits(sql, i);
+    if (first === null) {
+      i++;
+      continue;
+    }
+
+    // Collect chained subscripts `[1][2]`.
+    const subscriptChain: string[] = [first.content];
+    let fullEnd = first.end;
     let scanPos = fullEnd;
-    while (scanPos < sql.length) {
-      // Skip whitespace
-      while (scanPos < sql.length && isWhitespace(sql[scanPos])) scanPos++;
-      if (scanPos >= sql.length || sql[scanPos] !== '[') break;
+    for (;;) {
+      while (scanPos < len && isWhitespace(sql[scanPos])) scanPos++;
+      if (scanPos >= len || sql[scanPos] !== '[') break;
 
       const closeBracket = findMatchingBracket(sql, scanPos);
       if (closeBracket === -1) break;
-
       const inner = sql.slice(scanPos + 1, closeBracket).trim();
+      if (!/^\d+(?:\s*:\s*\d+)?$/.test(inner)) break;
       subscriptChain.push(inner);
       fullEnd = closeBracket + 1;
       scanPos = fullEnd;
     }
 
-    // Build the json_extract path
-    const pathParts = subscriptChain.map((sub, idx) => {
-      // For slices (e.g., "1:3"), use the start only
-      const firstNum = sub.split(':')[0].trim();
-      return `$${[idx]}[${parseInt(firstNum, 10) - 1}]`;
-    });
-    // For multi-dim, it's like '$[0][1]'; since each json path already includes the index,
-    // we need to combine differently. Actually json_extract uses a single path string.
-    // For PG arrays stored as JSON arrays: arr[1] → '$[0]', arr[1][2] → '$[0][1]'
-    // The path syntax is: $[idx1][idx2]...
-    let pathStr = '\'$';
-    for (let i = 0; i < subscriptChain.length; i++) {
-      const sub = subscriptChain[i];
+    // Build the json_extract path, one `[idx]` per dimension.
+    let pathStr = "'$";
+    for (const sub of subscriptChain) {
       const firstNum = sub.split(':')[0].trim();
       const idxVal = Math.max(0, parseInt(firstNum, 10) - 1);
       pathStr += `[${idxVal}]`;
     }
-    pathStr += '\'';
-
-    const replacement = `json_extract(${ident}, ${pathStr})`;
+    pathStr += "'";
 
     replacements.push({
-      start: match.index,
+      start: identStart,
       end: fullEnd,
-      replacement,
+      replacement: `json_extract(${ident}, ${pathStr})`,
     });
+
+    i = fullEnd;
   }
 
-  // Apply right-to-left
+  // Apply right-to-left.
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
     sql = sql.slice(0, r.start) + r.replacement + sql.slice(r.end);
   }
@@ -191,6 +276,24 @@ export function rewriteArraySubscript(sql: string): string {
 
   return sql;
 }
+
+/**
+ * Match a numeric subscript at `openBracket`, of the form `[digits]` or
+ * `[digits : digits]`. Returns the normalized content (with whitespace
+ * collapsed) and the index just past the closing bracket, or `null` when the
+ * bracket content is not a plain numeric subscript.
+ */
+function matchSubscriptDigits(
+  sql: string,
+  openBracket: number,
+): { content: string; end: number } | null {
+  const close = findMatchingBracket(sql, openBracket);
+  if (close === -1) return null;
+  const inner = sql.slice(openBracket + 1, close).trim();
+  if (!/^\d+(?:\s*:\s*\d+)?$/.test(inner)) return null;
+  return { content: inner, end: close + 1 };
+}
+
 
 /**
  * Rewrite `unnest(arr)` to SQLite-compatible `json_each` calls.
@@ -227,34 +330,27 @@ export function rewriteUnnestCall(sql: string): string {
     return sql ?? '';
   }
 
-  // Replace `unnest(...)` with `json_each(...)` 
-  // We need to find unnest calls and replace them with json_each
-  // The existing rewriteArrayFunc already handles scalar unnest -> json_extract,
-  // but for FROM clause context we want json_each
-  
-  // We'll match unnest( and the matching close paren
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
-  UNNEST_FUNC_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = UNNEST_FUNC_RE.exec(sql)) !== null) {
-    const funcStart = match.index;
-    const parenPos = funcStart + match[0].indexOf('(');
+  let from = 0;
+  let loc = findNextCall(sql, 'unnest', from);
+  while (loc !== null) {
+    const { nameStart, parenPos } = loc;
     const closeParen = findMatchingParen(sql, parenPos);
-    if (closeParen === -1) continue;
-
-    const argsStr = sql.slice(parenPos + 1, closeParen).trim();
-    // json_each expects one argument
-    const replacement = `json_each(${argsStr})`;
-
-    replacements.push({
-      start: funcStart,
-      end: closeParen + 1,
-      replacement,
-    });
+    if (closeParen !== -1) {
+      const argsStr = sql.slice(parenPos + 1, closeParen).trim();
+      replacements.push({
+        start: nameStart,
+        end: closeParen + 1,
+        replacement: `json_each(${argsStr})`,
+      });
+      from = closeParen + 1;
+    } else {
+      from = parenPos + 1;
+    }
+    loc = findNextCall(sql, 'unnest', from);
   }
 
-  // Apply right-to-left
+  // Apply right-to-left.
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
     sql = sql.slice(0, r.start) + r.replacement + sql.slice(r.end);
   }
@@ -264,21 +360,6 @@ export function rewriteUnnestCall(sql: string): string {
   }
 
   return sql;
-}
-
-/**
- * Find the position of the matching closing parenthesis, accounting for nesting.
- */
-function findMatchingParen(sql: string, openPos: number): number {
-  let depth = 1;
-  let idx = openPos + 1;
-  while (idx < sql.length && depth > 0) {
-    const ch = sql[idx];
-    if (ch === '(') depth++;
-    else if (ch === ')') depth--;
-    if (depth > 0) idx++;
-  }
-  return depth === 0 ? idx : -1;
 }
 
 /**
@@ -309,39 +390,32 @@ export function rewriteArrayJoin(sql: string): string {
     return sql ?? '';
   }
 
-  // Find array_to_string(...) calls and rewrite
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
-  // eslint-disable-next-line require-unicode-regexp
-  const funcRe = /\barray_to_string\s*\(/gi;
-  funcRe.lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = funcRe.exec(sql)) !== null) {
-    const funcStart = match.index;
-    const parenPos = funcStart + match[0].indexOf('(');
+  let from = 0;
+  let loc = findNextCall(sql, 'array_to_string', from);
+  while (loc !== null) {
+    const { nameStart, parenPos } = loc;
     const closeParen = findMatchingParen(sql, parenPos);
-    if (closeParen === -1) continue;
+    if (closeParen !== -1) {
+      const argsStr = sql.slice(parenPos + 1, closeParen);
+      const args = splitFuncArgs(argsStr);
 
-    const argsStr = sql.slice(parenPos + 1, closeParen);
-    const args = splitFuncArgsExternal(argsStr);
-
-    let replacement: string;
-
-    if (args.length === 2) {
-      // array_to_string(arr, delimiter)
-      const [arrExpr, delimExpr] = [args[0], args[1]];
-      replacement = `(SELECT group_concat(json_each.value, ${delimExpr}) FROM json_each(${arrExpr}))`;
-    } else if (args.length >= 3) {
-      // array_to_string(arr, delimiter, null_string)
-      const [arrExpr, delimExpr, _nullStr] = [args[0], args[1], args[2]];
-      // Simplified: ignores null_string, just group_concat
-      replacement = `(SELECT group_concat(json_each.value, ${delimExpr}) FROM json_each(${arrExpr}))`;
+      if (args.length >= 2) {
+        const [arrExpr, delimExpr] = [args[0], args[1]];
+        replacements.push({
+          start: nameStart,
+          end: closeParen + 1,
+          replacement: `(SELECT group_concat(json_each.value, ${delimExpr}) FROM json_each(${arrExpr}))`,
+        });
+        from = closeParen + 1;
+      } else {
+        logger.warn({ args: argsStr }, 'array_to_string: insufficient arguments');
+        from = closeParen + 1;
+      }
     } else {
-      logger.warn({ args: argsStr }, 'array_to_string: insufficient arguments');
-      continue;
+      from = parenPos + 1;
     }
-
-    replacements.push({ start: funcStart, end: closeParen + 1, replacement });
+    loc = findNextCall(sql, 'array_to_string', from);
   }
 
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
@@ -353,24 +427,6 @@ export function rewriteArrayJoin(sql: string): string {
   }
 
   return sql;
-}
-
-/**
- * Split a comma-separated argument list, respecting nested brackets/parens.
- */
-function splitFuncArgsExternal(argsStr: string): string[] {
-  const args: string[] = [];
-  let depth = 0;
-  let current = '';
-  for (const ch of argsStr) {
-    if (ch === '(' || ch === '[') { depth++; current += ch; }
-    else if (ch === ')' || ch === ']') { depth--; current += ch; }
-    else if (ch === ',' && depth === 0) { args.push(current.trim()); current = ''; }
-    else { current += ch; }
-  }
-  const last = current.trim();
-  if (last.length > 0) args.push(last);
-  return args;
 }
 
 /**
@@ -390,26 +446,27 @@ export function rewriteArrayLength(sql: string): string {
     return sql ?? '';
   }
 
-  // eslint-disable-next-line require-unicode-regexp
-  const funcRe = /\barray_length\s*\(/gi;
-  funcRe.lastIndex = 0;
-  let match: RegExpExecArray | null;
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
-
-  while ((match = funcRe.exec(sql)) !== null) {
-    const funcStart = match.index;
-    const parenPos = funcStart + match[0].indexOf('(');
+  let from = 0;
+  let loc = findNextCall(sql, 'array_length', from);
+  while (loc !== null) {
+    const { nameStart, parenPos } = loc;
     const closeParen = findMatchingParen(sql, parenPos);
-    if (closeParen === -1) continue;
-
-    const argsStr = sql.slice(parenPos + 1, closeParen);
-    const args = splitFuncArgsExternal(argsStr);
-
-    // array_length(arr, dim) — we only use the first arg, drop dim
-    const arrExpr = args.length >= 1 ? args[0] : 'NULL';
-    const replacement = `json_array_length(${arrExpr})`;
-
-    replacements.push({ start: funcStart, end: closeParen + 1, replacement });
+    if (closeParen !== -1) {
+      const argsStr = sql.slice(parenPos + 1, closeParen);
+      const args = splitFuncArgs(argsStr);
+      // array_length(arr, dim) — only the first arg is used; dim is dropped.
+      const arrExpr = args.length >= 1 ? args[0] : 'NULL';
+      replacements.push({
+        start: nameStart,
+        end: closeParen + 1,
+        replacement: `json_array_length(${arrExpr})`,
+      });
+      from = closeParen + 1;
+    } else {
+      from = parenPos + 1;
+    }
+    loc = findNextCall(sql, 'array_length', from);
   }
 
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
@@ -442,32 +499,36 @@ export function rewriteArrayPosition(sql: string): string {
     return sql ?? '';
   }
 
-  // eslint-disable-next-line require-unicode-regexp
-  const funcRe = /\barray_position\s*\(/gi;
-  funcRe.lastIndex = 0;
-  let match: RegExpExecArray | null;
   const replacements: Array<{ start: number; end: number; replacement: string }> = [];
-
-  while ((match = funcRe.exec(sql)) !== null) {
-    const funcStart = match.index;
-    const parenPos = funcStart + match[0].indexOf('(');
+  let from = 0;
+  let loc = findNextCall(sql, 'array_position', from);
+  while (loc !== null) {
+    const { nameStart, parenPos } = loc;
     const closeParen = findMatchingParen(sql, parenPos);
-    if (closeParen === -1) continue;
+    if (closeParen === -1) {
+      from = parenPos + 1;
+      loc = findNextCall(sql, 'array_position', from);
+      continue;
+    }
 
     const argsStr = sql.slice(parenPos + 1, closeParen);
-    const args = splitFuncArgsExternal(argsStr);
+    const args = splitFuncArgs(argsStr);
 
     if (args.length < 2) {
       logger.warn({ args: argsStr }, 'array_position: insufficient arguments');
+      from = closeParen + 1;
+      loc = findNextCall(sql, 'array_position', from);
       continue;
     }
 
     const [arrExpr, elemExpr] = [args[0], args[1]];
-    // SQLite's json_each provides `key` (index) and `value`
-    // PG array_position is 1-based, so we add 1
-    const replacement = `(SELECT MIN(json_each.key) + 1 FROM json_each(${arrExpr}) WHERE json_each.value = ${elemExpr})`;
-
-    replacements.push({ start: funcStart, end: closeParen + 1, replacement });
+    replacements.push({
+      start: nameStart,
+      end: closeParen + 1,
+      replacement: `(SELECT MIN(json_each.key) + 1 FROM json_each(${arrExpr}) WHERE json_each.value = ${elemExpr})`,
+    });
+    from = closeParen + 1;
+    loc = findNextCall(sql, 'array_position', from);
   }
 
   for (const r of [...replacements].sort((a, b) => b.start - a.start)) {
