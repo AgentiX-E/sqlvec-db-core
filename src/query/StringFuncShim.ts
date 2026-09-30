@@ -23,6 +23,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('StringFuncShim');
 
@@ -274,18 +275,106 @@ const STRING_FUNCTIONS = [
   'reverse',
 ];
 
-/**
- * Regex to detect any of the PG string function calls in SQL.
- * Matches both `function(...)` and `schema.function(...)` patterns.
- */
-const STRING_FUNC_RE = new RegExp(
-  `\\b(?:\\w+\\.)?(${STRING_FUNCTIONS.map(escapeFnName).join('|')})\\s*\\(`,
-  'gi',
-);
+/** The two functions that are rewritten to SQLite-native `substr`. */
+const REWRITABLE_FUNCTIONS: Record<string, (args: string[]) => string> = {
+  left: (args) => `substr(${args[0]}, 1, ${args[1]})`,
+  right: (args) => `substr(${args[0]}, -${args[1]}, ${args[1]})`,
+};
 
-/** Escape a function name so it works in a regex alternation. */
-function escapeFnName(fn: string): string {
-  return fn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * Whether `ch` is a word character that may continue an identifier.
+ */
+function isIdentChar(ch: string): boolean {
+  return /[A-Za-z0-9_$]/.test(ch);
+}
+
+/**
+ * Determine the function name (lowercased) if `sql[i]` begins a (possibly
+ * schema-qualified) call to one of the known string functions.
+ *
+ * Accepts `fn(` and `schema.fn(`. Returns the function name plus the index of
+ * the opening parenthesis, or `null` when the token is not a known function.
+ */
+function matchStringFunc(
+  sql: string,
+  i: number,
+): { fn: string; nameStart: number; openParen: number } | null {
+  // Skip a schema qualifier: `schema.fn(`.
+  let start = i;
+  let j = i;
+  while (j < sql.length && isIdentChar(sql[j])) j++;
+  let nameStart = start;
+  let nameEnd = j;
+  if (j < sql.length && sql[j] === '.') {
+    // A dotted qualifier — the real function name follows.
+    let k = j + 1;
+    if (k >= sql.length || !isIdentChar(sql[k])) return null;
+    nameStart = k;
+    while (k < sql.length && isIdentChar(sql[k])) k++;
+    nameEnd = k;
+  }
+
+  const name = sql.slice(nameStart, nameEnd).toLowerCase();
+  if (!STRING_FUNCTIONS.includes(name)) return null;
+
+  // Require an opening parenthesis (allowing whitespace).
+  let p = nameEnd;
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+  if (p >= sql.length || sql[p] !== '(') return null;
+
+  return { fn: name, nameStart, openParen: p };
+}
+
+/**
+ * Find the closing parenthesis for the `(` at `openParen`, skipping nested
+ * parentheses and any literal/comment spans. Returns `-1` when unbalanced.
+ */
+function findMatchingParen(sql: string, openParen: number): number {
+  let depth = 0;
+  let i = openParen;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    const ch = sql[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Split the argument list inside a call's parentheses into top-level arguments,
+ * honoring commas only at nesting depth 0 and skipping literals/comments.
+ */
+function splitTopLevelArgs(sql: string, openParen: number, closeParen: number): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let start = openParen + 1;
+  let i = start;
+  while (i < closeParen) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1 && skipped <= closeParen) {
+      i = skipped;
+      continue;
+    }
+    const ch = sql[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') depth--;
+    else if (ch === ',' && depth === 0) {
+      args.push(sql.slice(start, i).trim());
+      start = i + 1;
+    }
+    i++;
+  }
+  args.push(sql.slice(start, closeParen).trim());
+  return args;
 }
 
 /**
@@ -296,8 +385,30 @@ function escapeFnName(fn: string): string {
  */
 export function detectStringFunc(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) return false;
-  STRING_FUNC_RE.lastIndex = 0;
-  return STRING_FUNC_RE.test(sql);
+  const found = firstStringFuncCall(sql);
+  return found !== null;
+}
+
+/**
+ * Find the first (possibly schema-qualified) call to a known string function,
+ * skipping literals and comments. Returns `{ fn, openParen }` or `null`.
+ */
+function firstStringFuncCall(sql: string): { fn: string; nameStart: number; openParen: number } | null {
+  let i = 0;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    // Only consider positions that begin an identifier.
+    if (isIdentChar(sql[i]) && (i === 0 || !isIdentChar(sql[i - 1]))) {
+      const m = matchStringFunc(sql, i);
+      if (m !== null) return m;
+    }
+    i++;
+  }
+  return null;
 }
 
 // ── SQL rewrite ─────────────────────────────────────────────────
@@ -318,29 +429,58 @@ export function detectStringFunc(sql: string): boolean {
  * @returns Rewritten SQL string
  */
 export function rewriteStringFunc(sql: string): string {
-  if (!detectStringFunc(sql)) return sql;
+  if (typeof sql !== 'string' || sql.trim().length === 0) return sql;
 
+  // Scan left-to-right, rewriting only `left`/`right` (which map to native
+  // `substr`). All other functions are resolved by custom SQLite functions and
+  // are left verbatim. Literals and comments are skipped so their contents are
+  // never corrupted.
   let working = sql;
+  let i = 0;
   let rewritten = false;
 
-  // ── left(str, n) → substr(str, 1, n) ──
-  // Match pattern: left( ... , ... ) — handles nested parens
-  working = working.replace(
-    /\bleft\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/gi,
-    (_match: string, str: string, n: string) => {
-      rewritten = true;
-      return `substr(${str.trim()}, 1, ${n.trim()})`;
-    },
-  );
+  while (i < working.length) {
+    const skipped = skipSqlLiteral(working, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    if (!isIdentChar(working[i]) || (i > 0 && isIdentChar(working[i - 1]))) {
+      i++;
+      continue;
+    }
 
-  // ── right(str, n) → substr(str, -n, n) ──
-  working = working.replace(
-    /\bright\s*\(\s*([^,]+)\s*,\s*([^)]+)\s*\)/gi,
-    (_match: string, str: string, n: string) => {
-      rewritten = true;
-      return `substr(${str.trim()}, -${n.trim()}, ${n.trim()})`;
-    },
-  );
+    const m = matchStringFunc(working, i);
+    if (m === null) {
+      i++;
+      continue;
+    }
+    if (!(m.fn in REWRITABLE_FUNCTIONS)) {
+      // Not a rewritable function — advance past the whole call.
+      const close = findMatchingParen(working, m.openParen);
+      i = close === -1 ? i + 1 : close + 1;
+      continue;
+    }
+
+    const close = findMatchingParen(working, m.openParen);
+    if (close === -1) {
+      // Unbalanced call — leave untouched and keep scanning past the paren.
+      i = m.openParen + 1;
+      continue;
+    }
+    const args = splitTopLevelArgs(working, m.openParen, close);
+    if (args.length !== REWRITABLE_ARG_COUNT[m.fn]) {
+      // Wrong arity — leave the call verbatim.
+      i = close + 1;
+      continue;
+    }
+
+    const replacement = REWRITABLE_FUNCTIONS[m.fn](args);
+    // Replace from the function name (preserving any schema qualifier).
+    working = working.slice(0, m.nameStart) + replacement + working.slice(close + 1);
+    rewritten = true;
+    i = m.nameStart + replacement.length;
+  }
 
   if (rewritten) {
     logger.debug({ before: sql, after: working }, 'String functions rewritten');
@@ -348,6 +488,12 @@ export function rewriteStringFunc(sql: string): string {
 
   return working;
 }
+
+/** Expected argument count for each rewritable string function. */
+const REWRITABLE_ARG_COUNT: Record<string, number> = {
+  left: 2,
+  right: 2,
+};
 
 // ── Custom SQLite function registration ─────────────────────────
 
