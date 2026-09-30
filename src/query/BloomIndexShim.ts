@@ -46,6 +46,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('BloomIndexShim');
 
@@ -406,35 +407,92 @@ export interface BloomIndexResult {
 }
 
 // ──────────────────────────────────────────────
-//  Constants — Regex patterns
+//  Scanner primitives
 // ──────────────────────────────────────────────
 
 /**
- * Regex that detects `USING bloom` in a `CREATE INDEX` context.
- *
- * Matches:
- *   - `CREATE INDEX ... USING bloom`
- *   - `CREATE UNIQUE INDEX ... USING bloom`
- *   - `CREATE INDEX IF NOT EXISTS ... USING bloom`
- *
- * The pattern ensures `USING` is followed by `bloom` as a whole word,
- * and that the overall statement is a `CREATE INDEX` statement.
- * Case-insensitive matching allows `USING BLOOM` / `using bloom` etc.
- *
- * Does NOT match:
- *   - `USING bloom` outside CREATE INDEX (e.g., in a string literal)
- *   - `USING my_bloom_function` (different identifier)
- *   - `USING bloo` (partial match)
+ * Whether `ch` is a word character (`[A-Za-z0-9_]`) or `$`, i.e. part of an
+ * identifier. Used to enforce whole-word boundaries without a stateful regex.
  */
-// eslint-disable-next-line require-unicode-regexp
-const CREATE_INDEX_USING_BLOOM = /\bCREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bUSING\s+bloom\b/gi;
+function isIdentChar(ch: string): boolean {
+  return /[A-Za-z0-9_$]/.test(ch);
+}
 
 /**
- * Regex that captures the `USING bloom` token (case-insensitive) for
- * replacement. Used by `rewriteBloomIndex` to substitute the access method.
+ * Whether `keyword` (length `kw`) starts at `sql[i]` and is followed by a
+ * non-identifier character (whole-word end). The leading boundary is checked
+ * by the caller via the scan loop.
  */
-// eslint-disable-next-line require-unicode-regexp
-const USING_BLOOM = /\b(USING)\s+bloom\b/gi;
+function isWordKeywordEnd(sql: string, i: number, kw: string): boolean {
+  const end = i + kw.length;
+  return (
+    sql.slice(i, end).toUpperCase() === kw &&
+    (end >= sql.length || !isIdentChar(sql[end]))
+  );
+}
+
+/**
+ * Find the next occurrence of `USING <method>` inside a `CREATE INDEX`
+ * statement, skipping string literals, quoted identifiers, and comments.
+ *
+ * Returns the index of the start of the `USING` keyword plus the access
+ * method name (verbatim case preserved), or `null` when no Bloom access
+ * method is found. Because a single statement can legally contain at most one
+ * `USING` clause, the first match is sufficient.
+ */
+function findBloomMethod(sql: string): { usingIdx: number; method: string } | null {
+  const len = sql.length;
+  let i = 0;
+
+  // Locate the CREATE INDEX statement head first (case-insensitive, whole-word).
+  while (i < len) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    if (sql[i].toUpperCase() === 'C' && /^CREATE\b/i.test(sql.slice(i))) {
+      // Advance past CREATE, then scan forward for INDEX ... USING.
+      break;
+    }
+    i++;
+  }
+  if (i >= len) return null;
+
+  // From the CREATE keyword, scan for `INDEX` then `USING <method>`.
+  let j = i;
+  while (j < len) {
+    const skipped = skipSqlLiteral(sql, j);
+    if (skipped !== -1) {
+      j = skipped;
+      continue;
+    }
+    const upper = sql[j].toUpperCase();
+
+    if (upper === 'U' && isWordKeywordEnd(sql, j, 'USING')) {
+      // Advance past USING (whitespace) to read the method identifier.
+      let m = j + 'USING'.length;
+      while (m < len && /\s/.test(sql[m])) m++;
+      const identMatch = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(sql.slice(m));
+      if (identMatch === null) return null;
+      return { usingIdx: j, method: identMatch[0] };
+    }
+
+    j++;
+  }
+
+  return null;
+}
+
+/**
+ * Whether the SQL contains a `CREATE INDEX` access-method clause using the
+ * `bloom` method. Literal/comment-aware.
+ */
+function hasBloomMethod(sql: string): boolean {
+  const found = findBloomMethod(sql);
+  return found !== null && found.method.toUpperCase() === 'BLOOM';
+}
 
 // ──────────────────────────────────────────────
 //  Public API
@@ -463,7 +521,7 @@ export function detectBloomIndex(sql: string): boolean {
     return false;
   }
 
-  return CREATE_INDEX_USING_BLOOM.test(sql);
+  return hasBloomMethod(sql);
 }
 
 /**
@@ -512,7 +570,8 @@ export function rewriteBloomIndex(sql: string): BloomIndexResult {
 
   // ── Step 1: Does this statement contain a Bloom index? ──────────
 
-  if (!detectBloomIndex(trimmed)) {
+  const found = findBloomMethod(trimmed);
+  if (found === null || found.method.toUpperCase() !== 'BLOOM') {
     return {
       sql: trimmed,
       rewritten: false,
@@ -520,10 +579,14 @@ export function rewriteBloomIndex(sql: string): BloomIndexResult {
   }
 
   // ── Step 2: Replace `USING bloom` → `USING btree` ──────────────
+  //
+  // Preserve the original casing of the `USING` keyword and swap only the
+  // method token. `using bloom` → `using btree`, `USING BLOOM` → `USING btree`.
 
-  // The replacement preserves the original casing of the `USING` keyword.
-  // `USING bloom` → `USING btree`, `using bloom` → `using btree`.
-  const result = trimmed.replace(USING_BLOOM, '$1 btree');
+  let m = found.usingIdx + 'USING'.length;
+  while (m < trimmed.length && /\s/.test(trimmed[m])) m++;
+  const result =
+    trimmed.slice(0, m) + 'btree' + trimmed.slice(m + found.method.length);
 
   logger.warn(
     { original: trimmed, rewritten: result },
