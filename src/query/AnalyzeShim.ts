@@ -36,6 +36,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('AnalyzeShim');
 
@@ -68,50 +69,12 @@ export interface AnalyzeResult {
   rewritten: boolean;
 }
 
-// ── Constants — Regex patterns ───────────────────────────────────
+// ── Constants — Matching primitives ─────────────────────────────
 
 /**
  * Matches SQL statements that start with ANALYZE (case-insensitive).
  */
 const ANALYZE_START_PATTERN = /^\s*ANALYZE\b/i;
-
-/**
- * Matches the VERBOSE keyword as a whole word (case-insensitive).
- */
-const VERBOSE_PATTERN = /\bVERBOSE\b/i;
-
-/**
- * Matches a parenthesized column list at the end of an ANALYZE statement.
- *
- * The column list must appear:
- * - After optional whitespace following the table name (or directly after ANALYZE)
- * - At the end of the statement (before optional semicolon)
- *
- * Examples matched:
- *   ANALYZE (col1, col2)
- *   ANALYZE table_name (col1, col2)
- *   ANALYZE VERBOSE (col1, col2)
- *   ANALYZE VERBOSE table_name (col1, col2)
- *
- * We use negative lookbehind to avoid matching anything other than
- * the column list suffix. Since ANALYZE has no other parenthesized
- * sub-expressions, a simple non-greedy group is sufficient.
- */
-const COL_LIST_END_PATTERN = /\s*\([^)]*\)\s*$/;
-
-/**
- * Matches VERBOSE followed by optional whitespace — used for removal.
- */
-const VERBOSE_WITH_TRAILING = /\bVERBOSE\s+/i;
-
-/**
- * Matches any PG-specific ANALYZE pattern (has VERBOSE or column list).
- *
- * This is used by detectPgAnalyze() to distinguish PG-extended syntax
- * from SQLite-compatible bare ANALYZE / ANALYZE table_name.
- */
-const PG_ANALYZE_PATTERN =
-  /^\s*ANALYZE\s+(?:VERBOSE(?:\s+[a-zA-Z_][a-zA-Z0-9_.]*)?\s*\([^)]*\)|VERBOSE\b|\s*\([^)]*\)|[a-zA-Z_][a-zA-Z0-9_.]*\s*\([^)]*\))/i;
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -137,28 +100,167 @@ const PG_ANALYZE_PATTERN =
  * ```
  */
 export function detectPgAnalyze(sql: string): boolean {
+  const parsed = parseAnalyzeStatement(sql);
+  return parsed !== null && parsed.pgSpecific;
+}
+
+/**
+ * Parse an ANALYZE statement into its structural parts.
+ *
+ * Grammar (PostgreSQL):
+ *   ANALYZE [ ( option [, ...] ) ]
+ *   ANALYZE [ VERBOSE ] [ table_name [ ( column [, ...] ) ] ]
+ *
+ * For SQLite compatibility we only care about the VERBOSE keyword and the
+ * `table_name (column, ...)` column-list suffix; those require rewriting.
+ * Returns `null` when the input is not an ANALYZE statement at all.
+ */
+interface AnalyzeParse {
+  /** True when VERBOSE or a trailing column list is present (needs rewrite). */
+  pgSpecific: boolean;
+  /** The table name (unquoted or verbatim quoted identifier), if any. */
+  tableName: string | undefined;
+  /** True when VERBOSE was found. */
+  hasVerbose: boolean;
+  /** True when a trailing `(column, ...)` list was found. */
+  hasColList: boolean;
+  /** Index past the `ANALYZE` keyword (start of the body). */
+  bodyStart: number;
+}
+
+function parseAnalyzeStatement(sql: string): AnalyzeParse | null {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
-    return false;
+    return null;
   }
-
   const trimmed = sql.trim();
-
-  // Must start with ANALYZE
   if (!ANALYZE_START_PATTERN.test(trimmed)) {
-    return false;
+    return null;
   }
 
-  // Quick check: has VERBOSE keyword?
-  if (VERBOSE_PATTERN.test(trimmed)) {
-    return true;
+  // Advance past leading whitespace + the ANALYZE keyword.
+  let i = 0;
+  while (i < trimmed.length && /\s/.test(trimmed[i])) i++;
+  if (/^ANALYZE/i.exec(trimmed.slice(i)) === null) {
+    return null;
+  }
+  i += 'ANALYZE'.length;
+
+  let hasVerbose = false;
+  let tableName: string | undefined;
+  let hasColList = false;
+
+  // Scan the body tokens outside literals.
+  const len = trimmed.length;
+  for (;;) {
+    // Skip whitespace.
+    while (i < len && /\s/.test(trimmed[i])) i++;
+    if (i >= len) break;
+
+    const ch = trimmed[i];
+    if (ch === ';') {
+      // Trailing semicolon terminates the body.
+      i++;
+      break;
+    }
+
+    // Quoted identifier (table name) — must be handled BEFORE skipSqlLiteral,
+    // which would otherwise swallow the double-quoted identifier as a literal.
+    if (ch === '"') {
+      const close = findQuotedIdentifierEnd(trimmed, i);
+      if (close === -1) {
+        // Unterminated — bail.
+        i = len;
+        break;
+      }
+      tableName = trimmed.slice(i, close);
+      i = close;
+      continue;
+    }
+
+    // Skip comments / string literals that may appear in the body.
+    const skipped = skipSqlLiteral(trimmed, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    // VERBOSE keyword (case-insensitive, whole word).
+    if (/^VERBOSE\b/i.exec(trimmed.slice(i)) !== null && isWordBoundaryEnd(trimmed, i + 'VERBOSE'.length)) {
+      hasVerbose = true;
+      i += 'VERBOSE'.length;
+      continue;
+    }
+
+    // Parenthesized column list (or option list right after ANALYZE).
+    if (ch === '(') {
+      const close = matchingParen(trimmed, i);
+      if (close === -1) {
+        i = len;
+        break;
+      }
+      hasColList = true;
+      i = close;
+      continue;
+    }
+
+    // Bare identifier (table name). Stop at non-identifier characters.
+    const identMatch = /^[A-Za-z_][A-Za-z0-9_$]*/.exec(trimmed.slice(i));
+    if (identMatch !== null) {
+      // Only treat a bare word as a table name when we haven't seen one yet.
+      if (tableName === undefined) {
+        tableName = identMatch[0];
+      }
+      i += identMatch[0].length;
+      continue;
+    }
+
+    // Any other unexpected character — stop parsing the body.
+    i++;
   }
 
-  // Check for column list pattern (PG-specific ANALYZE)
-  if (PG_ANALYZE_PATTERN.test(trimmed)) {
-    return true;
-  }
+  const pgSpecific = hasVerbose || hasColList;
+  return { pgSpecific, tableName, hasVerbose, hasColList, bodyStart: i };
+}
 
-  return false;
+/** Whether position `at` is a valid word boundary after a keyword ending. */
+function isWordBoundaryEnd(sql: string, at: number): boolean {
+  return at >= sql.length || !/[A-Za-z0-9_$]/.test(sql[at]);
+}
+
+/** Index just past the closing double-quote of a quoted identifier (V.. V""). */
+function findQuotedIdentifierEnd(sql: string, open: number): number {
+  let i = open + 1;
+  while (i < sql.length) {
+    if (sql[i] === '"') {
+      if (i + 1 < sql.length && sql[i + 1] === '"') {
+        i += 2;
+        continue;
+      }
+      return i + 1;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/** Index just past the matching `)` for the `(` at `open`, ignoring nesting. */
+function matchingParen(sql: string, open: number): number {
+  let depth = 1;
+  let i = open + 1;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    if (sql[i] === '(') depth++;
+    else if (sql[i] === ')') {
+      depth--;
+      if (depth === 0) return i + 1;
+    }
+    i++;
+  }
+  return -1;
 }
 
 /**
@@ -198,66 +300,43 @@ export function rewriteAnalyze(sql: string): AnalyzeResult {
     return { sql: sql ?? '', rewritten: false };
   }
 
-  let trimmed = sql.trim();
+  const trimmed = sql.trim();
 
-  // Not an ANALYZE statement — pass through unchanged
+  // Not an ANALYZE statement — pass through unchanged.
   if (!ANALYZE_START_PATTERN.test(trimmed)) {
     return { sql: trimmed, rewritten: false };
   }
 
-  let rewritten = false;
-
-  // ── Step 1: Remove VERBOSE keyword ──────────────────────────
-  if (VERBOSE_PATTERN.test(trimmed)) {
-    trimmed = trimmed.replace(VERBOSE_WITH_TRAILING, '');
-    // Handle the edge case where VERBOSE is at end with no trailing space
-    trimmed = trimmed.replace(/\s*VERBOSE\s*$/i, '');
-    rewritten = true;
-    trimmed = trimmed.trim();
+  const parsed = parseAnalyzeStatement(sql);
+  if (parsed === null || !parsed.pgSpecific) {
+    // Bare ANALYZE / ANALYZE table_name — pass through unchanged.
+    return { sql: trimmed, rewritten: false };
   }
 
-  // ── Step 2: Remove parenthesized column list at end ─────────
-  const withoutSemicolon = trimmed.replace(/;\s*$/, '').trim();
-  if (COL_LIST_END_PATTERN.test(withoutSemicolon)) {
-    // Only strip col list if it's part of the ANALYZE statement,
-    // not a completely different parenthesized expression.
-    // We check if the part before the col list is valid.
-    const beforeColList = withoutSemicolon.replace(COL_LIST_END_PATTERN, '').trim();
-
-    // Verify this still looks like a valid ANALYZE prefix
-    if (
-      beforeColList.length > 0 &&
-      /^(?:ANALYZE|ANALYZE\s+[a-zA-Z_][a-zA-Z0-9_.]*)$/i.test(beforeColList)
-    ) {
-      logger.debug(
-        { sql: trimmed, beforeColList },
-        'Removing column list from ANALYZE statement',
-      );
-      trimmed = beforeColList;
-      rewritten = true;
-    }
+  // Build the SQLite-compatible form: `ANALYZE [table_name]`.
+  // VERBOSE and the trailing column list are dropped.
+  let out = 'ANALYZE';
+  if (parsed.tableName !== undefined) {
+    out += ` ${parsed.tableName}`;
   }
 
-  // ── Step 3: Ensure proper semicolon termination ─────────────
-  trimmed = trimmed.trim();
+  // Preserve a trailing semicolon when the input had one.
+  const hadSemicolon = /;\s*$/.test(trimmed);
+  if (hadSemicolon) {
+    out += ';';
+  }
 
-  // ── Step 4: Notify autovacuum hook ─────────────────────────
-
+  // Notify the autovacuum hook (only for genuinely rewritten statements).
   if (analyzeMutationHook) {
-    // Extract table name from the ANALYZE statement (after the ANALYZE keyword)
-    const tableNameMatch = trimmed.match(/^\s*ANALYZE\s+(?:VERBOSE\s+)?([a-zA-Z_][a-zA-Z0-9_.]*)/i);
-    const extractedTable = tableNameMatch?.[1] || undefined;
-    analyzeMutationHook(extractedTable);
+    analyzeMutationHook(parsed.tableName);
   }
 
-  if (rewritten) {
-    logger.debug(
-      { original: sql, rewritten: trimmed },
-      'Rewrote PG ANALYZE to SQLite-compatible form',
-    );
-  }
+  logger.debug(
+    { original: sql, rewritten: out },
+    'Rewrote PG ANALYZE to SQLite-compatible form',
+  );
 
-  return { sql: trimmed, rewritten };
+  return { sql: out, rewritten: true };
 }
 
 // ── Internal helpers (exported for testing) ─────────────────────
