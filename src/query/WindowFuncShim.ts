@@ -26,6 +26,7 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('WindowFuncShim');
 
@@ -38,7 +39,86 @@ export interface WindowFuncResult {
   rewritten: boolean;
 }
 
-// ── Constants – Regex patterns ───────────────────────────────────
+// ── Literal-aware scanner helpers ────────────────────────────────
+
+/** Whether `ch` is a word character that may continue an identifier. */
+function isIdentChar(ch: string): boolean {
+  return /[A-Za-z0-9_$]/.test(ch);
+}
+
+/**
+ * Whether the identifier `keyword` ends at index `end` in `sql`, i.e. it is
+ * not immediately followed by another identifier character.
+ */
+function wordEnds(sql: string, end: number): boolean {
+  return end >= sql.length || !isIdentChar(sql[end]);
+}
+
+/**
+ * Whether `sql.slice(i)` begins with `keyword` (case-insensitive) as a whole
+ * word, with the match ending before `endHint` characters. Used to verify that
+ * `GROUPS` is followed by a frame-boundary keyword, not an arbitrary identifier.
+ */
+function startsKeyword(sql: string, i: number, keyword: string): boolean {
+  const after = sql.slice(i, i + keyword.length);
+  if (after.toUpperCase() !== keyword.toUpperCase()) return false;
+  return wordEnds(sql, i + keyword.length);
+}
+
+/**
+ * Scan for the first occurrence of `keyword` (whole word, case-insensitive)
+ * outside of literals/comments. Returns its start index, or `-1`.
+ */
+function findKeyword(sql: string, keyword: string): number {
+  let i = 0;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    const ch = sql[i];
+    if (isIdentChar(ch) && (i === 0 || !isIdentChar(sql[i - 1]))) {
+      if (startsKeyword(sql, i, keyword)) return i;
+    }
+    i++;
+  }
+  return -1;
+}
+
+/**
+ * Whether a `GROUPS` keyword at `i` is used as a window frame unit. The
+ * PostgreSQL frame grammar after `GROUPS` is one of:
+ *   - `BETWEEN <start> AND <end>`
+ *   - `UNBOUNDED PRECEDING` / `UNBOUNDED FOLLOWING`
+ *   - `<expr> PRECEDING` / `<expr> FOLLOWING`  (e.g. `3 PRECEDING`)
+ *   - `CURRENT ROW`
+ */
+function isGroupsFrameUnit(sql: string, groupsIdx: number): boolean {
+  let j = groupsIdx + 'GROUPS'.length;
+  while (j < sql.length && /\s/.test(sql[j])) j++;
+  if (startsKeyword(sql, j, 'BETWEEN')) return true;
+  if (startsKeyword(sql, j, 'UNBOUNDED')) return true;
+  if (startsKeyword(sql, j, 'CURRENT')) return true;
+  // Otherwise we expect `<expr> PRECEDING/FOLLOWING`. Skip tokens until a
+  // PRECEDING/FOLLOWING keyword, stopping at a closing paren or clause end.
+  let k = j;
+  while (k < sql.length) {
+    if (sql[k] === ')' || sql[k] === ';') return false;
+    if (startsKeyword(sql, k, 'PRECEDING') || startsKeyword(sql, k, 'FOLLOWING')) {
+      return true;
+    }
+    const skipped = skipSqlLiteral(sql, k);
+    if (skipped !== -1) {
+      k = skipped;
+      continue;
+    }
+    k++;
+  }
+  return false;
+}
+
+// ── Constants – Regex patterns (keyword tokens) ──────────────────
 
 /**
  * Detects GROUPS used as a window frame unit within an OVER clause.
@@ -125,20 +205,24 @@ export function detectWindowExt(sql: string): boolean {
 
   const trimmed = sql.trim();
 
-  // Check for GROUPS as a window frame unit (word boundary scoped)
-  if (GROUPS_AS_FRAME_UNIT.test(trimmed)) {
-    // Verify it's in a window frame context, not a table/column name coincidence
-    if (GROUPS_FRAME_CONTEXT.test(trimmed)) {
-      return true;
-    }
-    // Edge case: standalone GROUPS could appear as table name; we need frame context
-    // to confirm it's a window mode keyword.
-    // GROUPS_FRAME_CONTEXT already verifies it's followed by frame spec keywords.
+  // Check for GROUPS used as a window frame unit (outside literals/comments).
+  const groupsIdx = findKeyword(trimmed, 'GROUPS');
+  if (groupsIdx !== -1 && isGroupsFrameUnit(trimmed, groupsIdx)) {
+    return true;
   }
 
-  // Check for EXCLUDE clause
-  if (ANY_EXCLUDE.test(trimmed)) {
-    return true;
+  // Check for EXCLUDE clause (outside literals/comments).
+  const excludeIdx = findKeyword(trimmed, 'EXCLUDE');
+  if (excludeIdx !== -1) {
+    let j = excludeIdx + 'EXCLUDE'.length;
+    while (j < trimmed.length && /\s/.test(trimmed[j])) j++;
+    if (
+      startsKeyword(trimmed, j, 'CURRENT') ||
+      startsKeyword(trimmed, j, 'GROUP') ||
+      startsKeyword(trimmed, j, 'TIES')
+    ) {
+      return true;
+    }
   }
 
   return false;
@@ -221,38 +305,81 @@ export function rewriteWindowExt(sql: string): WindowFuncResult {
    */
   const GROUPS_SEMANTIC_WARNING = ' /* WARNING: GROUPS rewritten to ROWS. Peer-group semantics lost when ORDER BY has duplicate values. */';
 
-  if (GROUPS_FRAME_CONTEXT.test(working)) {
-    // Replace GROUPS with ROWS (case-insensitive, word-boundary scoped)
-    const beforeReplace = working;
-    working = working.replace(GROUPS_AS_FRAME_UNIT, 'ROWS');
+  // Replace every GROUPS frame-unit occurrence (outside literals/comments),
+  // scanning right-to-left so indices stay valid as we mutate `working`.
+  {
+    const groupsIdx = findKeyword(working, 'GROUPS');
+    if (groupsIdx !== -1 && isGroupsFrameUnit(working, groupsIdx)) {
+      const beforeReplace = working;
+      // Replace all GROUPS frame units.
+      let result = '';
+      let i = 0;
+      while (i < working.length) {
+        const skipped = skipSqlLiteral(working, i);
+        if (skipped !== -1) {
+          result += working.slice(i, skipped);
+          i = skipped;
+          continue;
+        }
+        if (isIdentChar(working[i]) && (i === 0 || !isIdentChar(working[i - 1])) && startsKeyword(working, i, 'GROUPS') && isGroupsFrameUnit(working, i)) {
+          result += 'ROWS';
+          i += 'GROUPS'.length;
+          continue;
+        }
+        result += working[i];
+        i++;
+      }
+      working = result;
 
-    if (working !== beforeReplace) {
-      rewritten = true;
-      logger.debug({ sql: beforeReplace, rewritten: working }, 'GROUPS → ROWS rewritten (frame unit)');
-      // Append semantic gap warning
-      working += GROUPS_SEMANTIC_WARNING;
+      if (working !== beforeReplace) {
+        rewritten = true;
+        logger.debug({ sql: beforeReplace, rewritten: working }, 'GROUPS → ROWS rewritten (frame unit)');
+        // Append semantic gap warning
+        working += GROUPS_SEMANTIC_WARNING;
+      }
     }
   }
 
   // ── Phase 2: Remove EXCLUDE clauses ──
-
-  if (ANY_EXCLUDE.test(working)) {
-    // Remove EXCLUDE CURRENT ROW
-    working = working.replace(EXCLUDE_CURRENT_ROW, '');
-    // Remove EXCLUDE GROUP
-    working = working.replace(EXCLUDE_GROUP, '');
-    // Remove EXCLUDE TIES
-    working = working.replace(EXCLUDE_TIES, '');
-
-    // Clean up: collapse multiple spaces and trim
-    const cleaned = working.replace(/\s{2,}/g, ' ').trim();
-
-    if (cleaned !== sql.trim()) {
-      rewritten = true;
-      logger.debug({ sql: sql.trim(), rewritten: cleaned }, 'EXCLUDE clause stripped');
+  {
+    const excludeIdx = findKeyword(working, 'EXCLUDE');
+    if (excludeIdx !== -1) {
+      let result = '';
+      let i = 0;
+      let removed = false;
+      while (i < working.length) {
+        const skipped = skipSqlLiteral(working, i);
+        if (skipped !== -1) {
+          result += working.slice(i, skipped);
+          i = skipped;
+          continue;
+        }
+        if (isIdentChar(working[i]) && (i === 0 || !isIdentChar(working[i - 1])) && startsKeyword(working, i, 'EXCLUDE')) {
+          // Parse the EXCLUDE clause: EXCLUDE (CURRENT ROW | GROUP | TIES | NO OTHERS).
+          let j = i + 'EXCLUDE'.length;
+          while (j < working.length && /\s/.test(working[j])) j++;
+          const clauseLen = matchExcludeClauseLen(working, j);
+          if (clauseLen > 0) {
+            // Strip the clause plus its preceding whitespace run.
+            let start = i;
+            while (start > 0 && /\s/.test(working[start - 1])) start--;
+            result = result.slice(0, result.length - (i - start)) + '';
+            i = j + clauseLen;
+            removed = true;
+            continue;
+          }
+        }
+        result += working[i];
+        i++;
+      }
+      // Collapse any double spaces left by removal.
+      const cleaned = result.replace(/\s{2,}/g, ' ').trim();
+      if (removed && cleaned !== sql.trim()) {
+        rewritten = true;
+        logger.debug({ sql: sql.trim(), rewritten: cleaned }, 'EXCLUDE clause stripped');
+      }
+      working = cleaned;
     }
-
-    working = cleaned;
   }
 
   return {
@@ -261,21 +388,72 @@ export function rewriteWindowExt(sql: string): WindowFuncResult {
   };
 }
 
+/**
+ * Return the length of an `EXCLUDE …` window clause starting at index `j`
+ * (which points just past `EXCLUDE` and any whitespace), or `0` if the token
+ * there is not a recognized exclusion option.
+ */
+function matchExcludeClauseLen(sql: string, j: number): number {
+  if (startsKeyword(sql, j, 'CURRENT')) {
+    // EXCLUDE CURRENT ROW
+    let k = j + 'CURRENT'.length;
+    while (k < sql.length && /\s/.test(sql[k])) k++;
+    if (startsKeyword(sql, k, 'ROW')) {
+      return k + 'ROW'.length - (j - 0);
+    }
+    return 0;
+  }
+  if (startsKeyword(sql, j, 'GROUP')) {
+    return 'GROUP'.length;
+  }
+  if (startsKeyword(sql, j, 'TIES')) {
+    return 'TIES'.length;
+  }
+  if (startsKeyword(sql, j, 'NO')) {
+    // EXCLUDE NO OTHERS — also not SQLite-compatible, strip it.
+    let k = j + 'NO'.length;
+    while (k < sql.length && /\s/.test(sql[k])) k++;
+    if (startsKeyword(sql, k, 'OTHERS')) {
+      return k + 'OTHERS'.length - j;
+    }
+    return 0;
+  }
+  return 0;
+}
+
 // ══════════════════════════════════════════════════════════════
 //  DENSE_RANK() simulation (Gap 9)
 // ══════════════════════════════════════════════════════════════
 
 /**
- * Detect DENSE_RANK() in SQL.
- *
- * PostgreSQL's DENSE_RANK() is a window function that assigns a rank to each row
- * within a partition, with no gaps in the ranking sequence.
- * SQLite 3.25+ does not support DENSE_RANK() directly.
+ * Detect DENSE_RANK() followed by an OVER clause, outside of literals/comments.
  */
-const DENSE_RANK_RE = /\bDENSE_RANK\s*\(\s*\)/i;
-
 export function detectDenseRank(sql: string): boolean {
-  return DENSE_RANK_RE.test(sql);
+  if (typeof sql !== 'string' || sql.trim().length === 0) return false;
+  return findDenseRankCall(sql) !== null;
+}
+
+/**
+ * Locate the first `DENSE_RANK()` call (the function name, outside literals and
+ * comments). Returns the index of the `DENSE_RANK` token or `null`.
+ */
+function findDenseRankCall(sql: string): number | null {
+  let i = 0;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    if (isIdentChar(sql[i]) && (i === 0 || !isIdentChar(sql[i - 1])) && startsKeyword(sql, i, 'DENSE_RANK')) {
+      // Require an opening parenthesis after optional whitespace.
+      let j = i + 'DENSE_RANK'.length;
+      while (j < sql.length && /\s/.test(sql[j])) j++;
+      if (j < sql.length && sql[j] === '(') return i;
+    }
+    i++;
+  }
+  return null;
 }
 
 /**
@@ -285,9 +463,12 @@ export function detectDenseRank(sql: string): boolean {
  *   DENSE_RANK() OVER (ORDER BY col)
  *   → (SELECT COUNT(DISTINCT t2.col) FROM t AS t2 WHERE t2.col <= t.col)
  *
- * Complex cases → ROW_NUMBER() as fallback
+ * Complex cases (PARTITION BY, multiple ORDER BY columns) → ROW_NUMBER() fallback
  */
 export function rewriteDenseRank(sql: string): WindowFuncResult {
+  if (typeof sql !== 'string' || sql.trim().length === 0) {
+    return { sql: sql ?? '', rewritten: false };
+  }
   if (!detectDenseRank(sql)) {
     return { sql, rewritten: false };
   }
@@ -295,11 +476,11 @@ export function rewriteDenseRank(sql: string): WindowFuncResult {
   let working = sql;
   let rewritten = false;
 
-  // Extract the OVER clause to find table/column references
+  // Extract the OVER clause to find table/column references (simple single-column case).
   const overMatch = /DENSE_RANK\s*\(\s*\)\s*OVER\s*\(\s*ORDER\s+BY\s+(\w+(?:\s+ASC|\s+DESC)?)\s*\)/i.exec(working);
   if (!overMatch) {
-    // Fallback: convert to ROW_NUMBER (poor approximation but valid SQLite)
-    working = working.replace(DENSE_RANK_RE, 'ROW_NUMBER()');
+    // Fallback: convert only the literal-aware DENSE_RANK token to ROW_NUMBER.
+    working = replaceFirstDenseRank(working, 'ROW_NUMBER()');
     rewritten = true;
     return { sql: working, rewritten };
   }
@@ -311,7 +492,7 @@ export function rewriteDenseRank(sql: string): WindowFuncResult {
   // Find the table reference in the FROM clause
   const fromMatch = /FROM\s+(\w+)/i.exec(working);
   if (!fromMatch) {
-    working = working.replace(DENSE_RANK_RE, 'ROW_NUMBER()');
+    working = replaceFirstDenseRank(working, 'ROW_NUMBER()');
     rewritten = true;
     return { sql: working, rewritten };
   }
@@ -325,4 +506,20 @@ export function rewriteDenseRank(sql: string): WindowFuncResult {
   rewritten = true;
 
   return { sql: working, rewritten };
+}
+
+/**
+ * Replace the first literal-aware `DENSE_RANK()` token with `replacement`.
+ */
+function replaceFirstDenseRank(sql: string, replacement: string): string {
+  const idx = findDenseRankCall(sql);
+  if (idx === null) return sql;
+  // Find the end of the empty argument list: `DENSE_RANK ( )`.
+  let j = idx + 'DENSE_RANK'.length;
+  while (j < sql.length && /\s/.test(sql[j])) j++;
+  if (j >= sql.length || sql[j] !== '(') return sql;
+  let p = j + 1;
+  while (p < sql.length && /\s/.test(sql[p])) p++;
+  if (p >= sql.length || sql[p] !== ')') return sql;
+  return sql.slice(0, idx) + replacement + sql.slice(p + 1);
 }
