@@ -22,6 +22,8 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
+import { protectSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ViewShim');
 
@@ -64,8 +66,18 @@ export interface SimpleViewInfo {
  *   2 — Optional column list, e.g. (col1, col2) (with leading space if present)
  *   3 — Query body (everything after AS)
  */
-const OR_REPLACE_VIEW_RE =
-  /^\s*CREATE\s+OR\s+REPLACE\s+VIEW\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_$.]*)\s*(\([^)]*\))?\s+AS\s+(.*)$/is;
+// A single PostgreSQL identifier: either a bare `ident` or a quoted `"ident"`
+// (with `""` as the escape). Quoted identifiers may contain spaces and other
+// characters that the bare form cannot (BUG #441).
+const IDENT_PART = '(?:[A-Za-z_][A-Za-z0-9_$]*|"(?:[^"]|"")*")';
+// A (optionally schema-qualified) name: `a`, `s.t`, `"my schema"."my view"`,
+// or the mixed form `s."my view"`.
+const IDENT_RE = `${IDENT_PART}(?:\\.${IDENT_PART})*`;
+
+const OR_REPLACE_VIEW_RE = new RegExp(
+  `^\\s*CREATE\\s+OR\\s+REPLACE\\s+VIEW\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${IDENT_RE})\\s*(\\([^)]*\\))?\\s+AS\\s+(.*)$`,
+  'is',
+);
 
 /**
  * Matches: CREATE RECURSIVE VIEW name [(cols)] AS query
@@ -75,8 +87,10 @@ const OR_REPLACE_VIEW_RE =
  *   2 — Optional column list, e.g. (col1, col2) (with leading space if present, empty if absent)
  *   3 — Query body (everything after AS)
  */
-const RECURSIVE_VIEW_RE =
-  /^\s*CREATE\s+RECURSIVE\s+VIEW\s+([A-Za-z_][A-Za-z0-9_$.]*)\s*(\([^)]*\))?\s+AS\s+(.*)$/is;
+const RECURSIVE_VIEW_RE = new RegExp(
+  `^\\s*CREATE\\s+RECURSIVE\\s+VIEW\\s+(${IDENT_RE})\\s*(\\([^)]*\\))?\\s+AS\\s+(.*)$`,
+  'is',
+);
 
 /**
  * Matches any CREATE VIEW statement and captures CHECK OPTION if present.
@@ -89,8 +103,10 @@ const RECURSIVE_VIEW_RE =
  *   5 — Query body (up to optional CHECK OPTION)
  *   6 — CASCADED or LOCAL (within CHECK OPTION, if present)
  */
-const CHECK_OPTION_RE =
-  /^\s*CREATE\s+(OR\s+REPLACE\s+)?(RECURSIVE\s+)?(?:TEMP\s+|TEMPORARY\s+)?VIEW\s+([A-Za-z_][A-Za-z0-9_$.]*)\s*(\([^)]*\))?\s+AS\s+(.+?)(?:\s+WITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION)?\s*;?\s*$/is;
+const CHECK_OPTION_RE = new RegExp(
+  `^\\s*CREATE\\s+(OR\\s+REPLACE\\s+)?(RECURSIVE\\s+)?(?:TEMP\\s+|TEMPORARY\\s+)?VIEW\\s+(${IDENT_RE})\\s*(\\([^)]*\\))?\\s+AS\\s+(.+?)(?:\\s+WITH\\s+(?:(CASCADED|LOCAL)\\s+)?CHECK\\s+OPTION)?\\s*;?\\s*$`,
+  'is',
+);
 
 /**
  * Strips the WITH CHECK OPTION suffix from a CREATE VIEW SQL string.
@@ -103,8 +119,10 @@ const STRIP_CHECK_OPTION_RE =
  * Enhanced regex that captures query body without CHECK OPTION.
  * Used to extract the clean query body from a CREATE VIEW that may have CHECK OPTION.
  */
-const VIEW_WITH_CHECK_RE =
-  /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:RECURSIVE\s+)?(?:TEMP\s+|TEMPORARY\s+)?VIEW\s+([A-Za-z_][A-Za-z0-9_$.]*)\s*(\([^)]*\))?\s+AS\s+(.+?)(?:\s+WITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION)?\s*;?\s*$/is;
+const VIEW_WITH_CHECK_RE = new RegExp(
+  `^\\s*CREATE\\s+(?:OR\\s+REPLACE\\s+)?(?:RECURSIVE\\s+)?(?:TEMP\\s+|TEMPORARY\\s+)?VIEW\\s+(${IDENT_RE})\\s*(\\([^)]*\\))?\\s+AS\\s+(.+?)(?:\\s+WITH\\s+(?:(CASCADED|LOCAL)\\s+)?CHECK\\s+OPTION)?\\s*;?\\s*$`,
+  'is',
+);
 
 // ── SQL Keywords (for WHERE clause NEW. prefixing) ────────────────
 
@@ -156,37 +174,63 @@ export function expandViewInSql(
 
   const trimmed = sql.trim();
 
-  // Only expand in SELECT statements
+  // Only expand in SELECT statements. (DDL such as CREATE/DROP/ALTER cannot
+  // start with SELECT, so no separate DDL guard is needed here.)
   if (!/^\s*SELECT\b/i.test(trimmed)) {
     return trimmed;
   }
 
-  // Skip DDL statements
-  if (/^\s*(CREATE|DROP|ALTER)\b/i.test(trimmed)) {
+  // Expand bare table/view references after `FROM` / `JOIN` using a
+  // literal-aware scan so that `FROM`/`JOIN` inside string literals or
+  // comments are never rewritten (BUG #438). We walk the string only on real
+  // SQL tokens (outside literals/comments) and replace `FROM <name>` and
+  // `JOIN <name>` where `<name>` is a registered view.
+  const parts: string[] = [];
+  let cursor = 0;
+
+  // Build a combined scanner over the SQL: find the next FROM/JOIN keyword
+  // that is outside a literal, then read the following identifier.
+  let i = 0;
+  while (i < trimmed.length) {
+    const skipped = skipSqlLiteral(trimmed, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    // Match a keyword at (or just after leading whitespace from) position i.
+    const rest = trimmed.slice(i);
+    const kwMatch = rest.match(/^\s*(FROM|JOIN)\b/i);
+    if (kwMatch) {
+      const kw = kwMatch[1].toUpperCase();
+      // Position of the first char after the keyword (and any leading
+      // whitespace). Skip trailing whitespace to reach the table name.
+      const afterKw = i + kwMatch[0].length;
+      const wsMatch = trimmed.slice(afterKw).match(/^\s+/);
+      const nameStart = afterKw + (wsMatch ? wsMatch[0].length : 0);
+      const nameMatch = trimmed.slice(nameStart).match(/^[A-Za-z_][A-Za-z0-9_$.]*/);
+      if (nameMatch) {
+        const tableName = nameMatch[0];
+        const viewDef = getViewDefinition(tableName);
+        if (viewDef) {
+          // Preserve everything up to (and including) the `FROM `/`JOIN `
+          // keyword, then replace the bare name with the expanded subquery.
+          parts.push(trimmed.slice(cursor, nameStart));
+          parts.push(`(${viewDef}) AS ${tableName}`);
+          cursor = nameStart + tableName.length;
+          i = cursor;
+          continue;
+        }
+      }
+    }
+
+    i++;
+  }
+  if (parts.length === 0) {
     return trimmed;
   }
-
-  let result = trimmed;
-
-  // 1. Expand view references in FROM clauses
-  result = result.replace(VIEW_FROM_RE, (match, tableName: string) => {
-    const viewDef = getViewDefinition(tableName);
-    if (viewDef) {
-      return `FROM (${viewDef}) AS ${tableName}`;
-    }
-    return match;
-  });
-
-  // 2. Expand view references in JOIN clauses
-  result = result.replace(VIEW_JOIN_RE, (match, tableName: string) => {
-    const viewDef = getViewDefinition(tableName);
-    if (viewDef) {
-      return `JOIN (${viewDef}) AS ${tableName}`;
-    }
-    return match;
-  });
-
-  return result;
+  parts.push(trimmed.slice(cursor));
+  return parts.join('');
 }
 
 const SQL_KEYWORDS = new Set([
@@ -199,6 +243,12 @@ const SQL_KEYWORDS = new Set([
   'REFERENCES', 'CONSTRAINT', 'CHECK', 'INDEX', 'UNION', 'INTERSECT', 'EXCEPT',
   'INNER', 'LEFT', 'RIGHT', 'OUTER', 'CROSS', 'NATURAL', 'JOIN', 'ON',
   'COUNT', 'SUM', 'AVG', 'MIN', 'MAX',
+  // Type names (used in CAST ... AS <type> and column definitions); these must
+  // never be prefixed with NEW. (BUG #439).
+  'INT', 'INTEGER', 'BIGINT', 'SMALLINT', 'TINYINT', 'TEXT', 'VARCHAR',
+  'CHAR', 'CHARACTER', 'NCHAR', 'NVARCHAR', 'REAL', 'DOUBLE', 'FLOAT',
+  'BLOB', 'NUMERIC', 'DECIMAL', 'BOOLEAN', 'BOOL', 'DATE', 'DATETIME',
+  'TIMESTAMP', 'TIME', 'UUID', 'JSON', 'JSONB', 'BYTEA', 'SERIAL', 'NONE',
   'BEFORE', 'AFTER', 'INSTEAD', 'OF', 'FOR', 'EACH', 'ROW', 'STATEMENT',
   'WHEN', 'THEN', 'ELSE', 'BEGIN', 'COMMIT', 'ROLLBACK', 'ABORT', 'FAIL',
   'IGNORE', 'REPLACE', 'ROLLBACK', 'RAISE',
@@ -228,10 +278,12 @@ export function detectCheckOption(sql: string): CheckOptionInfo {
     return result;
   }
 
-  // Group 2 has the query body *including* CHECK OPTION if present.
-  // But group 5 is the query body (without CHECK OPTION suffix), and
-  // we check the trailing group (WITH CHECK OPTION).
-  const hasCheckOption = /\s+WITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*;?\s*$/i.test(sql.trim());
+  // The CHECK OPTION suffix must be detected on the *protected* SQL so that
+  // the literal `WITH CHECK OPTION` text inside a string or a `-- ...` comment
+  // is not mistaken for a real clause (BUG #440).
+  const hasCheckOption = /\s+WITH\s+(?:(CASCADED|LOCAL)\s+)?CHECK\s+OPTION\s*;?\s*$/i.test(
+    protectSQL(sql.trim()).protectedSql,
+  );
 
   return {
     hasCheckOption,
@@ -250,7 +302,10 @@ export function detectCheckOption(sql: string): CheckOptionInfo {
  * @returns `true` if the view is simple enough for CHECK OPTION triggers.
  */
 export function isSimpleView(queryBody: string): boolean {
-  const upper = queryBody.trim().toUpperCase();
+  // Protect string literals and comments first so that keywords appearing
+  // inside them (e.g. `-- JOIN u` or `x = 'GROUP BY'`) are not mistaken for
+  // real structural clauses (BUG #442).
+  const upper = protectSQL(queryBody).protectedSql.trim().toUpperCase();
 
   // Must start with SELECT
   if (!/^\s*SELECT\s/i.test(upper)) {
@@ -380,10 +435,16 @@ export function prefixWhereWithNew(condition: string): string {
     }
 
     // Check for plain identifier
-    const idMatch = condition.slice(i).match(/^([A-Za-z_]\w*)\b/);
+    const idMatch = condition.slice(i).match(/^([A-Za-z_]\w*)/);
     if (idMatch) {
       const word = idMatch[1];
-      if (SQL_KEYWORDS.has(word.toUpperCase())) {
+      // Peek ahead: an identifier immediately followed by `(` is a function
+      // *call* name (e.g. `upper`, `trim`, `coalesce`), not a column reference,
+      // so it must not be prefixed. This prevents producing illegal SQL like
+      // `NEW.upper(NEW.x)` (BUG #437/#439).
+      const after = condition.slice(i + word.length);
+      const isFunctionCall = /^\s*\(/.test(after);
+      if (SQL_KEYWORDS.has(word.toUpperCase()) || isFunctionCall) {
         result.push(word);
       } else {
         result.push(`NEW.${word}`);
