@@ -19,6 +19,8 @@
 
 // ── 接口 ──
 
+import { skipSqlLiteral } from './SqlLiteralScanner';
+
 export interface ProtectedSQL {
   /** 保护后的 SQL（字面量已被替换为占位符） */
   protectedSql: string;
@@ -85,30 +87,32 @@ function scanLiteralRanges(sql: string): Array<{
     type: 'string' | 'identifier' | 'single-line-comment' | 'multi-line-comment';
   }> = [];
 
-  // 正则匹配顺序：
-  // 1. 单引号字符串 '...'（支持 '' 转义）
-  // 2. 双引号标识符 "..."（支持 "" 转义）
-  // 3. 单行注释 -- ... \n
-  // 4. 多行注释 /* ... */
-  const re = /'(?:[^']*(?:''[^']*)*)'|"(?:[^"]*(?:""[^"]*)*)"|--[^\n]*|\/\*[\s\S]*?\*\//g;
-  let m: RegExpExecArray | null;
-
-  while ((m = re.exec(sql)) !== null) {
-    const raw = m[0];
-    const start = m.index;
-    const end = start + raw.length;
-
-    if (raw.startsWith("'")) {
-      matches.push({ start, end, raw, type: 'string' });
-    } else if (raw.startsWith('"')) {
-      matches.push({ start, end, raw, type: 'identifier' });
-    } else if (raw.startsWith('--')) {
-      matches.push({ start, end, raw, type: 'single-line-comment' });
-    } else {
-      // The scanner regex only yields four token kinds; anything reaching here
-      // must be a multi-line comment (`/* ... *​/`).
-      matches.push({ start, end, raw, type: 'multi-line-comment' });
+  // Scan with the shared literal-aware scanner so this protection layer covers
+  // exactly the same constructs as `skipSqlLiteral` (including dollar-quoted
+  // strings, backtick identifiers, and E'' backslash escapes). Without this the
+  // layer would silently leave `$tag$ ... $tag$` and `\`...\`` unprotected.
+  let i = 0;
+  const len = sql.length;
+  while (i < len) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped === -1) {
+      i++;
+      continue;
     }
+
+    const start = i;
+    const end = skipped;
+    const raw = sql.slice(start, end);
+    const c = raw[0];
+
+    let type: 'string' | 'identifier' | 'single-line-comment' | 'multi-line-comment';
+    if (c === "'" || c === '$') type = 'string';
+    else if (c === '"' || c === '`') type = 'identifier';
+    else if (c === '-' && raw[1] === '-') type = 'single-line-comment';
+    else type = 'multi-line-comment'; // `/* ... */`
+
+    matches.push({ start, end, raw, type });
+    i = end;
   }
 
   return matches;

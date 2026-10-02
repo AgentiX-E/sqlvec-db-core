@@ -66,6 +66,10 @@ export function skipSqlLiteral(sql: string, pos: number): number {
   if (c === '"') {
     let j = pos + 1;
     while (j < len) {
+      if (sql[j] === '\\' && j + 1 < len) {
+        j += 2; // backslash-escaped char (e.g. \" inside a quoted identifier)
+        continue;
+      }
       if (sql[j] === '"') {
         if (sql[j + 1] === '"') { j += 2; continue; } // doubled "" escape
         return j + 1;

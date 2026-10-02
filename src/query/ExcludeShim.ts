@@ -27,6 +27,8 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ExcludeShim');
 
@@ -57,32 +59,6 @@ const EXCLUDE_GROUP_RE = /\s+EXCLUDE\s+GROUP\b/i;
 const EXCLUDE_TIES_RE = /\s+EXCLUDE\s+TIES\b/i;
 
 /**
- * Matches an OVER clause containing EXCLUDE CURRENT ROW.
- * Captures: (1) content before EXCLUDE, (2) EXCLUDE spec.
- *
- * The content before EXCLUDE is the frame spec (ROWS/RANGE ...).
- */
-const EXCLUDE_OVER_CLAUSE_RE =
-  /OVER\s*\(\s*((?:[^()]|\([^()]*\))*?)\s+EXCLUDE\s+(CURRENT\s+ROW|GROUP|TIES)\s*\)/i;
-
-/**
- * Matches an aggregate window function with OVER clause.
- * Captures: (1) agg function, (2) argument, (3) full OVER clause content.
- */
-const AGG_WINDOW_FN_RE =
-  /\b(SUM|AVG|COUNT)\s*\(\s*([^()]+)\s*\)\s*(OVER\s*\([^()]*\))/i;
-
-/**
- * Matches a window function with EXCLUDE in a SELECT list,
- * including the function, arg, frame, and an EXCLUDE spec.
- *
- * Captures: (1) function, (2) arg, (3) over content (no EXCLUDE),
- * (4) EXCLUDE spec (CURRENT ROW, GROUP, or TIES).
- */
-const EXCLUDE_FN_SELECT_RE =
-  /\b(SUM|AVG|COUNT|MIN|MAX)\s*\(\s*([^()]+)\s*\)\s*OVER\s*\(\s*((?:[^()]|\([^()]*\))*?)\s+EXCLUDE\s+(CURRENT\s+ROW|GROUP|TIES)\s*\)/gi;
-
-/**
  * Simple SELECT pattern: SELECT ... FROM ... [trailing clauses].
  */
 const SELECT_FROM_RE =
@@ -104,7 +80,10 @@ const SELECT_FROM_RE =
  */
 export function detectExclude(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) return false;
-  return ANY_EXCLUDE.test(sql.trim());
+  // Mask string literals and comments so `EXCLUDE` inside them is not matched
+  // (BUG #431/#432).
+  const { protectedSql } = protectSQL(sql);
+  return ANY_EXCLUDE.test(protectedSql);
 }
 
 /**
@@ -137,23 +116,27 @@ export function rewriteExclude(sql: string): ExcludeShimResult {
     return { sql, rewritten: false };
   }
 
-  const trimmed = sql.trim();
+  // Mask literals/comments so regexes never rewrite their contents (BUG #431/#432).
+  const protectedSql = protectSQL(sql);
+
+  const trimmed = protectedSql.protectedSql.trim();
 
   // EXCLUDE NO OTHERS is the default behavior — just strip it
   if (/\bEXCLUDE\s+NO\s+OTHERS\b/i.test(trimmed)) {
     const result = trimmed.replace(EXCLUDE_NO_OTHERS_RE, '');
-    return { sql: result, rewritten: true };
+    return { sql: restoreSQL({ ...protectedSql, protectedSql: result }), rewritten: true };
   }
 
   // Check if we can do EXCLUDE CURRENT ROW with arithmetic adjustment
   if (/\bEXCLUDE\s+CURRENT\s+ROW\b/i.test(trimmed)) {
     const arithmeticResult = rewriteExcludeCurrentRow(trimmed);
     if (arithmeticResult.rewritten) {
+      const out = restoreSQL({ ...protectedSql, protectedSql: arithmeticResult.sql });
       logger.debug(
-        { original: trimmed, rewritten: arithmeticResult.sql },
+        { original: sql, rewritten: out },
         'EXCLUDE CURRENT ROW rewritten with arithmetic adjustment',
       );
-      return arithmeticResult;
+      return { sql: out, rewritten: true };
     }
   }
 
@@ -163,11 +146,12 @@ export function rewriteExclude(sql: string): ExcludeShimResult {
   if (/\bEXCLUDE\s+(GROUP|TIES)\b/i.test(trimmed) && isSimpleSelect(trimmed)) {
     const cteResult = rewriteExcludeGroupTies(trimmed);
     if (cteResult.rewritten) {
+      const out = restoreSQL({ ...protectedSql, protectedSql: cteResult.sql });
       logger.debug(
-        { original: trimmed, rewritten: cteResult.sql, type: 'EXCLUDE GROUP/TIES' },
+        { original: sql, rewritten: out, type: 'EXCLUDE GROUP/TIES' },
         'EXCLUDE GROUP/TIES rewritten with CTE',
       );
-      return cteResult;
+      return { sql: out, rewritten: true };
     }
   }
 
@@ -181,8 +165,9 @@ export function rewriteExclude(sql: string): ExcludeShimResult {
     .replace(/\s{2,}/g, ' ');
 
   working += EXCLUDE_FALLBACK_WARNING;
-  logger.debug({ original: trimmed, rewritten: working }, 'EXCLUDE clause stripped (fallback)');
-  return { sql: working, rewritten: true };
+  const out = restoreSQL({ ...protectedSql, protectedSql: working });
+  logger.debug({ original: sql, rewritten: out }, 'EXCLUDE clause stripped (fallback)');
+  return { sql: out, rewritten: true };
 }
 
 // ── Internal: simple select check ────────────────────────────────
@@ -191,10 +176,29 @@ function isSimpleSelect(sql: string): boolean {
   return /^\s*SELECT\b/i.test(sql.trim());
 }
 
-// ── Internal: escape regex ───────────────────────────────────────
+// ── Internal: literal-aware parenthesis matcher ──────────────────
 
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * Return the index of the `)` that balances the `(` at `openParen`, or -1.
+ * Skips string literals, quoted identifiers, dollar-quoted strings, and
+ * comments so parens inside them never corrupt depth tracking.
+ */
+function findMatchingParen(sql: string, openParen: number): number {
+  let depth = 0;
+  for (let i = openParen; i < sql.length; i++) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped - 1;
+      continue;
+    }
+    const ch = sql[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
 }
 
 // ── Internal: EXCLUDE CURRENT ROW (arithmetic) ───────────────────
@@ -206,64 +210,113 @@ function escapeRegex(str: string): string {
  * Only applies to SUM, AVG, COUNT on ROWS/RANGE frames (not GROUPS).
  */
 function rewriteExcludeCurrentRow(sql: string): ExcludeShimResult {
-  // Check for simple aggregate functions with EXCLUDE CURRENT ROW on ROWS/RANGE
-  // (not GROUPS — those need the CTE approach)
-  const EXCLUDE_SIMPLE_RE =
-    /\b(SUM|AVG|COUNT)\s*\(\s*([^()]+)\s*\)\s*OVER\s*\(\s*((?:[^()]|\([^()]*\))*?)\s+EXCLUDE\s+CURRENT\s+ROW\s*\)/gi;
-
-  EXCLUDE_SIMPLE_RE.lastIndex = 0;
-
+  // Scan for SUM/AVG/COUNT(...) OVER (... EXCLUDE CURRENT ROW ...) using a
+  // literal-aware, balanced-paren approach. This handles nested arguments like
+  // SUM(f(a,b)) that a `[^()]+` regex cannot (BUG #433).
   let working = sql;
   let found = false;
-  let match: RegExpExecArray | null;
 
-  while ((match = EXCLUDE_SIMPLE_RE.exec(working)) !== null) {
-    const fullMatch = match[0];
-    const aggFunc = match[1];
-    const aggArg = match[2].trim();
-    const overContent = match[3].trim();
-
-    // Do not apply arithmetic if the frame uses GROUPS (GROUPS shim handles it)
-    if (/\bGROUPS\b/i.test(overContent)) {
+  let i = 0;
+  while (i < working.length) {
+    const skipped = skipSqlLiteral(working, i);
+    if (skipped !== -1) {
+      i = skipped;
       continue;
     }
 
-    // Strip EXCLUDE from the OVER clause to get the clean frame
-    const cleanOverClause = `OVER (${overContent})`;
+    // Match an aggregate function name at a word boundary.
+    const fnMatch = /^(SUM|AVG|COUNT)\b/i.exec(working.slice(i));
+    if (!fnMatch) {
+      i++;
+      continue;
+    }
 
-    // Build the arithmetic expression
+    const aggFunc = fnMatch[1].toUpperCase();
+    let j = i + fnMatch[0].length;
+
+    // Skip whitespace then expect an opening paren.
+    while (j < working.length && /\s/.test(working[j])) j++;
+    if (working[j] !== '(') {
+      i++;
+      continue;
+    }
+
+    const argOpen = j;
+    const argClose = findMatchingParen(working, argOpen);
+    if (argClose === -1) {
+      i++;
+      continue;
+    }
+    const aggArg = working.slice(argOpen + 1, argClose).trim();
+
+    // After the argument, look for OVER (...).
+    let k = argClose + 1;
+    while (k < working.length && /\s/.test(working[k])) k++;
+    const overMatch = /^OVER\b/i.exec(working.slice(k));
+    if (!overMatch) {
+      i = argClose + 1;
+      continue;
+    }
+    k += overMatch[0].length;
+    while (k < working.length && /\s/.test(working[k])) k++;
+    if (working[k] !== '(') {
+      i = argClose + 1;
+      continue;
+    }
+
+    const overOpen = k;
+    const overClose = findMatchingParen(working, overOpen);
+    if (overClose === -1) {
+      i = argClose + 1;
+      continue;
+    }
+    const overContent = working.slice(overOpen + 1, overClose).trim();
+
+    // Ensure the OVER clause actually contains EXCLUDE CURRENT ROW.
+    if (!/\bEXCLUDE\s+CURRENT\s+ROW\b/i.test(overContent)) {
+      i = overClose + 1;
+      continue;
+    }
+
+    // Do not apply arithmetic if the frame uses GROUPS (GROUPS shim handles it).
+    if (/\bGROUPS\b/i.test(overContent)) {
+      i = overClose + 1;
+      continue;
+    }
+
+    // Strip EXCLUDE CURRENT ROW from the OVER clause.
+    const cleanOver = overContent
+      .replace(/\bEXCLUDE\s+CURRENT\s+ROW\b/i, '')
+      .trim();
+    const cleanOverClause = `OVER (${cleanOver})`;
+
     let replacement: string;
-    switch (aggFunc.toUpperCase()) {
-      case 'SUM': {
-        // COALESCE(SUM(x) OVER (...), 0) - COALESCE(x, 0)
-        replacement = `COALESCE(${aggFunc}(${aggArg}) ${cleanOverClause}, 0) - COALESCE(${aggArg}, 0)`;
+    switch (aggFunc) {
+      case 'SUM':
+        replacement = `COALESCE(SUM(${aggArg}) ${cleanOverClause}, 0) - COALESCE(${aggArg}, 0)`;
         break;
-      }
-      case 'COUNT': {
+      case 'COUNT':
         if (aggArg === '*' || aggArg === '1') {
-          replacement = `${aggFunc}(${aggArg}) ${cleanOverClause} - 1`;
+          replacement = `COUNT(${aggArg}) ${cleanOverClause} - 1`;
         } else {
-          // COUNT(col) — NULLs not counted, need conditional
-          replacement = `${aggFunc}(${aggArg}) ${cleanOverClause} - CASE WHEN ${aggArg} IS NOT NULL THEN 1 ELSE 0 END`;
+          replacement = `COUNT(${aggArg}) ${cleanOverClause} - CASE WHEN ${aggArg} IS NOT NULL THEN 1 ELSE 0 END`;
         }
         break;
-      }
-      case 'AVG': {
-        // (SUM(x) - COALESCE(x, 0)) / (COUNT(*) - 1)
-        // Using COALESCE(SUM, 0) to handle NULL sum
+      case 'AVG':
         replacement =
           `CAST(COALESCE(SUM(${aggArg}) ${cleanOverClause}, 0) - COALESCE(${aggArg}, 0) AS REAL) / ` +
-          `CAST(${aggFunc}(${aggArg}) ${cleanOverClause} - 1 AS REAL)`;
+          `CAST(AVG(${aggArg}) ${cleanOverClause} - 1 AS REAL)`;
         break;
-      }
       default:
-        // Should not reach
+        i = overClose + 1;
         continue;
     }
 
-    const escaped = escapeRegex(fullMatch);
-    working = working.replace(new RegExp(escaped), replacement);
+    const fullLen = overClose + 1 - i;
+    working = working.slice(0, i) + replacement + working.slice(overClose + 1);
     found = true;
+    // Advance past the replacement to avoid re-scanning it.
+    i += replacement.length;
   }
 
   return { sql: working, rewritten: found };
@@ -296,46 +349,110 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
   // Extract trailing ORDER BY, LIMIT, OFFSET from the fromBody
   const { cteFrom, outerTail } = splitCteBody(fromBody);
 
-  // Detect the EXCLUDE type and extract OVER clause info
-  EXCLUDE_FN_SELECT_RE.lastIndex = 0;
-
   let counter = 0;
   let workingSelect = selectClause;
   const cteDefs: string[] = [];
   const cteAliases: string[] = [];
   let found = false;
 
-  let fnMatch: RegExpExecArray | null;
-  while ((fnMatch = EXCLUDE_FN_SELECT_RE.exec(workingSelect)) !== null) {
-    const fullMatch = fnMatch[0];
-    const aggFunc = fnMatch[1];
-    const aggArg = fnMatch[2].trim();
-    const overContent = fnMatch[3].trim();
-    const excludeType = fnMatch[4].trim().toUpperCase(); // CURRENT ROW, GROUP, or TIES
+  // Scan the SELECT list for AGG(arg) OVER (... EXCLUDE GROUP|TIES ...) using a
+  // literal-aware balanced-paren approach so nested args like SUM(f(a,b)) work
+  // (BUG #435).
+  let i = 0;
+  while (i < workingSelect.length) {
+    const skipped = skipSqlLiteral(workingSelect, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
 
-    // EXCLUDE CURRENT ROW with CTE approach is handled by arithmetic path above
-    if (excludeType === 'CURRENT ROW') continue;
+    const fnMatch = /^(SUM|AVG|COUNT|MIN|MAX)\b/i.exec(workingSelect.slice(i));
+    if (!fnMatch) {
+      i++;
+      continue;
+    }
+
+    const aggFunc = fnMatch[1].toUpperCase();
+    let j = i + fnMatch[0].length;
+    while (j < workingSelect.length && /\s/.test(workingSelect[j])) j++;
+    if (workingSelect[j] !== '(') {
+      i++;
+      continue;
+    }
+
+    const argOpen = j;
+    const argClose = findMatchingParen(workingSelect, argOpen);
+    if (argClose === -1) {
+      i = argOpen + 1;
+      continue;
+    }
+    const aggArg = workingSelect.slice(argOpen + 1, argClose).trim();
+
+    // Expect OVER (...).
+    let k = argClose + 1;
+    while (k < workingSelect.length && /\s/.test(workingSelect[k])) k++;
+    const overMatch = /^OVER\b/i.exec(workingSelect.slice(k));
+    if (!overMatch) {
+      i = argClose + 1;
+      continue;
+    }
+    k += overMatch[0].length;
+    while (k < workingSelect.length && /\s/.test(workingSelect[k])) k++;
+    if (workingSelect[k] !== '(') {
+      i = argClose + 1;
+      continue;
+    }
+
+    const overOpen = k;
+    const overClose = findMatchingParen(workingSelect, overOpen);
+    if (overClose === -1) {
+      i = argClose + 1;
+      continue;
+    }
+    const overContent = workingSelect.slice(overOpen + 1, overClose).trim();
+
+    // Determine the EXCLUDE type present in the OVER clause.
+    const excludeMatch = /\bEXCLUDE\s+(CURRENT\s+ROW|GROUP|TIES)\b/i.exec(overContent);
+    if (!excludeMatch) {
+      i = overClose + 1;
+      continue;
+    }
+    const excludeType = excludeMatch[1].trim().toUpperCase();
+
+    // EXCLUDE CURRENT ROW is handled by the arithmetic path.
+    if (excludeType === 'CURRENT ROW') {
+      i = overClose + 1;
+      continue;
+    }
 
     const cteAlias = `__exc_cte_${counter}`;
     const grpAlias = `__exc_grp_${counter}`;
-    cteAliases.push(cteAlias);
+
+    // Strip the EXCLUDE spec from the OVER content so ORDER BY / PARTITION BY
+    // extraction sees only the real frame spec (BUG #435 residual EXCLUDE).
+    // Use `\b` not `\s+` so EXCLUDE at the very start of the frame is matched.
+    const cleanOverContent = overContent.replace(/\bEXCLUDE\s+(GROUP|TIES)\b/i, '').trim();
 
     // Extract ORDER BY
-    const orderByMatch = overContent.match(/ORDER\s+BY\s+(.+)/i);
+    const orderByMatch = cleanOverContent.match(/ORDER\s+BY\s+(.+)/i);
     if (!orderByMatch) {
-      // No ORDER BY — all rows are in one peer group, simple to handle
-      // Just strip EXCLUDE and use the frame as-is
-      const cleanFn = fullMatch.replace(/\s+EXCLUDE\s+(GROUP|TIES)\b/i, '');
-      workingSelect = workingSelect.replace(new RegExp(escapeRegex(fullMatch)), cleanFn);
+      // No ORDER BY — all rows are in one peer group; strip EXCLUDE only.
+      const cleanFn =
+        `${aggFunc}(${aggArg}) OVER (${cleanOverContent})`;
+      workingSelect =
+        workingSelect.slice(0, i) + cleanFn + workingSelect.slice(overClose + 1);
       found = true;
       counter++;
+      i += cleanFn.length;
       continue;
     }
 
     const orderBy = orderByMatch[1].trim();
 
-    // Extract PARTITION BY
-    const partitionBy = extractPartitionBy(overContent);
+    // Extract PARTITION BY (from the cleaned content)
+    const partitionBy = extractPartitionBy(cleanOverContent);
+
+    cteAliases.push(cteAlias);
 
     // Build DENSE_RANK
     const drPartition = partitionBy ? `PARTITION BY ${partitionBy}` : '';
@@ -348,66 +465,79 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
     let whereExclude: string;
     switch (excludeType) {
       case 'GROUP':
-        // Exclude all peers (same group, but not current row)
-        whereExclude = `sub.${grpAlias} = ${cteAlias}.${grpAlias} AND sub.rowid <> ${cteAlias}.rowid`;
+        // EXCLUDE GROUP: exclude ALL peer rows (every row sharing the current
+        // row's ORDER BY group), including the current row itself. Only rows
+        // from other groups remain. (BUG #434 — previously kept other peers.)
+        whereExclude = `sub.${grpAlias} <> ${cteAlias}.${grpAlias}`;
         break;
       case 'TIES':
-        // Exclude peers except current row
-        whereExclude = `sub.${grpAlias} = ${cteAlias}.${grpAlias} AND sub.rowid = ${cteAlias}.rowid`;
+        // EXCLUDE TIES: exclude peers but KEEP the current row. Rows from other
+        // groups are kept, and the current row is kept. (BUG #434 — previously
+        // collapsed to the current row only.)
+        whereExclude = `sub.${grpAlias} <> ${cteAlias}.${grpAlias} OR sub.rowid = ${cteAlias}.rowid`;
         break;
       default:
+        i = overClose + 1;
         continue; // Should not reach
     }
 
     // Add PARTITION BY filter
     let partitionFilter = '';
     if (partitionBy) {
+      // `partitionBy` is non-empty here, so `split(',')` always yields at least
+      // one column; no separate length guard is needed.
       const pcols = partitionBy.split(',').map((c) => c.trim().replace(/["`]/g, ''));
-      if (pcols.length > 0) {
-        partitionFilter = pcols.map((c) => `sub.${c} = ${cteAlias}.${c}`).join(' AND ') + ' AND ';
-      }
+      partitionFilter = pcols.map((c) => `sub.${c} = ${cteAlias}.${c}`).join(' AND ') + ' AND ';
     }
 
     // Build the aggregate subquery for the full frame range (without EXCLUDE)
     let aggExpr: string;
-    switch (aggFunc.toUpperCase()) {
+    switch (aggFunc) {
       case 'SUM':
         aggExpr =
-          `(SELECT COALESCE(SUM(sub.${aggArg}), 0) FROM ${cteAlias} sub WHERE ${whereExclude})`;
+          `(SELECT COALESCE(SUM(sub.${aggArg}), 0) FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         break;
       case 'COUNT':
         if (aggArg === '*' || aggArg === '1') {
           aggExpr =
-            `(SELECT COUNT(*) FROM ${cteAlias} sub WHERE ${whereExclude})`;
+            `(SELECT COUNT(*) FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         } else {
           aggExpr =
-            `(SELECT COUNT(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${whereExclude})`;
+            `(SELECT COUNT(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         }
         break;
       case 'AVG':
         aggExpr =
-          `(SELECT CASE WHEN COUNT(sub.${aggArg}) = 0 THEN NULL ELSE CAST(COALESCE(SUM(sub.${aggArg}), 0) AS REAL) / CAST(COUNT(sub.${aggArg}) AS REAL) END FROM ${cteAlias} sub WHERE ${whereExclude})`;
+          `(SELECT CASE WHEN COUNT(sub.${aggArg}) = 0 THEN NULL ELSE CAST(COALESCE(SUM(sub.${aggArg}), 0) AS REAL) / CAST(COUNT(sub.${aggArg}) AS REAL) END FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         break;
       case 'MIN':
         aggExpr =
-          `(SELECT MIN(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${whereExclude})`;
+          `(SELECT MIN(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         break;
       case 'MAX':
         aggExpr =
-          `(SELECT MAX(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${whereExclude})`;
+          `(SELECT MAX(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         break;
       default:
+        i = overClose + 1;
         continue;
     }
 
-    const escaped = escapeRegex(fullMatch);
-    workingSelect = workingSelect.replace(new RegExp(escaped), aggExpr);
+    workingSelect =
+      workingSelect.slice(0, i) + aggExpr + workingSelect.slice(overClose + 1);
     found = true;
     counter++;
+    i += aggExpr.length;
   }
 
   if (!found) {
     return { sql, rewritten: false };
+  }
+
+  // When no CTE was actually built (every match lacked ORDER BY and was merely
+  // stripped), return the stripped SELECT clause directly.
+  if (cteAliases.length === 0) {
+    return { sql: `SELECT ${workingSelect} FROM ${cteFrom}` + (outerTail ? ` ${outerTail}` : ''), rewritten: true };
   }
 
   // Assemble final SQL
@@ -423,13 +553,6 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
 
 function extractPartitionBy(overContent: string): string {
   const m = overContent.match(/PARTITION\s+BY\s+(.+?)(?:\s+ORDER\s+BY\s+|$)/i);
-  return m ? m[1].trim() : '';
-}
-
-// ── Internal: ORDER BY extraction ────────────────────────────────
-
-function extractOrderBy(overContent: string): string {
-  const m = overContent.match(/ORDER\s+BY\s+(.*)/i);
   return m ? m[1].trim() : '';
 }
 
