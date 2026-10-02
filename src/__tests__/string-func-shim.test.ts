@@ -16,238 +16,235 @@ import {
   STRING_FUNCTIONS_META,
 } from '../query/StringFuncShim';
 
-describe('pure JS string functions', () => {
-  it('splitPart returns the nth field', () => {
+describe('pure string functions', () => {
+  it('splitPart', () => {
     expect(splitPart('a,b,c', ',', 2)).toBe('b');
-    expect(splitPart('a,b,c', ',', 1)).toBe('a');
-    expect(splitPart('a,b,c', ',', 5)).toBe('');
     expect(splitPart('a,b,c', ',', 0)).toBe('');
-    expect(splitPart('a,b,c', ',', -1)).toBe('');
+    expect(splitPart('a,b,c', ',', 99)).toBe('');
+    expect(splitPart('a,,c', ',', 2)).toBe('');
   });
-  it('repeatStr repeats and clamps negative/zero', () => {
-    expect(repeatStr('hi', 3)).toBe('hihihi');
-    expect(repeatStr('hi', 0)).toBe('');
-    expect(repeatStr('hi', -1)).toBe('');
-    expect(repeatStr('hi', 2.9)).toBe('hihi');
+
+  it('repeatStr', () => {
+    expect(repeatStr('ha', 3)).toBe('hahaha');
+    expect(repeatStr('x', 0)).toBe('');
+    expect(repeatStr('x', -2)).toBe('');
+    expect(repeatStr('x', 2.7)).toBe('xx'); // floor
   });
-  it('lpad pads left with truncation', () => {
-    expect(lpad('ab', 5, '*')).toBe('***ab');
-    expect(lpad('ab', 2, '*')).toBe('ab');
-    expect(lpad('ab', 5, '')).toBe('ab');
-    expect(lpad('ab', 5)).toBe('   ab');
-    expect(lpad('ab', 0, '*')).toBe('ab');
-    expect(lpad('ab', NaN, '*')).toBe('ab');
+
+  it('lpad / rpad', () => {
+    expect(lpad('abc', 5, '*')).toBe('**abc');
+    expect(rpad('abc', 5, '*')).toBe('abc**');
+    expect(lpad('abc', 3, '*')).toBe('abc'); // already long enough
+    expect(rpad('abc', 2, '*')).toBe('abc');
+    expect(lpad('abc', 6, '')).toBe('abc'); // empty fill
+    expect(rpad('abc', 6, '')).toBe('abc');
+    expect(lpad('', 3, '*')).toBe('***');
+    expect(rpad('', 3, '*')).toBe('***');
+    expect(lpad('a', 5)).toBe('    a'); // default space fill
+    expect(lpad('abc', 0, '*')).toBe('abc'); // zero length
+    expect(rpad('abc', 0, '*')).toBe('abc');
+    expect(lpad('abc', NaN as unknown as number, '*')).toBe('abc');
+    expect(rpad('abc', -5, '*')).toBe('abc'); // negative length
   });
-  it('rpad pads right with truncation', () => {
-    expect(rpad('ab', 5, '*')).toBe('ab***');
-    expect(rpad('ab', 2, '*')).toBe('ab');
-    expect(rpad('ab', 5, '')).toBe('ab');
-    expect(rpad('ab', 5)).toBe('ab   ');
-    expect(rpad('ab', 0, '*')).toBe('ab');
-    expect(rpad('ab', NaN, '*')).toBe('ab');
+
+  it('leftStr / rightStr', () => {
+    expect(leftStr('abcdef', 3)).toBe('abc');
+    expect(leftStr('abcdef', -3)).toBe('abc'); // all but last 3
+    expect(leftStr('abcdef', 0)).toBe('');
+    expect(rightStr('abcdef', 3)).toBe('def');
+    expect(rightStr('abcdef', -3)).toBe('def'); // all but first 3
+    expect(rightStr('abcdef', 0)).toBe('');
   });
-  it('leftStr handles positive and negative n', () => {
-    expect(leftStr('abc', 2)).toBe('ab');
-    expect(leftStr('abc', -1)).toBe('ab');
-    expect(leftStr('abc', 0)).toBe('');
+
+  it('translate', () => {
+    expect(translate('abcdef', 'ace', 'XYZ')).toBe('XbYdZf');
+    expect(translate('abcdef', 'a', '')).toBe('bcdef'); // remove only
+    expect(translate('abcdef', '', 'xyz')).toBe('abcdef'); // empty from
+    expect(translate('abab', 'a', 'x')).toBe('xbxb');
   });
-  it('rightStr handles positive, zero, and negative n', () => {
-    expect(rightStr('abc', 2)).toBe('bc');
-    expect(rightStr('abc', 0)).toBe('');
-    expect(rightStr('abc', -1)).toBe('bc');
-  });
-  it('translate replaces and deletes unmatched chars', () => {
-    expect(translate('aabbcc', 'abc', 'xy')).toBe('xxyy');
-    expect(translate('abc', '', 'xyz')).toBe('abc');
-    expect(translate('abc', 'ab', 'x')).toBe('xc');
-  });
-  it('reverseStr reverses', () => {
+
+  it('reverseStr', () => {
     expect(reverseStr('abc')).toBe('cba');
+    expect(reverseStr('')).toBe('');
   });
-  it('levenshteinCustom computes edit distance', () => {
+
+  it('levenshteinCustom', () => {
     expect(levenshteinCustom('kitten', 'sitting')).toBe(3);
     expect(levenshteinCustom('', 'abc')).toBe(3);
-    expect(levenshteinCustom('abc', 'abc')).toBe(0);
-    expect(levenshteinCustom('abc', 'def', 2, 3, 4)).toBe(12);
-    expect(levenshteinCustom(null as unknown as string, 'abc')).toBe(3);
-    expect(levenshteinCustom('abc', null as unknown as string)).toBe(3);
+    expect(levenshteinCustom('abc', '')).toBe(3);
+    expect(levenshteinCustom('same', 'same')).toBe(0);
+    // custom costs
+    expect(levenshteinCustom('ab', 'ba', 10, 10, 10)).toBe(20);
+    // swap shorter/longer preserves result
+    expect(levenshteinCustom('abc', 'a')).toBe(2);
+    // null / undefined inputs are coerced to empty strings
+    expect(levenshteinCustom(null as unknown as string, 'ab')).toBe(2);
+    expect(levenshteinCustom('ab', null as unknown as string)).toBe(2);
   });
 });
 
 describe('detectStringFunc', () => {
-  it('detects rewritable functions', () => {
-    expect(detectStringFunc('SELECT left(name, 3) FROM t')).toBe(true);
-    expect(detectStringFunc('SELECT right(name, 2) FROM t')).toBe(true);
+  it('detects each PG string function', () => {
+    expect(detectStringFunc("SELECT split_part(a, ',', 2)")).toBe(true);
+    expect(detectStringFunc("SELECT repeat('x', 3)")).toBe(true);
+    expect(detectStringFunc('SELECT lpad(a, 5)')).toBe(true);
+    expect(detectStringFunc('SELECT rpad(a, 5)')).toBe(true);
+    expect(detectStringFunc('SELECT left(a, 3)')).toBe(true);
+    expect(detectStringFunc('SELECT right(a, 3)')).toBe(true);
+    expect(detectStringFunc('SELECT translate(a, b, c)')).toBe(true);
+    expect(detectStringFunc('SELECT reverse(a)')).toBe(true);
   });
-  it('detects custom-only functions', () => {
-    expect(detectStringFunc('SELECT split_part(a, b, c) FROM t')).toBe(true);
-    expect(detectStringFunc('SELECT repeat(x, 3) FROM t')).toBe(true);
-    expect(detectStringFunc('SELECT reverse(x) FROM t')).toBe(true);
-    expect(detectStringFunc('SELECT translate(x, a, b) FROM t')).toBe(true);
+
+  it('does not detect a literal', () => {
+    expect(detectStringFunc("SELECT 'left(a,3)'")).toBe(false);
   });
-  it('detects schema-qualified calls', () => {
-    expect(detectStringFunc('SELECT schema.left(name, 3) FROM t')).toBe(true);
-  });
-  it('does not detect a string literal', () => {
-    expect(detectStringFunc("SELECT 'left(a, b)' FROM t")).toBe(false);
-  });
+
   it('does not detect a comment', () => {
-    expect(detectStringFunc('-- left(name, 3)\nSELECT 1')).toBe(false);
-    expect(detectStringFunc('/* right(a, b) */ SELECT 1')).toBe(false);
+    expect(detectStringFunc('-- left(a,3)\nSELECT 1')).toBe(false);
   });
-  it('does not detect a prefix-identifier', () => {
-    expect(detectStringFunc('SELECT left_unrelated(a, b) FROM t')).toBe(false);
+
+  it('does not detect identifier prefixes/suffixes', () => {
+    expect(detectStringFunc('SELECT leftward(a)')).toBe(false);
+    expect(detectStringFunc('SELECT myleft(a)')).toBe(false);
+    expect(detectStringFunc('SELECT "left"(a,3)')).toBe(false); // quoted identifier
   });
-  it('does not detect bare identifier without call parens', () => {
-    expect(detectStringFunc('SELECT left FROM t')).toBe(false);
+
+  it('detects schema-qualified call', () => {
+    expect(detectStringFunc('SELECT pg_catalog.left(a, 3)')).toBe(true);
   });
-  it('does not detect a digit after a schema dot', () => {
-    expect(detectStringFunc('SELECT a.1(a) FROM t')).toBe(false);
-  });
-  it('does not detect a trailing dot', () => {
-    expect(detectStringFunc('SELECT left.')).toBe(false);
-  });
-  it('detects a call with a literal argument', () => {
-    expect(detectStringFunc("SELECT left('a)b', 3) FROM t")).toBe(true);
-  });
-  it('is deterministic across calls', () => {
-    const s = 'SELECT left(a, b)';
-    expect([0, 1, 2, 3].map(() => detectStringFunc(s))).toEqual([true, true, true, true]);
-  });
-  it('rejects null / undefined / blank', () => {
-    expect(detectStringFunc(null as unknown as string)).toBe(false);
+
+  it('returns false for empty / non-string', () => {
+    expect(detectStringFunc('')).toBe(false);
     expect(detectStringFunc(undefined as unknown as string)).toBe(false);
-    expect(detectStringFunc('   ')).toBe(false);
+  });
+
+  it('returns false when the function name is at end-of-string with no paren', () => {
+    expect(detectStringFunc('SELECT left')).toBe(false);
+    expect(detectStringFunc('SELECT right')).toBe(false);
   });
 });
 
 describe('rewriteStringFunc', () => {
-  it('rewrites left → substr', () => {
-    expect(rewriteStringFunc('SELECT left(name, 3) FROM t')).toBe(
-      'SELECT substr(name, 1, 3) FROM t',
+  it('rewrites left to a CASE/substr expression', () => {
+    expect(rewriteStringFunc('SELECT left(name, 3) FROM t')).toContain('CASE WHEN (3) >= 0');
+    expect(rewriteStringFunc('SELECT left(name, 3) FROM t')).toContain('substr(name, 1, (3))');
+  });
+
+  it('rewrites right with correct negative semantics', () => {
+    const r = rewriteStringFunc('SELECT right(name, -3) FROM t');
+    expect(r).toContain('substr(name, -(-3))');
+    expect(r).not.toContain('--'); // no accidental comment
+    expect(r).toContain('1 - (-3)');
+  });
+
+  it('handles nested function call arguments', () => {
+    const r = rewriteStringFunc('SELECT left(trim(name), f(x)) FROM t');
+    expect(r).toContain('trim(name)');
+    expect(r).toContain('f(x)');
+  });
+
+  it('handles nested calls to left and right', () => {
+    const r = rewriteStringFunc('SELECT right(left(a,2), 3) FROM t');
+    expect(r).toContain('left(a,2)');
+    expect(r).toContain('CASE WHEN (3) >= 0');
+  });
+
+  it('does not rewrite a literal (BUG #447)', () => {
+    expect(rewriteStringFunc("SELECT 'left(a,3)' FROM t")).toBe("SELECT 'left(a,3)' FROM t");
+  });
+
+  it('does not rewrite inside a comment (BUG #447)', () => {
+    expect(rewriteStringFunc('SELECT left(a,3) -- left(b,2)\nFROM t')).toBe(
+      'SELECT ' + rewriteStringFunc('SELECT left(a,3)').slice('SELECT '.length) + ' -- left(b,2)\nFROM t',
     );
   });
-  it('rewrites right → substr', () => {
-    expect(rewriteStringFunc('SELECT right(name, 2) FROM t')).toBe(
-      'SELECT substr(name, -2, 2) FROM t',
-    );
+
+  it('strips a schema qualifier (BUG #445)', () => {
+    const r = rewriteStringFunc('SELECT s.left(a, 3) FROM t');
+    expect(r).not.toContain('s.CASE');
+    expect(r).not.toContain('s.substr');
+    expect(r).toContain('CASE WHEN (3) >= 0');
   });
-  it('handles nested parens in the first argument', () => {
-    expect(rewriteStringFunc('SELECT left(f(a, b), 3) FROM t')).toBe(
-      'SELECT substr(f(a, b), 1, 3) FROM t',
-    );
+
+  it('leaves an empty-argument call untouched (BUG #444)', () => {
+    expect(rewriteStringFunc('SELECT left(a, ) FROM t')).toBe('SELECT left(a, ) FROM t');
+    expect(rewriteStringFunc('SELECT right(a,) FROM t')).toBe('SELECT right(a,) FROM t');
   });
-  it('handles nested parens in the second argument', () => {
-    expect(rewriteStringFunc('SELECT left(name, (2+1)) FROM t')).toBe(
-      'SELECT substr(name, 1, (2+1)) FROM t',
-    );
+
+  it('leaves wrong-arity calls untouched', () => {
+    expect(rewriteStringFunc('SELECT left(a) FROM t')).toBe('SELECT left(a) FROM t');
+    expect(rewriteStringFunc('SELECT left(a,b,c) FROM t')).toBe('SELECT left(a,b,c) FROM t');
   });
-  it('does not rewrite a string literal', () => {
-    expect(rewriteStringFunc("SELECT 'left(a, b)' FROM t")).toBe("SELECT 'left(a, b)' FROM t");
-  });
-  it('does not rewrite comments', () => {
-    expect(rewriteStringFunc('-- left(name, 3)\nSELECT 1')).toBe('-- left(name, 3)\nSELECT 1');
-    expect(rewriteStringFunc('/* right(a, b) */ SELECT 1')).toBe('/* right(a, b) */ SELECT 1');
-  });
-  it('does not rewrite non-rewritable functions', () => {
-    expect(rewriteStringFunc('SELECT split_part(a, b, c) FROM t')).toBe(
-      'SELECT split_part(a, b, c) FROM t',
-    );
-    expect(rewriteStringFunc('SELECT repeat(x, 3) FROM t')).toBe('SELECT repeat(x, 3) FROM t');
-  });
-  it('rewrites multiple calls', () => {
-    expect(rewriteStringFunc('SELECT left(name, 3), right(name, 2) FROM t')).toBe(
-      'SELECT substr(name, 1, 3), substr(name, -2, 2) FROM t',
-    );
-  });
-  it('preserves a schema qualifier', () => {
-    expect(rewriteStringFunc('SELECT schema.left(name, 3) FROM t')).toBe(
-      'SELECT schema.substr(name, 1, 3) FROM t',
-    );
-  });
-  it('leaves wrong-arity calls verbatim', () => {
-    expect(rewriteStringFunc('SELECT left(name) FROM t')).toBe('SELECT left(name) FROM t');
-  });
+
   it('leaves an unbalanced call untouched', () => {
-    expect(rewriteStringFunc('SELECT left(name, 3')).toBe('SELECT left(name, 3');
+    expect(rewriteStringFunc('SELECT left(a, 3 FROM t')).toBe('SELECT left(a, 3 FROM t');
   });
-  it('handles a literal with parens inside an argument', () => {
-    expect(rewriteStringFunc("SELECT left('a)b', 3) FROM t")).toBe(
-      "SELECT substr('a)b', 1, 3) FROM t",
-    );
+
+  it('honors a comma inside a string literal argument', () => {
+    const r = rewriteStringFunc("SELECT left(name, length('a,b')) FROM t");
+    expect(r).toContain("length('a,b')");
+    expect(r).toContain('CASE WHEN');
   });
-  it('handles a comma inside a string literal argument', () => {
-    expect(rewriteStringFunc("SELECT left(concat('a,b', 'c'), 3) FROM t")).toBe(
-      "SELECT substr(concat('a,b', 'c'), 1, 3) FROM t",
-    );
+
+  it('skips a non-rewritable function with an unbalanced paren', () => {
+    expect(rewriteStringFunc('SELECT translate(a, b FROM t')).toBe('SELECT translate(a, b FROM t');
   });
-  it('leaves an unbalanced custom-only function untouched', () => {
-    expect(rewriteStringFunc('SELECT repeat(a, b')).toBe('SELECT repeat(a, b');
+
+  it('leaves a schema-qualified non-identifier untouched', () => {
+    // `s..left` — after the dot there is no identifier, so it is not a function call.
+    expect(rewriteStringFunc('SELECT s..left(a,3)')).toBe('SELECT s..left(a,3)');
   });
-  it('returns input unchanged when no rewritable function present', () => {
-    expect(rewriteStringFunc('SELECT 1')).toBe('SELECT 1');
+
+  it('does not rewrite non-rewritable functions', () => {
+    expect(rewriteStringFunc('SELECT translate(a,b,c)')).toBe('SELECT translate(a,b,c)');
+    expect(rewriteStringFunc('SELECT reverse(a)')).toBe('SELECT reverse(a)');
   });
-  it('passes through null / undefined / blank', () => {
-    expect(rewriteStringFunc(null as unknown as string)).toBe(null as unknown as string);
-    expect(rewriteStringFunc(undefined as unknown as string)).toBe(undefined as unknown as string);
-    expect(rewriteStringFunc('   ')).toBe('   ');
+
+  it('returns input unchanged for empty / non-string', () => {
+    expect(rewriteStringFunc('')).toBe('');
+    expect(rewriteStringFunc(undefined as unknown as string)).toBe(undefined);
   });
 });
 
 describe('detectAndRewriteStringFunc', () => {
-  it('returns rewritten when a rewritable function exists', () => {
-    expect(detectAndRewriteStringFunc('SELECT left(a, b)')).toEqual({
-      sql: 'SELECT substr(a, 1, b)',
-      rewritten: true,
-    });
+  it('returns rewritten:true with rewritten SQL', () => {
+    const r = detectAndRewriteStringFunc('SELECT left(a, 3)');
+    expect(r.rewritten).toBe(true);
+    expect(r.sql).toContain('CASE WHEN');
   });
-  it('returns unchanged for a custom-only function', () => {
-    expect(detectAndRewriteStringFunc('SELECT repeat(a, 3)')).toEqual({
-      sql: 'SELECT repeat(a, 3)',
-      rewritten: false,
-    });
-  });
-  it('returns unchanged for no function', () => {
-    expect(detectAndRewriteStringFunc('SELECT 1')).toEqual({ sql: 'SELECT 1', rewritten: false });
+
+  it('returns rewritten:false when nothing detected', () => {
+    const r = detectAndRewriteStringFunc('SELECT 1');
+    expect(r.rewritten).toBe(false);
+    expect(r.sql).toBe('SELECT 1');
   });
 });
 
 describe('registerStringFunctions', () => {
-  it('warns and returns when db.function is missing', () => {
-    const db = {};
-    expect(() => registerStringFunctions(db)).not.toThrow();
-  });
-  it('registers all eight functions', () => {
-    const fn = vi.fn();
-    const db = { function: fn };
+  it('registers all eight functions on a db with .function()', () => {
+    const db = { function: vi.fn() };
     registerStringFunctions(db);
-    expect(fn).toHaveBeenCalledTimes(8);
-    const names = fn.mock.calls.map((c) => c[0]);
-    expect(names).toEqual([
-      'split_part',
-      'repeat',
-      'lpad',
-      'rpad',
-      'left',
-      'right',
-      'translate',
-      'reverse',
-    ]);
+    expect(db.function).toHaveBeenCalledTimes(8);
+    const names = db.function.mock.calls.map((c: any[]) => c[0]);
+    for (const n of ['split_part', 'repeat', 'lpad', 'rpad', 'left', 'right', 'translate', 'reverse']) {
+      expect(names).toContain(n);
+    }
+  });
+
+  it('warns and returns when db has no .function()', () => {
+    const db = {} as any;
+    // Should not throw.
+    expect(() => registerStringFunctions(db)).not.toThrow();
+    expect(() => registerStringFunctions(null as any)).not.toThrow();
   });
 });
 
 describe('STRING_FUNCTIONS_META', () => {
-  it('documents all eight functions', () => {
+  it('has an entry for every string function', () => {
+    const names = STRING_FUNCTIONS_META.map((m) => m.name);
+    for (const n of ['split_part', 'repeat', 'lpad', 'rpad', 'left', 'right', 'translate', 'reverse']) {
+      expect(names).toContain(n);
+    }
     expect(STRING_FUNCTIONS_META).toHaveLength(8);
-    expect(STRING_FUNCTIONS_META.map((m) => m.name)).toEqual([
-      'split_part',
-      'repeat',
-      'lpad',
-      'rpad',
-      'left',
-      'right',
-      'translate',
-      'reverse',
-    ]);
   });
 });

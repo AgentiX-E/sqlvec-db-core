@@ -275,10 +275,25 @@ const STRING_FUNCTIONS = [
   'reverse',
 ];
 
-/** The two functions that are rewritten to SQLite-native `substr`. */
+/**
+ * The two functions that are rewritten to SQLite-native `substr`.
+ *
+ * PostgreSQL semantics for `n`:
+ *   - left(str, n):  n >= 0 → first n chars;  n < 0 → all but last |n| chars.
+ *   - right(str, n): n >= 0 → last n chars;   n < 0 → all but first |n| chars.
+ *
+ * `substr` itself has no left/right notion, so we express each with a CASE so
+ * that negative `n` (including a negative *expression*) never produces an
+ * accidental `--` comment or a wrong slice. `n` is wrapped in parentheses in
+ * every branch so an expression like `f(x)` or `-n` cannot break the syntax.
+ */
 const REWRITABLE_FUNCTIONS: Record<string, (args: string[]) => string> = {
-  left: (args) => `substr(${args[0]}, 1, ${args[1]})`,
-  right: (args) => `substr(${args[0]}, -${args[1]}, ${args[1]})`,
+  left: (args) =>
+    `CASE WHEN (${args[1]}) >= 0 THEN substr(${args[0]}, 1, (${args[1]})) ` +
+    `ELSE substr(${args[0]}, 1, length(${args[0]}) + (${args[1]})) END`,
+  right: (args) =>
+    `CASE WHEN (${args[1]}) >= 0 THEN substr(${args[0]}, -(${args[1]})) ` +
+    `ELSE substr(${args[0]}, 1 - (${args[1]})) END`,
 };
 
 /**
@@ -292,18 +307,20 @@ function isIdentChar(ch: string): boolean {
  * Determine the function name (lowercased) if `sql[i]` begins a (possibly
  * schema-qualified) call to one of the known string functions.
  *
- * Accepts `fn(` and `schema.fn(`. Returns the function name plus the index of
- * the opening parenthesis, or `null` when the token is not a known function.
+ * Accepts `fn(` and `schema.fn(`. Returns the function name, the index of the
+ * start of the *whole token* (including any schema qualifier, so it can be
+ * replaced cleanly), and the index of the opening parenthesis — or `null`
+ * when the token is not a known function.
  */
 function matchStringFunc(
   sql: string,
   i: number,
-): { fn: string; nameStart: number; openParen: number } | null {
+): { fn: string; tokenStart: number; nameStart: number; openParen: number } | null {
   // Skip a schema qualifier: `schema.fn(`.
-  let start = i;
+  const tokenStart = i;
   let j = i;
   while (j < sql.length && isIdentChar(sql[j])) j++;
-  let nameStart = start;
+  let nameStart = tokenStart;
   let nameEnd = j;
   if (j < sql.length && sql[j] === '.') {
     // A dotted qualifier — the real function name follows.
@@ -322,7 +339,7 @@ function matchStringFunc(
   while (p < sql.length && /\s/.test(sql[p])) p++;
   if (p >= sql.length || sql[p] !== '(') return null;
 
-  return { fn: name, nameStart, openParen: p };
+  return { fn: name, tokenStart, nameStart, openParen: p };
 }
 
 /**
@@ -393,7 +410,7 @@ export function detectStringFunc(sql: string): boolean {
  * Find the first (possibly schema-qualified) call to a known string function,
  * skipping literals and comments. Returns `{ fn, openParen }` or `null`.
  */
-function firstStringFuncCall(sql: string): { fn: string; nameStart: number; openParen: number } | null {
+function firstStringFuncCall(sql: string): { fn: string; tokenStart: number; nameStart: number; openParen: number } | null {
   let i = 0;
   while (i < sql.length) {
     const skipped = skipSqlLiteral(sql, i);
@@ -401,8 +418,11 @@ function firstStringFuncCall(sql: string): { fn: string; nameStart: number; open
       i = skipped;
       continue;
     }
-    // Only consider positions that begin an identifier.
-    if (isIdentChar(sql[i]) && (i === 0 || !isIdentChar(sql[i - 1]))) {
+    // Only consider positions that begin an identifier *and* are not the tail
+    // of a dotted expression (`schema.fn` or `t..fn`). A dotted qualifier is
+    // handled by `matchStringFunc` from the start of the whole token, so we
+    // skip the `fn` half when the preceding char is `.`.
+    if (isIdentChar(sql[i]) && (i === 0 || (!isIdentChar(sql[i - 1]) && sql[i - 1] !== '.'))) {
       const m = matchStringFunc(sql, i);
       if (m !== null) return m;
     }
@@ -445,7 +465,7 @@ export function rewriteStringFunc(sql: string): string {
       i = skipped;
       continue;
     }
-    if (!isIdentChar(working[i]) || (i > 0 && isIdentChar(working[i - 1]))) {
+    if (!isIdentChar(working[i]) || (i > 0 && (isIdentChar(working[i - 1]) || working[i - 1] === '.'))) {
       i++;
       continue;
     }
@@ -474,12 +494,18 @@ export function rewriteStringFunc(sql: string): string {
       i = close + 1;
       continue;
     }
+    if (args.some((a) => a.length === 0)) {
+      // An empty argument (e.g. `left(a, )`) is not a valid call — leave it.
+      i = close + 1;
+      continue;
+    }
 
     const replacement = REWRITABLE_FUNCTIONS[m.fn](args);
-    // Replace from the function name (preserving any schema qualifier).
-    working = working.slice(0, m.nameStart) + replacement + working.slice(close + 1);
+    // Replace from the start of the whole token (dropping any schema
+    // qualifier, since `substr`/`CASE` are native and need no qualifier).
+    working = working.slice(0, m.tokenStart) + replacement + working.slice(close + 1);
     rewritten = true;
-    i = m.nameStart + replacement.length;
+    i = m.tokenStart + replacement.length;
   }
 
   if (rewritten) {
