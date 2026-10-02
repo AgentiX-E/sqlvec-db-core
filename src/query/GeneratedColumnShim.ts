@@ -23,6 +23,8 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
+import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('GeneratedColumnShim');
 
@@ -85,7 +87,10 @@ const IDENTIFY_COLUMN_DEF_RE = /(\w+)\s+(\w+(?:\s*\([^)]*\))?)\s+GENERATED\s+(AL
 
 export function detectGeneratedColumn(sql: string): boolean {
   if (typeof sql !== 'string' || sql.trim().length === 0) return false;
-  return GENERATED_COLUMN_DETECT_RE.test(sql);
+  // Mask string literals / quoted identifiers / comments so a `GENERATED
+  // ALWAYS AS` token inside them is never reported (BUG #421).
+  const protectedSql = protectSQL(sql).protectedSql;
+  return GENERATED_COLUMN_DETECT_RE.test(protectedSql);
 }
 
 /**
@@ -112,7 +117,8 @@ export function rewriteGeneratedColumn(
   }
 
   const trimmed = sql.trim();
-  let rewritten = trimmed;
+  const protectedSql = protectSQL(trimmed);
+  let rewritten = protectedSql.protectedSql;
   const identityCols: IdentityColumnInfo[] = [];
 
   // Determine the table name from the SQL if not provided
@@ -171,7 +177,8 @@ export function rewriteGeneratedColumn(
     rewritten = rewritten.replace(GENERATED_BY_DEFAULT_IDENTITY_RE, ' ');
   }
 
-  // Clean up any double spaces from stripping
+  // Restore protected literals / comments, then clean up any double spaces.
+  rewritten = restoreSQL({ ...protectedSql, protectedSql: rewritten });
   rewritten = rewritten.replace(/\s{2,}/g, ' ').trim();
 
   const hasChanged = rewritten !== trimmed || identityCols.length > 0;
@@ -200,22 +207,72 @@ export function extractGeneratedDefs(sql: string): GeneratedColumnDef[] {
 
   const defs: GeneratedColumnDef[] = [];
 
-  // Match column definitions containing AS (expr) [STORED]
-  // Pattern: column_name TYPE AS (expr) [STORED]
-  const genColRe = /(\w+)\s+\w+(?:\([^)]*\))?\s+AS\s*\(([^)]+)\)\s*(STORED)?/gi;
-  let match: RegExpExecArray | null;
+  // Scan for `column TYPE AS (expr) [STORED]` clauses, extracting the parenthesised
+  // expression with balanced-paren awareness so nested function calls like
+  // `AS (upper(name))` are not truncated at the first closing paren (BUG #425).
+  let i = 0;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
 
-  while ((match = genColRe.exec(sql)) !== null) {
-    const name = match[1];
-    const expression = match[2].trim();
-    const stored = !!match[3];
+    // Expect: column-name TYPE AS (
+    const asMatch = /^(\w+)\s+\w+(?:\([^)]*\))?\s+AS\s*\(/i.exec(sql.slice(i));
+    if (!asMatch) {
+      i++;
+      continue;
+    }
+
+    const name = asMatch[1];
+    const openParen = i + asMatch[0].length - 1; // index of '('
+    const closeParen = findMatchingParen(sql, openParen);
+
+    if (closeParen === -1) {
+      // Unbalanced — stop scanning to avoid mis-parsing the rest.
+      break;
+    }
+
+    const expression = sql.slice(openParen + 1, closeParen).trim();
+
+    // Optional STORED keyword after the closing paren.
+    let after = closeParen + 1;
+    while (after < sql.length && /\s/.test(sql[after])) after++;
+    const stored = /^STORED\b/i.test(sql.slice(after));
 
     const dependencies = resolveDependencies(expression, []);
-
     defs.push({ name, expression, stored, dependencies });
+
+    i = closeParen + 1;
   }
 
   return defs;
+}
+
+/**
+ * Find the index of the closing parenthesis matching the opening paren at
+ * `openIdx`, skipping literals and quoted identifiers (which may contain
+ * unbalanced parens).
+ */
+function findMatchingParen(sql: string, openIdx: number): number {
+  let depth = 1;
+  let i = openIdx + 1;
+  while (i < sql.length) {
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+    const ch = sql[i];
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+    i++;
+  }
+  return -1;
 }
 
 /**
@@ -300,6 +357,30 @@ export function computeGeneratedValues(
 function evaluateExpression(expression: string, row: Record<string, any>): any {
   const trimmed = expression.trim();
 
+  // Strip a single wrapping pair of parentheses so `(a + b)` evaluates the same
+  // as `a + b` (BUG #429). Only strip when the outer parens enclose the entire
+  // expression, tracked by balanced depth.
+  if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
+    let depth = 0;
+    let wraps = true;
+    for (let i = 0; i < trimmed.length; i++) {
+      const ch = trimmed[i];
+      if (ch === '(') depth++;
+      else if (ch === ')') {
+        depth--;
+        // If depth returns to 0 before the final char, the outer pair does not
+        // enclose the whole expression (e.g. `(a) + (b)`).
+        if (depth === 0 && i < trimmed.length - 1) {
+          wraps = false;
+          break;
+        }
+      }
+    }
+    if (wraps && depth === 0) {
+      return evaluateExpression(trimmed.slice(1, -1), row);
+    }
+  }
+
   // Handle NULL literal
   if (/^\s*NULL\s*$/i.test(trimmed)) return null;
 
@@ -360,6 +441,8 @@ function evaluateExpression(expression: string, row: Record<string, any>): any {
     { op: '<=', fn: (a: any, b: any) => Number(a <= b) },
     { op: '<>', fn: (a: any, b: any) => Number(a !== b) },
     { op: '!=', fn: (a: any, b: any) => Number(a !== b) },
+    { op: '>', fn: (a: any, b: any) => Number(a > b) },
+    { op: '<', fn: (a: any, b: any) => Number(a < b) },
     { op: '=', fn: (a: any, b: any) => Number(a === b) },
     { op: '+', fn: (a: any, b: any) => Number(a) + Number(b) },
     { op: '-', fn: (a: any, b: any) => Number(a) - Number(b) },
@@ -369,11 +452,10 @@ function evaluateExpression(expression: string, row: Record<string, any>): any {
   ];
 
   for (const { op, fn } of binOps) {
-    const opRe = new RegExp(`^\\s*(.+?)\\s+${escapeRegex(op)}\\s+(.+?)\\s*$`, 'i');
-    const binMatch = trimmed.match(opRe);
+    const binMatch = splitTopLevelOperator(trimmed, op);
     if (binMatch) {
-      const left = evaluateExpression(binMatch[1].trim(), row);
-      const right = evaluateExpression(binMatch[3].trim(), row);
+      const left = evaluateExpression(binMatch.left, row);
+      const right = evaluateExpression(binMatch.right, row);
       return fn(left, right);
     }
   }
@@ -512,6 +594,69 @@ function splitArgs(args: string): string[] {
   return result;
 }
 
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * Split an expression on a binary operator that appears at parenthesis depth 0
+ * (i.e. is not nested inside a sub-expression or function argument). This fixes
+ * the operator-precedence bug where a regex `(.+?) op (.+?)` could match an
+ * operator *inside* parentheses, e.g. `2 * (3 + 4)` being split on the `+`.
+ *
+ * Operators are matched right-to-left at the top level so that `a - b - c`
+ * evaluates left-associatively as `(a - b) - c`.
+ *
+ * @param expr  The expression to split (already trimmed)
+ * @param op    The binary operator (e.g. `+`, `*`, `>=`, `AND`)
+ * @returns `{ left, right }` or `null` when `op` is absent at depth 0
+ */
+function splitTopLevelOperator(expr: string, op: string): { left: string; right: string } | null {
+  const isWordOp = /[A-Za-z]/.test(op);
+  let depth = 0;
+  let lastIndex = -1;
+
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i];
+    if (ch === '(') { depth++; continue; }
+    if (ch === ')') { depth--; continue; }
+    if (depth !== 0) continue;
+
+    const skipped = skipSqlLiteral(expr, i);
+    if (skipped !== -1) {
+      i = skipped - 1;
+      continue;
+    }
+
+    const opLen = findOperatorAt(expr, i, op, isWordOp);
+    if (opLen > 0) {
+      lastIndex = i;
+      i += opLen - 1;
+    }
+  }
+
+  if (lastIndex === -1) return null;
+
+  const opLen = findOperatorAt(expr, lastIndex, op, isWordOp);
+  const left = expr.slice(0, lastIndex).trim();
+  const right = expr.slice(lastIndex + opLen).trim();
+  if (left.length === 0 || right.length === 0) return null;
+
+  return { left, right };
+}
+
+/**
+ * Return the length of `op` if it matches at `expr[i]`, otherwise 0. Word
+ * operators (`AND`, `OR`) require word boundaries; symbolic operators (`+`,
+ * `*`, `>=`) match literally.
+ */
+function findOperatorAt(expr: string, i: number, op: string, isWordOp: boolean): number {
+  const upper = op.toUpperCase();
+  if (isWordOp) {
+    if (expr.slice(i, i + op.length).toUpperCase() !== upper) return 0;
+    // Require word boundaries on both sides.
+    const before = i > 0 ? expr[i - 1] : ' ';
+    const after = i + op.length < expr.length ? expr[i + op.length] : ' ';
+    if (/[A-Za-z0-9_]/.test(before) || /[A-Za-z0-9_]/.test(after)) return 0;
+    return op.length;
+  }
+  // Symbolic operator: match the longest form first to avoid `>` matching `>=`.
+  if (expr.slice(i, i + op.length) === op) return op.length;
+  return 0;
 }
