@@ -267,7 +267,6 @@ function listPredicateMatch(
             const y = coerceCompare(pred.values?.[1]);
             return x !== undefined && y !== undefined && val >= x && val <= y;
           }
-          default: return true;
         }
       });
     }
@@ -361,9 +360,10 @@ function replaceTableName(sql: string, newTableName: string): string {
   }
 
   const oldTable = fromMatch[0];
-  const quoted = newTableName.includes(' ') || /^[a-z_]\w*$/i.test(newTableName)
-    ? `"${newTableName}"`
-    : newTableName;
+  // Quote the shard name only when it is not a plain unquoted identifier
+  // (i.e. it contains spaces or other characters that break identifier syntax).
+  const isPlainIdentifier = /^[a-z_]\w*$/i.test(newTableName);
+  const quoted = isPlainIdentifier ? newTableName : `"${newTableName}"`;
   const alias = fromMatch[2] ? ` ${fromMatch[2]}` : '';
   const replacement = `FROM ${quoted}${alias}`;
 
@@ -391,3 +391,16 @@ function coerceCompare(val: any): any {
   }
   return val;
 }
+
+// ── Internal test hooks ───────────────────────────────────────────
+//
+// These re-exports expose the predicate-matching helpers to unit tests so their
+// defensive branches (unknown operator / method, missing IN values, and
+// undefined BETWEEN bounds) can be exercised directly. They are not part of the
+// public pruning API and carry a leading underscore to signal that fact.
+
+export const _matchesSinglePredicate = matchesSinglePredicate;
+export const _rangePredicateMatch = rangePredicateMatch;
+export const _listPredicateMatch = listPredicateMatch;
+export const _hashPredicateMatch = hashPredicateMatch;
+export const _coerceCompare = coerceCompare;
