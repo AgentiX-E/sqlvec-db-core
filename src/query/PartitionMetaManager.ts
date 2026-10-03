@@ -164,12 +164,14 @@ export function getPartitionsForTable(
   `);
   const rows = stmt.all(parentTable) as any[];
   return rows.map((row) => ({
-    parentTable: row.parent_table ?? row.parentTable,
-    partitionMethod: row.partition_method ?? row.partitionMethod,
-    partitionColumn: row.partition_column ?? row.partitionColumn,
-    partitionName: row.partition_name ?? row.partitionName,
-    partitionBounds: row.partition_bounds ?? row.partitionBounds,
-    createdAt: row.created_at ?? row.createdAt,
+    // The SELECT above aliases each column to its snake_case name, so the row
+    // objects reliably carry snake_case keys; map them onto the camelCase API.
+    parentTable: row.parent_table,
+    partitionMethod: row.partition_method,
+    partitionColumn: row.partition_column,
+    partitionName: row.partition_name,
+    partitionBounds: row.partition_bounds,
+    createdAt: row.created_at,
   })) as PartitionMeta[];
 }
 
@@ -210,8 +212,9 @@ export function hasPartitions(db: Database.Database, parentTable: string): boole
   const stmt = db.prepare(`
     SELECT COUNT(*) AS cnt FROM __partition_meta WHERE parent_table = ?
   `);
-  const row = stmt.get(parentTable) as { cnt: number } | undefined;
-  return (row?.cnt ?? 0) > 0;
+  // COUNT(*) always yields exactly one row, so the result is never undefined.
+  const row = stmt.get(parentTable) as { cnt: number };
+  return row.cnt > 0;
 }
 
 /**
