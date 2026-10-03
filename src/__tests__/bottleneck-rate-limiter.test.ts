@@ -179,9 +179,11 @@ describe('BottleneckRateLimiter — minimum spacing', () => {
     a.resolve(1);
     await tick();
 
-    // Queue a task that will be gated by the spacing timer.
+    // Queue a task that will be gated by the spacing timer. The returned
+    // promise is kept so the rejection produced by `clearQueue` below is
+    // observed rather than surfacing as an unhandled rejection.
     const b = makeDeferred();
-    void limiter.schedule(b.fn);
+    const queuedB = limiter.schedule(b.fn);
     await tick();
     expect(b.started()).toBe(false);
 
@@ -189,6 +191,7 @@ describe('BottleneckRateLimiter — minimum spacing', () => {
     const dropped = limiter.clearQueue();
     expect(dropped).toBe(1);
     expect(limiter.queueLength).toBe(0);
+    await expect(queuedB).rejects.toThrow(/cleared/);
   });
 });
 
