@@ -24,6 +24,7 @@
 
 import natural from 'natural';
 import { PinoLogger } from '../logger/PinoLogger';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 // ── Logger ───────────────────────────────────────────────────────
 
@@ -159,8 +160,8 @@ export class FtsTranslator {
 
     // Replace PostgreSQL tsquery operators with FTS5 equivalents.
     let result = q
-      // Phrase operator <N> → space (FTS5 implicit phrase)
-      .replace(/<\d*>/g, ' ')
+      // Phrase operator <-> → space (FTS5 implicit phrase)
+      .replace(/<->/g, ' ')
       // NOT operator
       .replace(/!/g, 'NOT ')
       // AND operator
@@ -218,17 +219,21 @@ export class FtsTranslator {
    * @returns A numeric rank score (higher = more relevant).
    */
   rank(vector: string, query: string): number {
-    // Extract tokens from the vector.
-    const vectorTokens = new Set(
-      vector
-        .split(/'[\w]+':\d+/g)
-        .map((s) => s.trim().replace(/'/g, ''))
-        .filter(Boolean),
-    );
+    // Extract tokens from the vector. A tsvector is `'token':1 'token':2 ...`,
+    // so we capture the quoted token (non-greedy, stops at the `':` separator)
+    // rather than splitting on it (splitting would discard every token).
+    const vectorTokens = new Set<string>();
+    const tokenRe = /'([^']+)':\d+/g;
+    let m: RegExpExecArray | null;
+    while ((m = tokenRe.exec(vector)) !== null) {
+      vectorTokens.add(m[1]);
+    }
 
-    // Extract query terms.
+    // Extract query terms, dropping both FTS5 boolean keywords and PG tsquery
+    // operator symbols (`&`, `|`, `!`, `<->`) so only actual terms remain.
     const queryTerms = query
-      .replace(/\b(AND|OR|NOT)\b/gi, '')
+      .replace(/\b(AND|OR|NOT)\b/gi, ' ')
+      .replace(/[&|!<>\-]/g, ' ')
       .split(/\s+/)
       .map((s) => s.replace(/\*/g, '').trim())
       .filter(Boolean);
@@ -310,88 +315,186 @@ export class FtsTranslator {
     // Fast path: no FTS patterns found.
     if (!this.containsFts(sql)) return sql;
 
-    let result = sql;
+    const out: string[] = [];
+    let i = 0;
+    const len = sql.length;
+    let changed = false;
 
-    // Step 1: Rewrite `@@` operators.
-    //   `col @@ to_tsquery('...')` → `col MATCH 'translated_query'`
-    result = result.replace(TS_MATCH_OP_RE, (match, col, funcName) => {
-      // Extract the full arguments inside the function call.
-      const funcStart = match.indexOf('(');
-      const funcEnd = this.findMatchingParen(result, funcStart);
-      if (funcEnd === -1) return match;
-
-      const fullExpr = result.substring(match.indexOf(funcName), funcEnd + 1);
-
-      // Extract the query text argument (usually the last argument).
-      const args = this.extractFunctionArgs(fullExpr);
-      const queryText = args[args.length - 1] || '';
-
-      // Apply stemming and unaccent to query text
-      const processedQuery = this.processQueryText(queryText);
-
-      // Warn if FTS language/config is dropped (present as first arg in PG functions)
-      if (args.length > 1 && args[0] === args[args.length - 1]) {
-        // Only one unique argument — no config was passed
-      } else if (args.length > 1) {
-        const configArg = args[0];
-        this.logger.warn(
-          { config: configArg, function: funcName },
-          'FTS language configuration dropped during translation — only PostgreSQL supports per-function config',
-        );
-      }
-      let fts5Query: string;
-
-      switch (funcName.toLowerCase()) {
-        case 'to_tsquery':
-          fts5Query = this.tsquery(processedQuery);
-          break;
-        case 'plainto_tsquery':
-          fts5Query = this.plaintoTsquery(processedQuery);
-          break;
-        case 'phraseto_tsquery':
-          fts5Query = this.phrasetoTsquery(processedQuery);
-          break;
-        case 'websearch_to_tsquery':
-          fts5Query = this.websearchToTsquery(processedQuery);
-          break;
-        default:
-          fts5Query = processedQuery.replace(/['"]/g, '');
+    while (i < len) {
+      // Preserve literals/comments verbatim.
+      const skipped = skipSqlLiteral(sql, i);
+      if (skipped !== -1) {
+        out.push(sql.slice(i, skipped));
+        i = skipped;
+        continue;
       }
 
-      return `${col} MATCH '${fts5Query.replace(/'/g, "''")}'`;
-    });
-
-    // Step 2: Remove standalone `to_tsvector(...)` calls.
-    result = result.replace(/\bto_tsvector\s*\([^)]+\)/gi, (match) => {
-      // Check if a config argument was passed
-      const inner = match.replace(/^to_tsvector\s*/i, '').trim().slice(1, -1).trim();
-      const args = inner.split(',').map(a => a.trim().replace(/^['"]|['"]$/g, ''));
-      if (args.length > 1) {
-        this.logger.warn(
-          { config: args[0] },
-          'to_tsvector language configuration dropped during FTS translation — FTS5 handles tokenization at index time',
-        );
+      // `@@` match operator: `col @@ fts_func(...)`.
+      if (sql[i] === '@' && sql[i + 1] === '@') {
+        const left = this.findLeftOperand(sql, i);
+        const after = this.skipWs(sql, i + 2);
+        const f = this.readFtsFuncName(sql, after);
+        if (left !== null && f !== null) {
+          const open = this.skipWs(sql, after + f.length);
+          if (sql[open] === '(') {
+            const close = this.findMatchingParen(sql, open);
+            if (close !== -1) {
+              const args = this.extractFunctionArgs(sql.slice(after, close + 1));
+              const queryText = args[args.length - 1] || '';
+              const fts5Query = this.translateQuery(f, queryText);
+              // The left operand was already emitted char-by-char; drop it
+              // from the buffer before emitting `left MATCH '...'`.
+              this.dropTrailingText(out, left);
+              out.push(`${left} MATCH '${fts5Query.replace(/'/g, "''")}'`);
+              changed = true;
+              i = close + 1;
+              continue;
+            }
+          }
+        }
+        // Not a recognized match — copy the `@` and continue.
+        out.push('@');
+        i++;
+        continue;
       }
-      return '';
-    });
 
-    // Step 3: Remove `ts_rank(...)` calls — replace with 1.0 (default rank).
-    result = result.replace(/\bts_rank\s*\([^)]+\)/gi, '1.0');
+      // Standalone FTS function names.
+      const nameLen = this.matchFtsFuncName(sql, i);
+      if (nameLen > 0) {
+        const open = this.skipWs(sql, i + nameLen);
+        if (sql[open] === '(') {
+          const close = this.findMatchingParen(sql, open);
+          if (close !== -1) {
+            const name = sql.slice(i, i + nameLen).toLowerCase();
+            if (name === 'to_tsvector') {
+              // `to_tsvector(...)` has no FTS5 equivalent at query time (FTS5
+              // tokenizes at index time). Replace it with NULL so the slot
+              // remains valid — `SELECT NULL FROM t` instead of an illegal
+              // `SELECT FROM t`.
+              out.push('NULL');
+              changed = true;
+              i = close + 1;
+              continue;
+            }
+            if (name === 'ts_rank') {
+              out.push('1.0');
+              changed = true;
+              i = close + 1;
+              continue;
+            }
+            if (name === 'ts_headline') {
+              out.push("''");
+              changed = true;
+              i = close + 1;
+              continue;
+            }
+            // to_tsquery & friends used standalone (no @@): strip quotes/refs.
+            const args = this.extractFunctionArgs(sql.slice(i, close + 1));
+            const queryText = args[args.length - 1] || '';
+            out.push(`'${this.translateQuery(name, queryText).replace(/'/g, "''")}'`);
+            changed = true;
+            i = close + 1;
+            continue;
+          }
+        }
+      }
 
-    // Step 4: Remove `ts_headline(...)` calls.
-    result = result.replace(/\bts_headline\s*\([^)]+\)/gi, "''");
-
-    // Step 5: Clean up double spaces from removed expressions.
-    result = result.replace(/\s{2,}/g, ' ').trim();
-
-    if (result !== sql) {
-      this.logger.debug(
-        { original: sql.substring(0, 120), rewritten: result.substring(0, 120) },
-        'FTS rewrite applied',
-      );
+      out.push(sql[i]);
+      i++;
     }
 
-    return result;
+    const rewritten = out.join('');
+    if (changed && rewritten !== sql) {
+      this.logger.debug(
+        { original: sql.substring(0, 120), rewritten: rewritten.substring(0, 120) },
+        'FTS rewrite applied',
+      );
+      return rewritten;
+    }
+    return sql;
+  }
+
+  /** Read a left operand immediately before the `@@` at `at`, or null. */
+  private findLeftOperand(sql: string, at: number): string | null {
+    let j = at - 1;
+    while (j >= 0 && /\s/.test(sql[j])) j--;
+    if (j < 0) return null;
+    const start = j;
+    while (j >= 0 && /[`"'\w.$]/.test(sql[j])) j--;
+    const operand = sql.slice(j + 1, start + 1).trim();
+    return operand.length > 0 ? operand : null;
+  }
+
+  private skipWs(sql: string, i: number): number {
+    while (i < sql.length && /\s/.test(sql[i])) i++;
+    return i;
+  }
+
+  /** Read an FTS function name at `i`, returning its length or 0. */
+  private matchFtsFuncName(sql: string, i: number): number {
+    const names = [
+      'to_tsvector', 'to_tsquery', 'plainto_tsquery', 'ts_rank',
+      'ts_headline', 'phraseto_tsquery', 'websearch_to_tsquery',
+    ];
+    for (const n of names) {
+      if (
+        sql.startsWith(n, i) &&
+        (i === 0 || !this.isIdentChar(sql[i - 1])) &&
+        !this.isIdentChar(sql[i + n.length])
+      ) {
+        return n.length;
+      }
+    }
+    return 0;
+  }
+
+  private readFtsFuncName(sql: string, i: number): string | null {
+    const names = [
+      'to_tsquery', 'plainto_tsquery', 'phraseto_tsquery', 'websearch_to_tsquery',
+    ];
+    for (const n of names) {
+      if (
+        sql.startsWith(n, i) &&
+        !this.isIdentChar(sql[i + n.length])
+      ) {
+        return n;
+      }
+    }
+    return null;
+  }
+
+  private translateQuery(funcName: string, queryText: string): string {
+    const processed = this.processQueryText(queryText);
+    switch (funcName.toLowerCase()) {
+      case 'to_tsquery': return this.tsquery(processed);
+      case 'plainto_tsquery': return this.plaintoTsquery(processed);
+      case 'phraseto_tsquery': return this.phrasetoTsquery(processed);
+      case 'websearch_to_tsquery': return this.websearchToTsquery(processed);
+      default: return processed.replace(/['"]/g, '');
+    }
+  }
+
+  /**
+   * Remove a trailing run of emitted text equal to `text` (plus any whitespace
+   * that precedes it), used to back out a left operand that was already copied
+   * verbatim before its `@@` match operator was recognized.
+   */
+  private dropTrailingText(out: string[], text: string): void {
+    // `out` holds a mix of single chars and whole-literal chunks, so collapse
+    // it to a string, strip a trailing occurrence of `text` (plus immediately
+    // preceding whitespace), then rebuild `out` from the result.
+    const joined = out.join('');
+    // Strip trailing whitespace that separated the left operand from `@@`,
+    // then require `text` to be the last token.
+    const noTrailingWs = joined.replace(/\s+$/, '');
+    if (noTrailingWs.endsWith(text)) {
+      // Drop `text`, keeping the whitespace that precedes it (that whitespace
+      // separates the previous token from the left operand and must survive;
+      // the replacement string supplies its own separating space).
+      out.length = 0;
+      const prefix = noTrailingWs.slice(0, noTrailingWs.length - text.length);
+      if (prefix.length > 0) out.push(prefix);
+    }
   }
 
   /**
@@ -401,7 +504,45 @@ export class FtsTranslator {
    * @returns `true` if FTS patterns are found.
    */
   containsFts(sql: string): boolean {
-    return PG_FTS_PATTERNS.some((re) => re.test(sql));
+    // Literal-aware scan: a keyword inside a string literal or comment is not a
+    // real function call. We also avoid sharing the `g`-flag `PG_FTS_PATTERNS`
+    // regexes for `test()` — a `g` regex leaks `lastIndex`, so repeated calls
+    // on the same string flip between true/false (the stateful-regex trap).
+    return this.firstFtsPosition(sql) !== -1;
+  }
+
+  /**
+   * Scan `sql` for the first FTS construct outside literals/comments, returning
+   * the byte offset of its function name, or `-1` when none is found.
+   */
+  private firstFtsPosition(sql: string): number {
+    let i = 0;
+    const names = [
+      'to_tsvector', 'to_tsquery', 'plainto_tsquery', 'ts_rank',
+      'ts_headline', 'phraseto_tsquery', 'websearch_to_tsquery',
+    ];
+    while (i < sql.length) {
+      const skipped = skipSqlLiteral(sql, i);
+      if (skipped !== -1) {
+        i = skipped;
+        continue;
+      }
+      for (const name of names) {
+        if (
+          sql.startsWith(name, i) &&
+          (i === 0 || !this.isIdentChar(sql[i - 1])) &&
+          !this.isIdentChar(sql[i + name.length])
+        ) {
+          return i;
+        }
+      }
+      i++;
+    }
+    return -1;
+  }
+
+  private isIdentChar(c: string | undefined): boolean {
+    return c !== undefined && /[A-Za-z0-9_$]/.test(c);
   }
 
   /**
