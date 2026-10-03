@@ -22,6 +22,7 @@
 
 import { PinoLogger } from '../logger/PinoLogger';
 import { GucSystem } from '../core/GucSystem';
+import { skipSqlLiteral } from './SqlLiteralScanner';
 
 const logger = PinoLogger.forComponent('QueryHintShim');
 
@@ -81,7 +82,45 @@ export type QueryHintGuc = typeof QUERY_HINT_GUCS[number];
  * - `.*?`    -- non-greedy match of hint contents (e.g. `SeqScan(t)`)
  * - `\*\/`   -- closing `*​/`
  */
-const HINT_COMMENT_RE = /\/\*\+.*?\*\//gs;
+/**
+ * Collect the [start, end) byte ranges of every pg_hint_plan `/*+ ... *​/`
+ * hint comment in `sql`, skipping string literals, quoted identifiers,
+ * dollar-quoted strings, line comments, and ordinary `/* ... *​/` block
+ * comments whose contents merely *look* like a hint.
+ *
+ * A hint comment is recognized only by the literal opener `/*+` (a `/`, `*`,
+ * then `+`). The closing `*​/` is located from there; an unterminated hint is
+ * ignored rather than stripping to end-of-string.
+ */
+function collectHintRanges(sql: string): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let i = 0;
+  const len = sql.length;
+
+  while (i < len) {
+    // A block-comment opener that is a hint (`/*+`).
+    if (sql[i] === '/' && sql[i + 1] === '*' && sql[i + 2] === '+') {
+      const close = sql.indexOf('*/', i + 3);
+      if (close === -1) break; // unterminated hint — leave the rest untouched
+      ranges.push({ start: i, end: close + 2 });
+      i = close + 2;
+      continue;
+    }
+
+    // Any other literal/identifier/comment — skip it wholesale. This covers
+    // single/double/backtick/dollar-quoted strings, `--` line comments, and
+    // ordinary `/* ... *​/` blocks (whose `/*+` would otherwise be a false hit).
+    const skipped = skipSqlLiteral(sql, i);
+    if (skipped !== -1) {
+      i = skipped;
+      continue;
+    }
+
+    i++;
+  }
+
+  return ranges;
+}
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -96,13 +135,9 @@ export function detectQueryHint(sql: string): boolean {
     logger.warn({ sql }, 'detectQueryHint: received non-string input');
     return false;
   }
-  // Use a fresh, non-global instance. The shared `HINT_COMMENT_RE` carries the `g`
-  // flag for `rewriteQueryHint`'s global replace, and reusing a `g`-flag RegExp for
-  // `test()` would leak `lastIndex` across calls (the same trap documented in
-  // MacAddrShim): a hint positioned before the stale cursor would be silently missed.
-  // A one-shot `test()` needs no `g` flag.
-  // eslint-disable-next-line require-unicode-regexp
-  return /\/\*\+.*?\*\//s.test(sql);
+  // Literal-aware: a `/*+` inside a string literal or an ordinary comment is
+  // not a real hint, so we only report hints that are real comment openers.
+  return collectHintRanges(sql).length > 0;
 }
 
 /**
@@ -132,19 +167,23 @@ export function rewriteQueryHint(sql: string): QueryHintResult {
   }
 
   const original = sql;
-
-  // Replace all `/*+ ... *​/` hint comments with an empty string.
-  const rewritten = sql.replace(HINT_COMMENT_RE, '');
-
-  if (rewritten !== original) {
-    logger.debug(
-      { before: original, after: rewritten },
-      'rewriteQueryHint: stripped pg_hint_plan comments',
-    );
-    return { sql: rewritten, rewritten: true };
+  const ranges = collectHintRanges(sql);
+  if (ranges.length === 0) {
+    return { sql: original, rewritten: false };
   }
 
-  return { sql: original, rewritten: false };
+  // Strip each hint range (right-to-left keeps earlier offsets valid).
+  let rewritten = sql;
+  for (let k = ranges.length - 1; k >= 0; k--) {
+    const { start, end } = ranges[k];
+    rewritten = rewritten.slice(0, start) + rewritten.slice(end);
+  }
+
+  logger.debug(
+    { before: original, after: rewritten },
+    'rewriteQueryHint: stripped pg_hint_plan comments',
+  );
+  return { sql: rewritten, rewritten: true };
 }
 
 // ── GUC Query Hint Integration (E8) ──────────────────────────────
