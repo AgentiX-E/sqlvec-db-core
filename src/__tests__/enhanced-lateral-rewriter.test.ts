@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { rewriteLateralEnhanced } from '../query/EnhancedLateralRewriter';
+import {
+  rewriteLateralEnhanced,
+  _extractParenthesizedContent,
+  _extractOuterAliases,
+  _findClauseEnd,
+  _splitTopLevel,
+  _isRefInWhereClause,
+  _refIsInWhereClause,
+  _tryScalarSubqueryRewrite,
+  _extractColumnAlias,
+  _checkSingleColumnSelect,
+  _extractSubqueryAlias,
+  _extractContextBeforeLateral,
+  _rewriteOneLateralContext,
+} from '../query/EnhancedLateralRewriter';
 
 describe('rewriteLateralEnhanced — passthrough', () => {
   it('passes through when no LATERAL is present', () => {
@@ -396,3 +410,170 @@ describe('rewriteLateralEnhanced — scalar rewrite structural edges', () => {
     expect(r.sql).not.toContain('LATERAL');
   });
 });
+
+// ── Direct unit tests for the re-exported lexing/parsing primitives ─────
+// These exercise defensive branches that are unreachable through the public
+// `rewriteLateralEnhanced` entry point (which pre-validates its inputs).
+describe('_extractParenthesizedContent — defensive branches', () => {
+  it('returns null when the open index is not a paren', () => {
+    expect(_extractParenthesizedContent('abc', 1)).toBeNull();
+  });
+
+  it('returns null for unmatched parentheses', () => {
+    expect(_extractParenthesizedContent('(abc', 0)).toBeNull();
+  });
+
+  it('returns the full content including parens for a balanced group', () => {
+    const r = _extractParenthesizedContent('(a (b) c)', 0);
+    expect(r).not.toBeNull();
+    expect(r!.innerSql).toBe('a (b) c');
+    expect(r!.fullContent).toBe('(a (b) c)');
+    expect(r!.endIndex).toBe(8);
+  });
+});
+
+describe('_extractOuterAliases — edge cases', () => {
+  it('skips an empty table-reference part', () => {
+    // The FROM list has a dangling comma, producing an empty part.
+    expect(_extractOuterAliases('SELECT * FROM , LATERAL (SELECT 1)', 30)).toEqual([]);
+  });
+
+  it('does not re-add a duplicate alias', () => {
+    // `u` appears twice across join segments — it must be listed once.
+    const aliases = _extractOuterAliases(
+      'SELECT * FROM users u JOIN users u2 ON u.id = u2.id, LATERAL (SELECT 1)',
+      48,
+    );
+    const count = aliases.filter((a) => a === 'u').length;
+    expect(count).toBe(1);
+  });
+});
+
+describe('_findClauseEnd — literal-aware boundary', () => {
+  it('does not treat a clause keyword inside a string literal as a boundary', () => {
+    // `(') AND '` keeps scanning past the literal; `WHERE` later is the real ender.
+    expect(_findClauseEnd("FROM t WHERE x = ')' AND y", 0)).toBe(7);
+  });
+
+  it('skips over a string literal when scanning for a clause ender', () => {
+    expect(_findClauseEnd("x = 'abc' ORDER", 0)).toBe(15);
+  });
+});
+
+describe('_isRefInWhereClause / _refIsInWhereClause — defensive branches', () => {
+  it('returns false for a ref at position 0', () => {
+    expect(_isRefInWhereClause('x = u.id', 0)).toBe(false);
+  });
+
+  it('returns false when a FROM appears between WHERE and the ref (nested subquery)', () => {
+    expect(_isRefInWhereClause('SELECT * FROM t WHERE x IN (SELECT 1 FROM y) AND z = u.id', 50)).toBe(false);
+  });
+
+  it('returns false when the ref string is absent', () => {
+    expect(_refIsInWhereClause('SELECT 1', 'u.id')).toBe(false);
+  });
+
+  it('returns true when a FROM appears after WHERE and before the ref', () => {
+    const s = 'SELECT x WHERE a=1 FROM t WHERE b=u.id';
+    expect(_isRefInWhereClause(s, s.length - 1)).toBe(true);
+  });
+
+  it('returns false (defensive) when a FROM appears after WHERE', () => {
+    expect(_isRefInWhereClause('x where 1 from u.id', 18)).toBe(false);
+  });
+});
+
+describe('_tryScalarSubqueryRewrite — defensive branches', () => {
+  const refs = [{ alias: 'u', column: 'name', fullRef: 'u.name' } as const];
+  const refsTyped = refs as unknown as import('../query/CorrelationDetector').CorrelationRef[];
+
+  it('returns null for a multi-column SELECT list', () => {
+    expect(_tryScalarSubqueryRewrite('SELECT * FROM users u, LATERAL (SELECT u.name, u.age) sub', 0, ', ', 'SELECT u.name, u.age', 'sub', refsTyped)).toBeNull();
+  });
+
+  it('returns null when there is no FROM clause before LATERAL', () => {
+    expect(_tryScalarSubqueryRewrite('LATERAL (SELECT u.name) sub', 0, '', 'SELECT u.name', 'sub', refsTyped)).toBeNull();
+  });
+
+  it('returns null when no closing paren follows LATERAL', () => {
+    expect(_tryScalarSubqueryRewrite('SELECT * FROM u, LATERAL (SELECT u.name', 15, ', ', 'SELECT u.name', 'sub', refsTyped)).toBeNull();
+  });
+
+  it('returns null when the entry context has no FROM or comma terminator', () => {
+    expect(_tryScalarSubqueryRewrite('SELECT * X LATERAL (SELECT u.name) sub', 0, '', 'SELECT u.name', 'sub', refsTyped)).toBeNull();
+  });
+});
+
+describe('_extractColumnAlias — fallback paths', () => {
+  it('falls back to "scalar" for an empty expression', () => {
+    expect(_extractColumnAlias('')).toBe('scalar');
+  });
+
+  it('extracts a qualified column name', () => {
+    expect(_extractColumnAlias('t.col')).toBe('col');
+  });
+});
+
+describe('_checkSingleColumnSelect — defensive branches', () => {
+  it('returns false for a bare SELECT keyword without a trailing space', () => {
+    expect(_checkSingleColumnSelect('SELECT')).toBe(false);
+  });
+
+  it('returns null for a SELECT with no select list (trailing space only)', () => {
+    expect(_checkSingleColumnSelect('SELECT  FROM t')).toBe(false);
+  });
+
+  it('returns false for a non-SELECT leading keyword', () => {
+    expect(_checkSingleColumnSelect(' FROM t')).toBe(false);
+  });
+});
+
+describe('_rewriteOneLateralContext — JOIN context variants', () => {
+  it('rewrites a LEFT JOIN context to INNER JOIN', () => {
+    expect(_rewriteOneLateralContext('FROM x LEFT JOIN LATERAL (SELECT 1) t', 18, 'LEFT JOIN ')).toBe(
+      'FROM x LINNER JOIN (SELECT 1) t',
+    );
+  });
+
+  it('rewrites a JOIN context (keyword ends with "join")', () => {
+    expect(_rewriteOneLateralContext('LEFT JOIN LATERAL (x)', 10, 'LEFT JOIN ')).toBe(
+      'INNER JOIN  (x)',
+    );
+  });
+
+  it('rewrites an INNER JOIN context (multi-word, ends with "join")', () => {
+    expect(_rewriteOneLateralContext('INNER JOIN LATERAL (x)', 11, 'INNER JOIN ')).toBe(
+      'INNER JOIN  (x)',
+    );
+  });
+
+  it('rewrites a CROSS JOIN context (multi-word, ends with "join")', () => {
+    expect(_rewriteOneLateralContext('CROSS JOIN LATERAL (x)', 11, 'CROSS JOIN ')).toBe(
+      'INNER JOIN  (x)',
+    );
+  });
+
+  it('falls back to a bare space for an unrecognized context', () => {
+    expect(_rewriteOneLateralContext('ON LATERAL (x)', 3, 'ON ')).toBe('  (x)');
+  });
+});
+
+describe('_extractSubqueryAlias / _extractContextBeforeLateral — remaining paths', () => {
+  it('extracts an alias after a closing paren', () => {
+    expect(_extractSubqueryAlias('LATERAL (SELECT 1) AS sub', 18)).toBe('sub');
+    expect(_extractSubqueryAlias('LATERAL (SELECT 1) sub', 18)).toBe('sub');
+    expect(_extractSubqueryAlias('LATERAL (SELECT 1)', 18)).toBe('');
+  });
+
+  it('extracts the context keyword before LATERAL', () => {
+    expect(_extractContextBeforeLateral('FROM users u, ')).toBe(', ');
+    expect(_extractContextBeforeLateral('FROM users u')).toBe('');
+  });
+});
+
+describe('_splitTopLevel — literal-aware split', () => {
+  it('does not split on a delimiter inside a string literal', () => {
+    expect(_splitTopLevel("x = 'a,b'", ',')).toEqual(["x = 'a,b'"]);
+  });
+});
+

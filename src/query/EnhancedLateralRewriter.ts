@@ -835,6 +835,7 @@ export {
   splitTopLevel as _splitTopLevel,
   isRefInWhereClause as _isRefInWhereClause,
   refIsInWhereClause as _refIsInWhereClause,
+  tryScalarSubqueryRewrite as _tryScalarSubqueryRewrite,
   extractColumnAlias as _extractColumnAlias,
   checkSingleColumnSelect as _checkSingleColumnSelect,
   extractSubqueryAlias as _extractSubqueryAlias,
