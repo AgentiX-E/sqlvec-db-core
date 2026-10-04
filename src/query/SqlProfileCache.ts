@@ -31,7 +31,7 @@ const logger = PinoLogger.forComponent('SqlProfileCache');
 /** 所有 PG 特有语法的组合正则。一条 SQL 匹配其中任何一项 = non-standard */
 const PG_SPECIFIC_PATTERN = new RegExp([
   // ── Types & Casts ──
-  /(?:[^a-zA-Z_]|^)::\s*(?:\w+(?:\[\])?(?:\s*,\s*\w+(?:\[\])?)*)?/.source,       // ::type 类型转换
+  /::\s*(?:\w+(?:\[\])?(?:\s*,\s*\w+(?:\[\])?)*)?/.source,                        // ::type type cast
   /\bSERIAL\b|\bBIGSERIAL\b|\bSMALLSERIAL\b/.source,                                // SERIAL 系列类型
   /\bROW\b(?!\s*NUMBER)\s*\(/.source,                                                // ROW(...) 构造器
   /\bRECORD\b/.source,                                                               // RECORD 类型
@@ -304,15 +304,18 @@ function patternizeSQL(sql: string): string {
     }
 
     // ── Double-quoted identifier: "table_name" ──
-    // NOT replaced (identifiers are structural), just skip past content
+    // NOT replaced (identifiers are structural) — but the full quoted token
+    // must be preserved so distinct identifiers do not collapse to the same
+    // cache key. Copy the whole `"..."` span verbatim.
     if (sql[i] === '"') {
-      out.push('"');
+      const start = i;
       i++;
       while (i < sql.length && sql[i] !== '"') {
         if (sql[i] === '\\') { i++; } // Handle escaped quotes
         i++;
       }
-      if (i < sql.length) { out.push('"'); i++; }
+      if (i < sql.length) i++; // include the closing quote
+      out.push(sql.slice(start, i));
       continue;
     }
 
@@ -405,9 +408,10 @@ function extractWhereKey(sql: string): { key: string; value: string } | null {
   // Match: WHERE "col" = 'value'  or  WHERE col = value
   const whereMatch = sql.match(/\bWHERE\s+(?:"(\w+)"|(\w+))\s*=\s*(?:'(\d+)'|"(\d+)"|(\d+))/i);
   if (!whereMatch) return null;
+  // A successful match already guarantees a non-empty column name (`\w+`) and a
+  // non-empty numeric value (`\d+`), so no further nullability guard is needed.
   const col = whereMatch[1] || whereMatch[2];
   const val = whereMatch[3] || whereMatch[4] || whereMatch[5];
-  if (!col || val === undefined) return null;
   return { key: col, value: val };
 }
 
