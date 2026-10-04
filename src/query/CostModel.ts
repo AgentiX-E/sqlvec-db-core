@@ -13,6 +13,8 @@
 
 // ── 类型定义 ──
 
+import { GucSystem } from '../core/GucSystem';
+
 export interface CostFactors {
   /** 顺序页读取代价（默认 1.0） */
   seqPageCost: number;
@@ -94,25 +96,40 @@ export class CostModel {
   static loadFromGucSystem(): Partial<CostFactors> {
     const overrides: Partial<CostFactors> = {};
     try {
-      const { GucSystem } = require('../core/GucSystem');
+      const guc = GucSystem.getInstance();
 
-      const spc = GucSystem.getFloat('seq_page_cost');
+      // Reads a runtime GUC as a float, or undefined when unset.
+      const readFloat = (name: string): number | undefined => {
+        const v = guc.get(name).value;
+        if (v === undefined) return undefined;
+        const n = parseFloat(v);
+        return Number.isNaN(n) ? undefined : n;
+      };
+      // Reads a runtime GUC as an integer, or undefined when unset.
+      const readInt = (name: string): number | undefined => {
+        const v = guc.get(name).value;
+        if (v === undefined) return undefined;
+        const n = parseInt(v, 10);
+        return Number.isNaN(n) ? undefined : n;
+      };
+
+      const spc = readFloat('seq_page_cost');
       if (spc !== undefined) overrides.seqPageCost = spc;
 
-      const rpc = GucSystem.getFloat('random_page_cost');
+      const rpc = readFloat('random_page_cost');
       if (rpc !== undefined) overrides.randomPageCost = rpc;
 
-      const ctc = GucSystem.getFloat('cpu_tuple_cost');
+      const ctc = readFloat('cpu_tuple_cost');
       if (ctc !== undefined) overrides.cpuTupleCost = ctc;
 
-      const citc = GucSystem.getFloat('cpu_index_tuple_cost');
+      const citc = readFloat('cpu_index_tuple_cost');
       if (citc !== undefined) overrides.cpuIndexTupleCost = citc;
 
-      const coc = GucSystem.getFloat('cpu_operator_cost');
+      const coc = readFloat('cpu_operator_cost');
       if (coc !== undefined) overrides.cpuOperatorCost = coc;
 
       // effective_cache_size influences cost heuristics
-      const ecs = GucSystem.getInt('effective_cache_size');
+      const ecs = readInt('effective_cache_size');
       if (ecs !== undefined) {
         // Not directly a CostFactor, but used for cache-aware costing
         // Stored as 8KB pages (PG convention)
@@ -262,9 +279,10 @@ export class CostModel {
    *
    *   startupCost = cpuOperatorCost（Bitmap 创建头开销）
    *   bitmapPages = selectivity × relpages（Bitmap 命中的页数估计）
+   *   bitmapTuples = selectivity × reltuples（Bitmap 命中的元组数估计）
    *   totalCost = indexScanCost.totalCost
    *               + bitmapPageCost × bitmapPages
-   *               + cpuTupleCost × bitmapPages
+   *               + cpuTupleCost × bitmapTuples
    *
    * 注意：Bitmap Scan 的 totalCost 以 indexScanCost.totalCost 为基础（索引扫描 + Bitmap 构建阶段），
    * 再叠加上第二阶段（扫描 Bitmap 获取堆页）的随机 IO 和元组处理开销。
@@ -276,13 +294,14 @@ export class CostModel {
   bitmapScanCost(stats: TableStats, selectivity: number): ScanCost {
     const clampedSel = Math.max(0, Math.min(1, selectivity));
     const bitmapPages = clampedSel * stats.relpages;
+    const bitmapTuples = clampedSel * stats.reltuples;
     const indexScanTotal = this.indexScanCost(stats, clampedSel).totalCost;
 
     const startupCost = this.factors.cpuOperatorCost;
     const totalCost =
       indexScanTotal +
       this.factors.bitmapPageCost * bitmapPages +
-      this.factors.cpuTupleCost * bitmapPages;
+      this.factors.cpuTupleCost * bitmapTuples;
     return {
       startupCost,
       totalCost,
