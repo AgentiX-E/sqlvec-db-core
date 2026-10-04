@@ -198,15 +198,9 @@ export class LockTimeoutHandler {
     } catch (err: any) {
       // Check if the error is SQLITE_BUSY or SQLITE_LOCKED
       const elapsed = Date.now() - startTime;
-      const errMsg = String(err?.message || err || '').toLowerCase();
-      const errCode = err?.code || '';
 
       if (
-        (errMsg.includes('busy') ||
-         errMsg.includes('locked') ||
-         errMsg.includes('database is locked') ||
-         errCode === 'SQLITE_BUSY' ||
-         errCode === 'SQLITE_LOCKED') &&
+        this.isLockSignal(err) &&
         (elapsed >= timeoutMs || this.likelyLockContention(err))
       ) {
         this.stats.lockTimeoutCount++;
@@ -246,14 +240,10 @@ export class LockTimeoutHandler {
       return await fn();
     } catch (err: any) {
       const elapsed = Date.now() - startTime;
-      const errMsg = String(err?.message || err || '').toLowerCase();
 
       if (
-        (errMsg.includes('busy') ||
-         errMsg.includes('locked') ||
-         errMsg.includes('database is locked') ||
-         err.code === 'SQLITE_BUSY') &&
-        elapsed >= timeoutMs
+        this.isLockSignal(err) &&
+        (elapsed >= timeoutMs || this.likelyLockContention(err))
       ) {
         this.stats.lockTimeoutCount++;
         this.stats.lastLockTimeoutAt = Date.now();
@@ -331,15 +321,31 @@ export class LockTimeoutHandler {
    * Used when SQLite returns SQLITE_BUSY but elapsed < strict lock_timeout.
    */
   private likelyLockContention(err: any): boolean {
-    if (!err) return false;
     const msg = String(err?.message || err).toLowerCase();
     return (
-      msg.includes('busy') ||
-      msg.includes('locked') ||
       msg.includes('database is locked') ||
+      msg.includes('database table is locked') ||
       msg.includes('cannot commit') ||
-      err.code === 'SQLITE_BUSY' ||
-      err.code === 'SQLITE_LOCKED'
+      err?.code === 'SQLITE_BUSY' ||
+      err?.code === 'SQLITE_LOCKED'
+    );
+  }
+
+  /**
+   * Determine whether an error signals a lock wait. Matches the authoritative
+   * SQLITE_BUSY / SQLITE_LOCKED codes and SQLite's exact lock phrase ("database
+   * is locked"). Bare "busy"/"locked" substrings are intentionally NOT matched:
+   * they appear in unrelated business errors (e.g. "busy worker", "unlocked
+   * feature") and would cause false SQLSTATE 55P03 aborts.
+   */
+  private isLockSignal(err: any): boolean {
+    const msg = String(err?.message || err || '').toLowerCase();
+    const code = err?.code || '';
+    return (
+      msg.includes('database is locked') ||
+      msg.includes('database table is locked') ||
+      code === 'SQLITE_BUSY' ||
+      code === 'SQLITE_LOCKED'
     );
   }
 }
