@@ -648,23 +648,28 @@ export class PartitionRouter {
    */
   private buildUnionSelect(
     targetTables: string[],
-    _originalSql: string,
+    originalSql: string,
     parentTable: string,
   ): string {
     if (targetTables.length === 1) {
       // Single partition — just rewrite the table name.
-      const sql = _originalSql.replace(
+      const sql = originalSql.replace(
         new RegExp(`\\b${escapeRegex(parentTable)}\\b`, 'i'),
         targetTables[0],
       );
       return sql;
     }
 
-    // Multiple partitions — build a UNION ALL.
-    const childQueries = targetTables.map((t) => {
-      return `SELECT * FROM ${t}`;
-    });
-    return childQueries.join('\nUNION ALL\n');
+    // Multiple partitions — replace the parent relation with a UNION ALL
+    // subquery over the matching children, preserving the original SELECT
+    // list, WHERE, and other clauses.
+    const childQueries = targetTables
+      .map((t) => `SELECT * FROM ${t}`)
+      .join('\nUNION ALL\n');
+    return originalSql.replace(
+      new RegExp(`\\b${escapeRegex(parentTable)}\\b`, 'i'),
+      `(\n${childQueries}\n)`,
+    );
   }
 }
 
