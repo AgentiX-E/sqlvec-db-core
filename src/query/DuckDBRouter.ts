@@ -219,7 +219,7 @@ export async function tryRouteDuckDB(
   }
 
   logger.debug({ pattern: pattern.toString(), sql: sql.substring(0, 80) }, 'Pattern routed to DuckDB');
-  return executeOnDuckDB(sql, duckDB, startTime, classifier, pattern);
+  return executeOnDuckDB(sql, duckDB, startTime, classifier, pattern, fedClient);
 }
 
 /**
