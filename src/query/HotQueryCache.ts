@@ -28,7 +28,8 @@ const logger = /* lazy */ undefined;
 export interface HotQueryCacheConfig {
   /** Maximum number of cached decisions (default: 4096) */
   maxEntries?: number;
-  /** TTL per entry in milliseconds (default: 60000 = 60s) */
+  /** TTL per entry in milliseconds (default: 60000 = 60s). Idle-based: the
+   * entry expires this long after its last access, so hot queries stay cached. */
   ttlMs?: number;
 }
 
@@ -76,8 +77,10 @@ export class HotQueryCache {
       return undefined;
     }
 
-    // TTL expiry check
-    if (Date.now() - entry.insertedAt > this.ttlMs) {
+    // TTL expiry check — idle-based: the entry lives for ttlMs after its
+    // most recent access. A hot query that is continuously read stays alive,
+    // while an abandoned entry expires ttlMs after its last get().
+    if (Date.now() - entry.lastAccessAt > this.ttlMs) {
       this.cache.delete(sql);
       this.misses++;
       return undefined;
