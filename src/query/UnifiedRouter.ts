@@ -84,9 +84,9 @@ export class UnifiedRouter {
    * Decide which engine should execute a query.
    *
    * Order of priority:
-   *   0. Hot query cache: return cached decision for repeated SQL (fast path)
-   *   1. Config override: alwaysRouteToSQLite → SQLite
-   *   2. Config override: alwaysRouteToDuckDB → DuckDB
+   *   0. Config override: alwaysRouteToSQLite → SQLite (absolute, before cache)
+   *   1. Config override: alwaysRouteToDuckDB → DuckDB (absolute, before cache)
+   *   2. Hot query cache: return cached decision for repeated SQL (fast path)
    *   3. Circuit breaker: if DuckDB repeatedly fails → SQLite
    *   4. Non-SELECT statements (INSERT/UPDATE/DELETE/DDL/TRANSACTION) → SQLite
    *   5. Transaction context (inTransaction === true) → SQLite
@@ -105,20 +105,21 @@ export class UnifiedRouter {
   ): RouteDecision {
     const { alwaysRouteToSQLite, alwaysRouteToDuckDB, analyticClassifier, hotQueryCache } = this.config;
 
-    // Priority 0: Hot query cache — return cached decision for repeated SQL
-    if (hotQueryCache && !ctx?.inTransaction) {
-      const cached = hotQueryCache.get(sql);
-      if (cached) return cached;
-    }
-
-    // Priority 1: Config override — force SQLite
+    // Priority 0: Config override — force SQLite. Absolute override, checked
+    // before the cache so a stale cached decision can never leak through.
     if (alwaysRouteToSQLite) {
       return { target: QueryTarget.SQLITE_OLTP, reason: 'config: alwaysRouteToSQLite', skipFallback: false };
     }
 
-    // Priority 2: Config override — force DuckDB
+    // Priority 1: Config override — force DuckDB (also absolute).
     if (alwaysRouteToDuckDB) {
       return { target: QueryTarget.DUCKDB_OLAP, reason: 'config: alwaysRouteToDuckDB', skipFallback: true };
+    }
+
+    // Priority 2: Hot query cache — return cached decision for repeated SQL
+    if (hotQueryCache && !ctx?.inTransaction) {
+      const cached = hotQueryCache.get(sql);
+      if (cached) return cached;
     }
 
     // Priority 3: Circuit breaker — if DuckDB repeatedly fails, route to SQLite
@@ -194,8 +195,11 @@ export class UnifiedRouter {
     const cache = this.config.hotQueryCache;
 
     // Cache the routing decision for future hot queries.
-    // Only cache non-transactional decisions (transaction context changes per call).
-    if (cache && !ctx?.inTransaction) {
+    // Only cache non-transactional decisions (transaction context changes per
+    // call) and skip caching when a config override is active, so a forced
+    // engine never pollutes the cache and leaks through a later decide().
+    const configOverride = this.config.alwaysRouteToSQLite || this.config.alwaysRouteToDuckDB;
+    if (cache && !ctx?.inTransaction && !configOverride) {
       cache.set(sql, decision);
     }
 
