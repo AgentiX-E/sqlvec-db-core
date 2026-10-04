@@ -76,11 +76,18 @@ export class SavepointManager {
    * without discarding changes.
    */
   release(name: string): void {
-    this.savepointIndexMap.delete(name);
-    // Remove from stack (all savepoints up to and including name)
+    // Remove from stack (all savepoints up to and including name). Releasing a
+    // savepoint also releases every nested savepoint established inside it, so
+    // drop their index entries too — mirroring the rollbackTo cleanup — to
+    // avoid leaking stale entries that later rollbacks would mis-dispatch on.
     const idx = this.savepointStack.lastIndexOf(name);
     if (idx >= 0) {
+      for (let i = this.savepointStack.length - 1; i >= idx; i--) {
+        this.savepointIndexMap.delete(this.savepointStack[i]);
+      }
       this.savepointStack.splice(idx);
+    } else {
+      this.savepointIndexMap.delete(name);
     }
     this.logger.debug({ name, remainingLevel: this.savepointStack.length }, 'SAVEPOINT released');
   }
@@ -96,20 +103,26 @@ export class SavepointManager {
       return;
     }
 
-    // Discard pending changes from the savepoint index onward
+    // Discard pending changes from the savepoint index onward. When the
+    // savepoint was created and then rolled back with no intervening change,
+    // savedIndex equals the current length and there is nothing to discard.
     if (savedIndex < this.pendingChanges.length) {
       this.pendingChanges.splice(savedIndex);
+    } else {
+      // Nothing recorded after this savepoint — leave pendingChanges intact.
+      this.logger.debug({ name }, 'ROLLBACK TO SAVEPOINT: no pending changes to discard');
     }
 
-    // Remove savepoints from stack (all created after and including `name`)
+    // Remove savepoints from stack (all created after and including `name`).
+    // Invariant: `savedIndex` was defined above, so `name` exists in the index
+    // map. savepoint()/release()/rollbackTo() keep the stack and index map in
+    // lockstep, therefore `name` is also present in the stack and stackIdx is
+    // guaranteed to be >= 0 here.
     const stackIdx = this.savepointStack.lastIndexOf(name);
-    if (stackIdx >= 0) {
-      // Remove all savepoints that were created at or after this one
-      for (let i = this.savepointStack.length - 1; i >= stackIdx; i--) {
-        this.savepointIndexMap.delete(this.savepointStack[i]);
-      }
-      this.savepointStack.splice(stackIdx);
+    for (let i = this.savepointStack.length - 1; i >= stackIdx; i--) {
+      this.savepointIndexMap.delete(this.savepointStack[i]);
     }
+    this.savepointStack.splice(stackIdx);
 
     this.logger.debug({ name }, 'ROLLBACK TO SAVEPOINT executed');
   }
