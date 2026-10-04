@@ -189,7 +189,13 @@ export class CostEstimator {
 
   private formatCount(n: number): string {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-    if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+    if (n >= 1_000) {
+      const k = (n / 1_000).toFixed(1);
+      // Rounding at the 1000K boundary must roll up to the next unit
+      // (999.95K → 1.0M) rather than emit "1000.0K".
+      if (k === '1000.0') return '1.0M';
+      return `${k}K`;
+    }
     return String(n);
   }
 }
