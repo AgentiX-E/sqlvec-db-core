@@ -145,7 +145,7 @@ function inferShardFromSql(
     // Fallback: extract first value from VALUES tuple
     const valMatch = sql.match(/VALUES\s*\(([^)]+)\)/i);
     if (valMatch) {
-      const firstVal = valMatch[1].split(',')[0].trim().replace(/^'|'$/g, '');
+      const firstVal = valMatch[1].split(',')[0].trim().replace(/^['"]|['"]$/g, '');
       return shardManager.getShardIdForKey(firstVal, shardCount);
     }
   }
