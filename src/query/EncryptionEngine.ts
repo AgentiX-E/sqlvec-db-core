@@ -52,7 +52,19 @@ import { PinoLogger } from '../logger/PinoLogger';
 
 // ── Types ────────────────────────────────────────────────────────
 
-export type EncryptionAlgorithm = 'aes-256-gcm' | 'aes-256-cbc' | 'aes-128-gcm';
+/**
+ * Supported encryption algorithms.
+ *
+ * Only authenticated GCM modes are supported: the encrypted value layout
+ * (`IV(12) + ciphertext + authTag(16)`) is fixed and relies on the GCM
+ * authentication tag for integrity. CBC is intentionally omitted — it would
+ * require a different, non-authenticated wire format (16-byte IV, PKCS#7
+ * padding, no tag) that is incompatible with the transparent round-trip
+ * contract of this engine. The previous `aes-256-cbc` entry was dead: the
+ * `encrypt`/`decrypt` implementation always used the GCM tag API, so a CBC
+ * policy failed immediately with `Invalid initialization vector`.
+ */
+export type EncryptionAlgorithm = 'aes-256-gcm' | 'aes-128-gcm';
 
 export interface EncryptionPolicy {
   /** Policy name. */
@@ -75,7 +87,6 @@ const IV_LENGTH = 12; // AES-GCM standard nonce size
 const AUTH_TAG_LENGTH = 16; // GCM authentication tag
 const KEY_LENGTHS: Record<EncryptionAlgorithm, number> = {
   'aes-256-gcm': 32,
-  'aes-256-cbc': 32,
   'aes-128-gcm': 16,
 };
 
@@ -119,6 +130,33 @@ export class EncryptionEngine {
     this.policies.set(column, policy);
 
     this.logger.info({ name, column, algorithm }, 'Encryption policy created');
+  }
+
+  /**
+   * Resolve the policy that covers a column, preferring the qualified
+   * `table.column` key and falling back to the bare `column` key.
+   *
+   * Returns both the matching entry (for `enabled` checks) and the exact
+   * registration key, so callers can pass the SAME key to `encrypt`/`decrypt`.
+   * Without this, a policy registered under a bare column name is matched here
+   * but then looked up again under the qualified name inside `encrypt`/`decrypt`,
+   * which throws `No active encryption policy` (the two lookups disagree).
+   *
+   * @param table    - Table name (may be empty when unknown).
+   * @param colName  - Bare (unqualified) column name.
+   */
+  private resolvePolicy(
+    table: string,
+    colName: string,
+  ): { key: string; policy: EncryptionPolicy } | undefined {
+    if (table) {
+      const qualified = `${table}.${colName}`;
+      const qualifiedPolicy = this.policies.get(qualified);
+      if (qualifiedPolicy) return { key: qualified, policy: qualifiedPolicy };
+    }
+    const barePolicy = this.policies.get(colName);
+    if (barePolicy) return { key: colName, policy: barePolicy };
+    return undefined;
   }
 
   /**
@@ -234,9 +272,12 @@ export class EncryptionEngine {
    * @returns Encrypted buffer
    */
   encryptColumn(table: string, column: string, value: any): Buffer {
-    const qualifiedName = `${table}.${column}`;
+    const resolved = this.resolvePolicy(table, column);
+    if (!resolved || !resolved.policy.enabled) {
+      throw new Error(`No active encryption policy for column: ${table ? `${table}.` : ''}${column}`);
+    }
     const strValue = value === null || value === undefined ? '' : String(value);
-    return this.encrypt(qualifiedName, strValue);
+    return this.encrypt(resolved.key, strValue);
   }
 
   /**
@@ -249,8 +290,11 @@ export class EncryptionEngine {
    * @returns Decrypted plaintext string
    */
   decryptColumn(table: string, column: string, buffer: Buffer): string {
-    const qualifiedName = `${table}.${column}`;
-    return this.decrypt(qualifiedName, buffer);
+    const resolved = this.resolvePolicy(table, column);
+    if (!resolved || !resolved.policy.enabled) {
+      throw new Error(`No active encryption policy for column: ${table ? `${table}.` : ''}${column}`);
+    }
+    return this.decrypt(resolved.key, buffer);
   }
 
   /**
@@ -319,14 +363,11 @@ export class EncryptionEngine {
       const colName = columns[idx];
       if (!colName) return value;
 
-      // Check the full qualified name and simple name.
-      const qualifiedName = `${table}.${colName}`;
-      const policy = this.policies.get(qualifiedName) || this.policies.get(colName);
-
-      if (policy && policy.enabled) {
+      const resolved = this.resolvePolicy(table, colName);
+      if (resolved && resolved.policy.enabled) {
         rewritten = true;
         const plaintext = value.replace(/^['"]|['"]$/g, '');
-        const encrypted = this.encrypt(qualifiedName, plaintext);
+        const encrypted = this.encrypt(resolved.key, plaintext);
         // SQLite hex literal: X'...'
         return `X'${encrypted.toString('hex')}'`;
       }
@@ -372,10 +413,9 @@ export class EncryptionEngine {
     let rewritten = false;
     const newColumns = columns.map((col) => {
       const colName = col.replace(/[`"']/g, '').split(/\s+/)[0]; // Handle aliases
-      const qualifiedName = fromTable ? `${fromTable}.${colName}` : colName;
-      const policy = this.policies.get(qualifiedName) || this.policies.get(colName);
+      const resolved = this.resolvePolicy(fromTable ?? '', colName);
 
-      if (policy && policy.enabled && col.indexOf('_decrypt') === -1) {
+      if (resolved && resolved.policy.enabled && col.indexOf('_decrypt') === -1) {
         rewritten = true;
         // Mark for decryption — the QueryRouter will handle the actual
         // Buffer → string conversion after fetching the row.
@@ -411,12 +451,11 @@ export class EncryptionEngine {
     const result: Record<string, any> = { ...row };
 
     for (const colName of Object.keys(row)) {
-      const qualifiedName = `${table}.${colName}`;
-      const policy = this.policies.get(qualifiedName) || this.policies.get(colName);
+      const resolved = this.resolvePolicy(table, colName);
 
-      if (policy && policy.enabled && row[colName] instanceof Buffer) {
+      if (resolved && resolved.policy.enabled && row[colName] instanceof Buffer) {
         try {
-          result[colName] = this.decrypt(qualifiedName, row[colName]);
+          result[colName] = this.decrypt(resolved.key, row[colName]);
         } catch (err) {
           this.logger.warn(
             { colName, err },
@@ -459,11 +498,19 @@ export class EncryptionEngine {
 
   /**
    * Parse a comma-separated value list, respecting quoted strings.
+   *
+   * Only single/double quotes are tracked. Parenthesis nesting is intentionally
+   * NOT handled here: the caller's INSERT regex captures the VALUES list with
+   * `[^)]+`, so a value containing a nested `)` (e.g. a function call) already
+   * terminates the capture and such "complex" INSERT statements are left
+   * unrewritten (documented in rewriteInsert). Tracking a parenthesis depth here
+   * would be dead code — and worse, a truncated capture containing an unmatched
+   * `(` would wedge the depth counter and prevent every subsequent column from
+   * being split apart.
    */
   private parseValueList(valuesRaw: string): string[] {
     const values: string[] = [];
     let current = '';
-    let depth = 0;
     let inQuote: string | null = null;
 
     for (const ch of valuesRaw) {
@@ -479,13 +526,7 @@ export class EncryptionEngine {
         continue;
       }
 
-      if (ch === '(') {
-        depth++;
-        current += ch;
-      } else if (ch === ')') {
-        depth--;
-        current += ch;
-      } else if (ch === ',' && depth === 0) {
+      if (ch === ',') {
         values.push(current.trim());
         current = '';
       } else {
