@@ -341,7 +341,12 @@ function extractSelectTables(stmt: any): string[] {
 
   for (const fromItem of stmt.from) {
     if (fromItem.type === 'table') {
-      const name = fromItem.name?.alias || fromItem.name?.name;
+      // Use the real table name (not the alias). The `tables` list is consumed
+      // by partition routing, shard routing, and column-privilege checks, all
+      // of which index metadata by real table name. Extracting an alias here
+      // (e.g. `FROM users AS u` → "u") would break that lookup and diverge from
+      // extractTablesFromExpr(), which already returns the bare table name.
+      const name = fromItem.name?.name;
       if (name) tables.push(name);
       // JOIN ... ON <cond> may embed a subquery (e.g. ON t.id = (SELECT MAX(v.id) FROM v)).
       if (fromItem.join?.on) {
