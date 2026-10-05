@@ -134,7 +134,7 @@ import { AutovacuumDaemon } from './AutovacuumDaemon';
 import type { AutovacuumConfig } from './AutovacuumDaemon';
 import { detectNotifyListen, handleNotifyListen } from './NotifyListenShim';
 // Step 1j: 2PC (two-phase commit) compatibility
-import { detectTwoPhase, rewriteTwoPhase, TwoPhaseCommitManager } from './TwoPhaseCommitManager';
+import { detectTwoPhase, TwoPhaseCommitManager } from './TwoPhaseCommitManager';
 import * as crypto from 'crypto';
 // Step 1k: CREATE TABLE LIKE compatibility
 import { detectCreateTableLike, rewriteCreateTableLike } from './CreateTableLikeShim';

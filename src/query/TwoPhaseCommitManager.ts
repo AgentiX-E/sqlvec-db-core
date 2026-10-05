@@ -204,8 +204,6 @@ export class TwoPhaseCommitManager {
   private readonly shardManager?: ShardManager;
   /** Direct database handle for fallback access. */
   private readonly fallbackDb?: any;
-  /** Whether the system table has been initialised. */
-  private tableInitialized: boolean = false;
 
   // ── GAP-10: Prepared transaction management ─────────────────
 
@@ -254,11 +252,13 @@ export class TwoPhaseCommitManager {
   // ── Persistence helpers (P0-2) ──────────────
 
   /**
-   * Create the `__prepared_transactions` table on all shards if it does not exist.
+   * Create the `__prepared_transactions` table if it does not exist.
+   *
+   * Only invoked from the constructor, and only once persistence has been
+   * confirmed available, so the caller-side availability guard is not repeated
+   * here. The `IF NOT EXISTS` clause keeps the DDL idempotent.
    */
   private ensurePreparedTable(): void {
-    if (this.tableInitialized) return;
-
     const ddl = `CREATE TABLE IF NOT EXISTS __prepared_transactions (
       gid TEXT PRIMARY KEY,
       state TEXT NOT NULL,
@@ -268,46 +268,16 @@ export class TwoPhaseCommitManager {
     )`;
 
     try {
-      if (this.shardManager || this.fallbackDb) {
+      const db = this.getShardDb();
+      if (db) {
         // Create on shard 0 (system metadata)
-        const db = this.getShardDb();
-        if (db) {
-          // Enable WAL journaling for crash-safe persistence
-          db.exec('PRAGMA journal_mode=WAL');
-          db.exec(ddl);
-        }
+        // Enable WAL journaling for crash-safe persistence
+        db.exec('PRAGMA journal_mode=WAL');
+        db.exec(ddl);
       }
-      this.tableInitialized = true;
       this.logger.debug('Prepared transactions table initialised');
     } catch (err) {
       this.logger.error({ err }, 'Failed to create __prepared_transactions table');
-    }
-  }
-
-  /**
-   * Load prepared transactions from the persisted table (crash recovery).
-   */
-  private loadFromDb(): void {
-    if (!this.shardManager && !this.fallbackDb) return;
-    try {
-      const db = this.getShardDb();
-      if (!db) return;
-      const rows = db.prepare(`SELECT * FROM __prepared_transactions WHERE state = 'prepared'`).all() as any[];
-      for (const row of rows) {
-        const id = String(row.gid);
-        const pendingSql: string[] = JSON.parse(String(row.pending_sql));
-        const savepointName = this.buildSavepointName(id);
-        this.prepared.set(id, {
-          id,
-          createdAt: new Date(Number(row.prepared_at)),
-          savepointName,
-          pendingSqlCount: pendingSql.length,
-          pendingSql,
-        });
-      }
-      this.logger.info({ count: rows.length }, 'Restored prepared transactions from DB');
-    } catch (err) {
-      this.logger.warn({ err }, 'Failed to load prepared transactions from DB');
     }
   }
 
@@ -718,8 +688,11 @@ export class TwoPhaseCommitManager {
   }
 
   /**
-   * Sweep all prepared transactions and roll back any that have timed out
-   * or are zombies (no owner session). Called internally by the cleanup timer.
+   * Sweep all prepared transactions and roll back any that have timed out.
+   * Zombie transactions (no owner session) are only *flagged* into
+   * `zombieGids` — they are surfaced by `listPrepared` and cleaned up via
+   * `discardPreparedTransactions`, not silently rolled back here. Called
+   * internally by the cleanup timer.
    *
    * @returns Number of transactions rolled back during this sweep
    */
@@ -1036,8 +1009,9 @@ export function detectTwoPhase(sql: string): 'prepare' | 'commit' | 'rollback' |
  * Rewrite a 2PC SQL statement to a no-op comment.
  *
  * This is a "safe mode" rewriter for environments that need to handle 2PC
- * statements without crashing, but without actual 2PC semantics. The
- * original SQL is returned inside a SQL comment to preserve it for debugging.
+ * statements without crashing, but without actual 2PC semantics. The detected
+ * 2PC statement is replaced by an inert `SELECT 1`, with the original SQL
+ * (newlines folded to spaces) preserved in a leading comment for debugging.
  *
  * **Known limitation:** This function does **not** parse nested contexts
  * (e.g. 2PC inside PL/pgSQL functions). It only handles top-level statements.
@@ -1049,7 +1023,7 @@ export function detectTwoPhase(sql: string): 'prepare' | 'commit' | 'rollback' |
  * @example
  * ```ts
  * rewriteTwoPhase("PREPARE TRANSACTION 'abc'");
- * // → { sql: '-- 2PC no-op\nSELECT 1', rewritten: true }
+ * // → { sql: '-- 2PC (prepare) no-op: PREPARE TRANSACTION \'abc\'\nSELECT 1', rewritten: true }
  *
  * rewriteTwoPhase("SELECT 1");
  * // → { sql: "SELECT 1", rewritten: false }
@@ -1067,8 +1041,13 @@ export function rewriteTwoPhase(sql: string): { sql: string; rewritten: boolean 
     return { sql: trimmed, rewritten: false };
   }
 
-  // Pass through to QueryRouter which will route to TwoPhaseCommitManager methods
-  return { sql: trimmed, rewritten: false };
+  // Safe mode: replace the 2PC statement with an inert SELECT 1, keeping the
+  // original text (newlines folded) in a comment for diagnostics.
+  const original = trimmed.replace(/\r?\n/g, ' ');
+  return {
+    sql: `-- 2PC (${type}) no-op: ${original}\nSELECT 1`,
+    rewritten: true,
+  };
 }
 
 /**
