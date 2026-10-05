@@ -146,13 +146,13 @@ export class MvccManager {
     // xmax = current XID = self-deleting = invisible to self
     if (xmax === snapshot.currentXid) return false;
 
-    // xmax is committed = invisible
+    // xmax is committed = invisible (the delete took effect)
     if (this.clog.isCommitted(xmax)) return false;
 
-    // xmax is in-progress and in xip_list = invisible
-    if (this.globalActiveXids.has(xmax)) return false;
-
-    // xmax is aborted = visible (delete was rolled back)
+    // Otherwise xmax is either aborted (delete rolled back) or still
+    // in-progress (deleter not yet committed). In both cases the OLD row
+    // version remains visible — matching PostgreSQL's rule that an
+    // uncommitted delete does not hide the previous version from readers.
     return true;
   }
 
