@@ -27,6 +27,18 @@ import { PinoLogger } from '../../logger/PinoLogger';
 
 const logger = PinoLogger.forComponent('PredicatePushdown');
 
+/**
+ * Aggregate function names recognized for pushdown / merge-strategy decisions.
+ * `planPushdown`, `determineMergeStrategy`, and `wrapWithReaggregate` must all
+ * agree on this set so a query is classified consistently as aggregation (or
+ * not) across every step of the distributed-query pipeline.
+ */
+const AGGREGATE_FN_PATTERN =
+  /\b(?:SUM|AVG|COUNT|MIN|MAX|ARRAY_AGG|STRING_AGG|LISTAGG)\s*\(/i;
+
+/** TRUE when the SQL contains a GROUP BY clause. */
+const GROUP_BY_PATTERN = /\bGROUP\s+BY\b/i;
+
 export interface PushdownPlan {
   /** Per-node SQL queries to execute */
   nodeQueries: Array<{ nodeId: number; sql: string }>;
@@ -60,9 +72,8 @@ export function planPushdown(
   }
 
   // Detect if this is an aggregation query (GROUP BY, aggregate functions)
-  const hasGroupBy = /\bGROUP\s+BY\b/i.test(originalSql);
-  const hasAggregateFn =
-    /\b(?:SUM|AVG|COUNT|MIN|MAX|ARRAY_AGG|STRING_AGG|LISTAGG)\s*\(/i.test(originalSql);
+  const hasGroupBy = GROUP_BY_PATTERN.test(originalSql);
+  const hasAggregateFn = AGGREGATE_FN_PATTERN.test(originalSql);
 
   // Strategy: partial GROUP BY pushdown
   if (hasGroupBy || hasAggregateFn) {
@@ -102,9 +113,8 @@ export function planPushdown(
 export type MergeStrategy = 'union_all' | 'union_all_reaggregate';
 
 export function determineMergeStrategy(originalSql: string): MergeStrategy {
-  const hasGroupBy = /\bGROUP\s+BY\b/i.test(originalSql);
-  const hasAggregateFn =
-    /\b(?:SUM|AVG|COUNT|MIN|MAX)\s*\(/i.test(originalSql);
+  const hasGroupBy = GROUP_BY_PATTERN.test(originalSql);
+  const hasAggregateFn = AGGREGATE_FN_PATTERN.test(originalSql);
   return hasGroupBy || hasAggregateFn ? 'union_all_reaggregate' : 'union_all';
 }
 
@@ -124,8 +134,8 @@ export function determineMergeStrategy(originalSql: string): MergeStrategy {
  */
 export function wrapWithReaggregate(originalSql: string): string {
   // For simple queries without aggregation, just UNION ALL
-  if (!/\bGROUP\s+BY\b/i.test(originalSql) &&
-      !/\b(?:SUM|AVG|COUNT|MIN|MAX)\s*\(/i.test(originalSql)) {
+  if (!GROUP_BY_PATTERN.test(originalSql) &&
+      !AGGREGATE_FN_PATTERN.test(originalSql)) {
     return originalSql;
   }
 
