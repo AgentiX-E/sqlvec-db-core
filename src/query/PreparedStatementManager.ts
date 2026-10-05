@@ -103,21 +103,32 @@ export class PreparedStatementManager {
     // Mark as recently used
     this.accessOrder.set(key, ++this.accessSeq);
 
-    // Validate parameter count
-    const placeholderCount = (stmt.sql.match(/\$(\d+)/g) || []).length;
-    if (placeholderCount > 0 && params.length !== placeholderCount) {
+    // Positional parameters are 1-indexed ($1, $2, ...). The highest placeholder
+    // index determines how many parameters are required, regardless of how many
+    // distinct placeholders are referenced (e.g. "WHERE a = $1 AND b = $10"
+    // requires exactly 10 parameters). Counting occurrences instead would let a
+    // multi-digit placeholder slip through validation and then also fail to be
+    // substituted — the previous loop only walked $1..$params.length.
+    let maxPlaceholderIndex = 0;
+    for (const m of stmt.sql.matchAll(/\$(\d+)/g)) {
+      const idx = Number(m[1]);
+      if (idx > maxPlaceholderIndex) maxPlaceholderIndex = idx;
+    }
+
+    if (maxPlaceholderIndex > 0 && params.length !== maxPlaceholderIndex) {
       throw new Error(
-        `Prepared statement "${name}" expects ${placeholderCount} parameters, but ${params.length} were provided`,
+        `Prepared statement "${name}" expects ${maxPlaceholderIndex} parameters, but ${params.length} were provided`,
       );
     }
 
-    // Substitute $1, $2, ... with escaped parameter values
+    // Substitute placeholders from the highest index down to $1 so that a
+    // shorter placeholder can never corrupt a longer one (e.g. $1 vs $10).
+    // The `(?![0-9])` lookahead additionally guarantees exact index matching.
     let substitutedSql = stmt.sql;
-    for (let i = 0; i < params.length; i++) {
-      const placeholder = `$${i + 1}`;
-      const escapedValue = this.escapeParam(params[i]);
+    for (let n = maxPlaceholderIndex; n >= 1; n--) {
+      const escapedValue = this.escapeParam(params[n - 1]);
       substitutedSql = substitutedSql.replace(
-        new RegExp(`\\${placeholder}(?![0-9])`, 'g'),
+        new RegExp(`\\$${n}(?![0-9])`, 'g'),
         escapedValue,
       );
     }
