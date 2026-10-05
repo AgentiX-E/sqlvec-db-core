@@ -27,7 +27,6 @@
  */
 
 import { PinoLogger } from '../logger/PinoLogger';
-import { skipSqlLiteral } from './SqlLiteralScanner';
 import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 
 const logger = PinoLogger.forComponent('ExcludeShim');
@@ -40,6 +39,15 @@ export interface ExcludeShimResult {
   /** Whether the SQL was modified */
   rewritten: boolean;
 }
+
+/** Aggregate function names this shim can rewrite arithmetically. */
+type ArithmeticAggFunc = 'SUM' | 'AVG' | 'COUNT';
+
+/** Aggregate function names the CTE (GROUP/TIES) path can rewrite. */
+type CteAggFunc = 'SUM' | 'AVG' | 'COUNT' | 'MIN' | 'MAX';
+
+/** EXCLUDE variants handled by the CTE (GROUP/TIES) path. */
+type CteExcludeType = 'GROUP' | 'TIES';
 
 // ── Constants – Regex patterns ───────────────────────────────────
 
@@ -176,21 +184,19 @@ function isSimpleSelect(sql: string): boolean {
   return /^\s*SELECT\b/i.test(sql.trim());
 }
 
-// ── Internal: literal-aware parenthesis matcher ──────────────────
+// ── Internal: parenthesis matcher ────────────────────────────────
 
 /**
  * Return the index of the `)` that balances the `(` at `openParen`, or -1.
- * Skips string literals, quoted identifiers, dollar-quoted strings, and
- * comments so parens inside them never corrupt depth tracking.
+ *
+ * The input has already been passed through `protectSQL`, so every string
+ * literal, quoted identifier, dollar-quoted string, and comment has been
+ * replaced by a `__LIT_N__` placeholder (which contains no parens). Plain
+ * depth counting is therefore unambiguous.
  */
 function findMatchingParen(sql: string, openParen: number): number {
   let depth = 0;
   for (let i = openParen; i < sql.length; i++) {
-    const skipped = skipSqlLiteral(sql, i);
-    if (skipped !== -1) {
-      i = skipped - 1;
-      continue;
-    }
     const ch = sql[i];
     if (ch === '(') depth++;
     else if (ch === ')') {
@@ -211,19 +217,14 @@ function findMatchingParen(sql: string, openParen: number): number {
  */
 function rewriteExcludeCurrentRow(sql: string): ExcludeShimResult {
   // Scan for SUM/AVG/COUNT(...) OVER (... EXCLUDE CURRENT ROW ...) using a
-  // literal-aware, balanced-paren approach. This handles nested arguments like
-  // SUM(f(a,b)) that a `[^()]+` regex cannot (BUG #433).
+  // balanced-paren approach. This handles nested arguments like SUM(f(a,b))
+  // that a `[^()]+` regex cannot (BUG #433). Literals are already masked by
+  // protectSQL before this routine runs.
   let working = sql;
   let found = false;
 
   let i = 0;
   while (i < working.length) {
-    const skipped = skipSqlLiteral(working, i);
-    if (skipped !== -1) {
-      i = skipped;
-      continue;
-    }
-
     // Match an aggregate function name at a word boundary.
     const fnMatch = /^(SUM|AVG|COUNT)\b/i.exec(working.slice(i));
     if (!fnMatch) {
@@ -231,7 +232,7 @@ function rewriteExcludeCurrentRow(sql: string): ExcludeShimResult {
       continue;
     }
 
-    const aggFunc = fnMatch[1].toUpperCase();
+    const aggFunc = fnMatch[1].toUpperCase() as ArithmeticAggFunc;
     let j = i + fnMatch[0].length;
 
     // Skip whitespace then expect an opening paren.
@@ -303,11 +304,17 @@ function rewriteExcludeCurrentRow(sql: string): ExcludeShimResult {
         }
         break;
       case 'AVG':
+        // AVG(x) with the current row excluded = (SUM(x) - x) / (COUNT(x) - 1),
+        // preserving NULL semantics: a NULL current row contributes to neither
+        // SUM nor COUNT, so subtract 0 in both. The denominator must be COUNT
+        // (not AVG). (BUG: previously divided by AVG(x) - 1, which is a unit
+        // mismatch and yields wildly wrong results.)
         replacement =
           `CAST(COALESCE(SUM(${aggArg}) ${cleanOverClause}, 0) - COALESCE(${aggArg}, 0) AS REAL) / ` +
-          `CAST(AVG(${aggArg}) ${cleanOverClause} - 1 AS REAL)`;
+          `CAST(COUNT(${aggArg}) ${cleanOverClause} - CASE WHEN ${aggArg} IS NOT NULL THEN 1 ELSE 0 END AS REAL)`;
         break;
       default:
+        // Unreachable: the scan regex only yields SUM/AVG/COUNT.
         i = overClose + 1;
         continue;
     }
@@ -356,23 +363,17 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
   let found = false;
 
   // Scan the SELECT list for AGG(arg) OVER (... EXCLUDE GROUP|TIES ...) using a
-  // literal-aware balanced-paren approach so nested args like SUM(f(a,b)) work
-  // (BUG #435).
+  // balanced-paren approach so nested args like SUM(f(a,b)) work (BUG #435).
+  // Literals are already masked by protectSQL before this routine runs.
   let i = 0;
   while (i < workingSelect.length) {
-    const skipped = skipSqlLiteral(workingSelect, i);
-    if (skipped !== -1) {
-      i = skipped;
-      continue;
-    }
-
     const fnMatch = /^(SUM|AVG|COUNT|MIN|MAX)\b/i.exec(workingSelect.slice(i));
     if (!fnMatch) {
       i++;
       continue;
     }
 
-    const aggFunc = fnMatch[1].toUpperCase();
+    const aggFunc = fnMatch[1].toUpperCase() as CteAggFunc;
     let j = i + fnMatch[0].length;
     while (j < workingSelect.length && /\s/.test(workingSelect[j])) j++;
     if (workingSelect[j] !== '(') {
@@ -417,13 +418,14 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
       i = overClose + 1;
       continue;
     }
-    const excludeType = excludeMatch[1].trim().toUpperCase();
+    const excludeTypeRaw = excludeMatch[1].trim().toUpperCase();
 
     // EXCLUDE CURRENT ROW is handled by the arithmetic path.
-    if (excludeType === 'CURRENT ROW') {
+    if (excludeTypeRaw === 'CURRENT ROW') {
       i = overClose + 1;
       continue;
     }
+    const excludeType = excludeTypeRaw as CteExcludeType;
 
     const cteAlias = `__exc_cte_${counter}`;
     const grpAlias = `__exc_grp_${counter}`;
@@ -477,8 +479,10 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
         whereExclude = `sub.${grpAlias} <> ${cteAlias}.${grpAlias} OR sub.rowid = ${cteAlias}.rowid`;
         break;
       default:
+        // Unreachable: EXCLUDE CURRENT ROW was skipped above; only GROUP/TIES
+        // can reach this switch.
         i = overClose + 1;
-        continue; // Should not reach
+        continue;
     }
 
     // Add PARTITION BY filter
@@ -519,6 +523,7 @@ function rewriteExcludeGroupTies(sql: string): ExcludeShimResult {
           `(SELECT MAX(sub.${aggArg}) FROM ${cteAlias} sub WHERE ${partitionFilter}${whereExclude})`;
         break;
       default:
+        // Unreachable: the scan regex only yields SUM/AVG/COUNT/MIN/MAX.
         i = overClose + 1;
         continue;
     }

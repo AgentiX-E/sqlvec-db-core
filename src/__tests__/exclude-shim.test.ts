@@ -48,7 +48,11 @@ describe('rewriteExclude — EXCLUDE CURRENT ROW (arithmetic)', () => {
   });
   it('rewrites AVG', () => {
     const r = rewriteExclude('SELECT AVG(x) OVER (ROWS 3 PRECEDING EXCLUDE CURRENT ROW) FROM t');
+    // Numerator: SUM(x) - current row's x.
     expect(r.sql).toContain('CAST(COALESCE(SUM(x) OVER (ROWS 3 PRECEDING), 0) - COALESCE(x, 0) AS REAL)');
+    // Denominator must be COUNT(x) - 1 (with NULL guard), NOT AVG(x) - 1.
+    expect(r.sql).toContain('CAST(COUNT(x) OVER (ROWS 3 PRECEDING) - CASE WHEN x IS NOT NULL THEN 1 ELSE 0 END AS REAL)');
+    expect(r.sql).not.toContain('AVG(x) OVER (ROWS 3 PRECEDING) - 1');
   });
   it('rewrites a nested aggregate argument', () => {
     const r = rewriteExclude('SELECT SUM(f(a,b)) OVER (ORDER BY y EXCLUDE CURRENT ROW) FROM t');
