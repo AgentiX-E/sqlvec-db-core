@@ -33,7 +33,7 @@ const logger = PinoLogger.forComponent('CommitLog');
 
 // ── Types ────────────────────────────────────────────────────────
 
-export type ClogStatus = 'committed' | 'aborted' | 'in-progress' | 'unknown';
+export type ClogStatus = 'committed' | 'aborted' | 'unknown';
 
 /**
  * Minimal SQLite database interface compatible with better-sqlite3.
@@ -114,11 +114,13 @@ export class CommitLog {
    * Get the commit status of a transaction.
    *
    * Returns one of:
-   *   - 'committed'   — XID was committed
-   *   - 'aborted'     — XID was aborted
-   *   - 'in-progress' — XID exists in the table (e.g., as a row version) but
-   *                     has no explicit commit/abort entry
-   *   - 'unknown'     — XID is not known to the system at all
+   *   - 'committed' — XID was committed
+   *   - 'aborted'   — XID was aborted
+   *   - 'unknown'   — XID is not known to the system at all
+   *
+   * This CLOG only records the terminal commit/abort outcomes; it never
+   * allocates XIDs, so it has no "in-progress" state. (XID allocation and
+   * in-progress tracking live in the separate ClogManager.)
    *
    * @param xid  Transaction ID
    * @returns    ClogStatus
