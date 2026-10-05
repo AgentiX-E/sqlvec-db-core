@@ -271,24 +271,30 @@ export class PgPipeline {
     const start = performance.now();
     this.totalQueries++;
 
-    const upper = sql.trim().toUpperCase();
+    const trimmed = sql.trim();
+    const upper = trimmed.toUpperCase();
 
-    // 通过 TxCoord 管理事务生命周期
+    // Manage the transaction lifecycle through TxCoord.
     if (this.txCoord) {
+      // Ordering is critical: `ROLLBACK TO SAVEPOINT` and `RELEASE SAVEPOINT`
+      // must be matched before the plain `ROLLBACK` branch, otherwise a
+      // savepoint rollback is misrouted to the full-transaction rollback.
+      // Savepoint names are extracts from the ORIGINAL SQL (case-preserved)
+      // because PostgreSQL treats savepoint identifiers as case-sensitive.
       if (upper === 'BEGIN' || upper.startsWith('BEGIN ')) {
         await this.txCoord.begin(ctx.sessionId);
       } else if (upper === 'COMMIT' || upper.startsWith('COMMIT')) {
         await this.txCoord.commit(ctx.sessionId);
-      } else if (upper === 'ROLLBACK' || upper.startsWith('ROLLBACK')) {
+      } else if (upper.startsWith('ROLLBACK TO SAVEPOINT ')) {
+        const name = trimmed.slice(21).trim();
+        await this.txCoord.rollbackToSavepoint(name, ctx.sessionId);
+      } else if (upper === 'ROLLBACK' || upper.startsWith('ROLLBACK ')) {
         await this.txCoord.rollback(ctx.sessionId);
       } else if (upper.startsWith('SAVEPOINT ')) {
-        const name = upper.slice(10).trim();
+        const name = trimmed.slice(10).trim();
         await this.txCoord.savepoint(name, ctx.sessionId);
-      } else if (upper.startsWith('ROLLBACK TO SAVEPOINT ')) {
-        const name = upper.slice(21).trim();
-        await this.txCoord.rollbackToSavepoint(name, ctx.sessionId);
       } else if (upper.startsWith('RELEASE SAVEPOINT ')) {
-        const name = upper.slice(18).trim();
+        const name = trimmed.slice(18).trim();
         await this.txCoord.releaseSavepoint(name, ctx.sessionId);
       }
     }
@@ -341,22 +347,22 @@ export function createPipelineFor(
         : upper.startsWith('CREATE') || upper.startsWith('DROP') || upper.startsWith('ALTER') ? 'DDL'
         : upper.startsWith('BEGIN') || upper.startsWith('COMMIT') || upper.startsWith('ROLLBACK') ? 'TCL'
         : upper.startsWith('COPY') ? 'COPY'
+        // SET / SHOW were previously missing and fell through to 'OTHER',
+        // so any SET/SHOW statement was misclassified (wrong command tag).
+        : upper.startsWith('SET') ? 'SET'
+        : upper.startsWith('SHOW') ? 'SHOW'
         : 'OTHER';
       return {
         sql,
         meta: { rewrittenSql: sql, category, tables: [], hasReturning: false, isCopy: false, hasParams: false },
       };
     },
-    executeFn: (sql: string, params?: any[], sessionId?: string, shardId?: number) => {
-      // RouteStep 已确定目标分片 → 直接执行（仅 SELECT 查询，
-      // DDL/DML 需要经过 QueryRouter 的 17 步 shim pipeline）
-      if (shardId != null && shardId >= 0) {
-        const upper = sql.trim().toUpperCase();
-        if (/^SELECT\b/.test(upper)) {
-          // Direct execution via standard QueryRouter path
-          return queryRouter.execute(sql, params, sessionId);
-        }
-      }
+    executeFn: (sql: string, params?: any[], sessionId?: string, _shardId?: number) => {
+      // The `shardId` hint computed by RouteStep is intentionally not passed
+      // through here: `QueryRouter.execute(sql, params, sessionId)` performs
+      // its own scatter-gather routing internally and its signature has no
+      // shard-hint parameter. The hint exists in the function signature to
+      // keep the ExecStep contract stable for a future QueryRouter refactor.
       return queryRouter.execute(sql, params, sessionId);
     },
   }, txCoord, unifiedRouter, duckDBExecutor);

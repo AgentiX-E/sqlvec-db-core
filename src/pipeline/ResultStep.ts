@@ -26,6 +26,7 @@ const COMMAND_TAGS: Record<string, string> = {
   TCL: 'COMMIT',
   SET: 'SET',
   SHOW: 'SHOW',
+  COPY: 'COPY',
 };
 
 /**
