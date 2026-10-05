@@ -6,12 +6,21 @@
  * persistence, error reporting (bad output dir / bad params), and the
  * `normalizeL2` zero-vector guard via the `ip` space.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { Worker } from 'worker_threads';
 import hnswlib from 'hnswlib-node';
+
+// Re-export the real `fs` through a plain (configurable) object so individual
+// methods can be spied on. Node's ESM `fs` namespace is non-configurable, which
+// `vi.spyOn(fs, 'mkdirSync')` otherwise rejects; a spread copy keeps the real
+// implementations while making them spiable.
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual };
+});
 import { buildShard, normalizeL2 } from '../vector/hnsw-shard-worker';
 import type { ShardWorkerData } from '../vector/hnsw-shard-worker';
 
@@ -138,6 +147,37 @@ describe('hnsw-shard-worker', () => {
     expect(res.neighbors.length).toBe(1);
   });
 
+  it('buildShard stringifies a non-Error thrown value safely', () => {
+    // A thrown non-Error (here a string, and below null) must be reported as a
+    // string via String(err) rather than dereferencing `.message` on a
+    // primitive, which would throw a secondary TypeError and corrupt the
+    // worker's IPC result.
+    const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+      throw 'disk-full';
+    });
+    try {
+      const result = buildShard(makeData());
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('disk-full');
+      expect(result.indexPath).toBe('');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('buildShard stringifies a thrown null (String(null) === "null")', () => {
+    const spy = vi.spyOn(fs, 'mkdirSync').mockImplementation(() => {
+      throw null;
+    });
+    try {
+      const result = buildShard(makeData());
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('null');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('buildShard reports failure for an invalid output directory', () => {
     // Use a path whose parent is a regular file, making mkdirSync throw.
     const filePath = path.join(makeTmp(), 'not-a-dir');
@@ -171,6 +211,31 @@ describe('hnsw-shard-worker', () => {
     const result = buildShard(makeData({ m: 2.5 }));
     expect(result.success).toBe(false);
     expect(result.error).toMatch(/invalid m parameter/);
+  });
+
+  it('worker entry-point posts the result when loaded as a worker (not main thread)', async () => {
+    // Exercise the `if (!isMainThread)` branch in-process by mocking
+    // worker_threads so `isMainThread` is false, then re-importing the module
+    // with a fresh module registry. This proves the entry-point builds the
+    // shard and posts a ShardWorkerResult over parentPort — the same path the
+    // end-to-end worker test exercises, but now counted by in-process coverage.
+    const posted: any[] = [];
+    const data = makeData();
+    vi.doMock('worker_threads', () => ({
+      isMainThread: false,
+      workerData: data,
+      parentPort: { postMessage: (r: any) => posted.push(r) },
+    }));
+    vi.resetModules();
+    await import('../vector/hnsw-shard-worker');
+    vi.doUnmock('worker_threads');
+    vi.resetModules();
+
+    expect(posted.length).toBe(1);
+    expect(posted[0].success).toBe(true);
+    expect(posted[0].shardIndex).toBe(0);
+    expect(posted[0].count).toBe(2);
+    expect(fs.existsSync(posted[0].indexPath)).toBe(true);
   });
 
   it('runs end-to-end as a real worker thread (exercises the !isMainThread entry)', async () => {
