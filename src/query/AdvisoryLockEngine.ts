@@ -1,17 +1,23 @@
 /**
- * AdvisoryLockEngine — PostgreSQL 风格的 advisory lock (基于 async-mutex)
+ * AdvisoryLockEngine — PostgreSQL-style advisory locks backed by async-mutex.
  *
- * pg_advisory_lock(key) / pg_advisory_unlock(key) / pg_try_advisory_lock(key)
+ * Implements the semantics of:
+ *   - pg_advisory_lock(key)      -> acquire()  (blocking, optional timeout)
+ *   - pg_try_advisory_lock(key)  -> tryAcquire() (non-blocking)
+ *   - pg_advisory_unlock(key)    -> release()
  *
- * 每个 key 对应一个 Mutex, 支持可重入、超时、非阻塞检查。
+ * Each key maps to a single Mutex. Locks are reentrant per session: the same
+ * session may acquire a key multiple times and must release it the same number
+ * of times before the underlying mutex is actually unlocked.
  */
 
-import { Mutex, MutexInterface } from 'async-mutex';
+import { Mutex, withTimeout, E_TIMEOUT } from 'async-mutex';
 import { PinoLogger } from '../logger/PinoLogger';
 
 interface LockEntry {
   mutex: InstanceType<typeof Mutex>;
-  heldBy: Set<string>;  // sessionId set for reentrant tracking
+  /** Reentrant hold count per session (`heldBy.size` === number of sessions holding). */
+  heldBy: Map<string, number>;
 }
 
 export class AdvisoryLockEngine {
@@ -19,66 +25,82 @@ export class AdvisoryLockEngine {
   private logger = PinoLogger.forComponent('advisory-lock');
 
   /**
-   * 获取 advisory lock (阻塞, 带超时)。
-   * 可重入: 同一 session 可多次 lock。
+   * Acquire an advisory lock, blocking until it is available (or until
+   * `timeoutMs` elapses).
+   *
+   * Reentrant: if `sessionId` already holds the lock, its hold count is
+   * incremented and the call returns `true` immediately without touching the
+   * underlying mutex.
+   *
+   * @param key       Lock key (the numeric argument passed to pg_advisory_lock).
+   * @param sessionId Session that owns the lock (used for reentrancy tracking).
+   * @param timeoutMs Optional acquisition timeout. When omitted (or negative),
+   *                  the call blocks indefinitely. When provided, the call
+   *                  returns `false` once the timeout is reached without
+   *                  acquiring the lock.
+   * @returns `true` if the lock was (or already was) acquired, `false` on timeout.
    */
   async acquire(key: bigint, sessionId: string, timeoutMs?: number): Promise<boolean> {
-    let entry = this.locks.get(key);
-    if (!entry) {
-      entry = { mutex: new Mutex(), heldBy: new Set() };
-      this.locks.set(key, entry);
-    }
+    const entry = this.ensureEntry(key);
 
-    // Reentrant: same session already holds the lock
+    // Reentrant: this session already holds the lock — bump the count.
     if (entry.heldBy.has(sessionId)) {
+      entry.heldBy.set(sessionId, entry.heldBy.get(sessionId)! + 1);
       return true;
     }
+
+    // A timeout is only meaningful while we are about to block on the mutex.
+    const mutex = timeoutMs !== undefined && timeoutMs >= 0
+      ? withTimeout(entry.mutex, timeoutMs)
+      : entry.mutex;
 
     try {
-      const releaser = await entry.mutex.acquire();
-      entry.heldBy.add(sessionId);
-      this.logger.debug({ key: String(key), sessionId }, 'Advisory lock acquired');
-      // Store releaser for release
-      (entry as any)._releaser = releaser;
-      return true;
-    } catch {
-      this.logger.warn({ key: String(key), sessionId }, 'Advisory lock timeout');
-      return false;
+      await mutex.acquire();
+    } catch (err) {
+      if (err === E_TIMEOUT) {
+        this.logger.warn({ key: String(key), sessionId, timeoutMs }, 'Advisory lock timeout');
+        return false;
+      }
+      throw err;
     }
+
+    entry.heldBy.set(sessionId, 1);
+    this.logger.debug({ key: String(key), sessionId }, 'Advisory lock acquired');
+    return true;
   }
 
   /**
-   * 尝试获取 lock (不阻塞)。
-   * 如果已被持有, 立即返回 false。
+   * Attempt to acquire the lock without blocking.
+   *
+   * Returns `false` immediately if the lock is currently held by another
+   * session. Reentrant acquisition by the same session still succeeds.
    */
   async tryAcquire(key: bigint, sessionId: string): Promise<boolean> {
-    let entry = this.locks.get(key);
-    if (!entry) {
-      entry = { mutex: new Mutex(), heldBy: new Set() };
-      this.locks.set(key, entry);
-    }
+    const entry = this.ensureEntry(key);
 
     if (entry.heldBy.has(sessionId)) {
+      entry.heldBy.set(sessionId, entry.heldBy.get(sessionId)! + 1);
       return true; // Reentrant
     }
 
     if (entry.mutex.isLocked()) {
-      return false; // Lock is held by another session
+      return false; // Held by another session
     }
 
-    try {
-      const releaser = await entry.mutex.acquire();
-      entry.heldBy.add(sessionId);
-      (entry as any)._releaser = releaser;
-      return true;
-    } catch {
-      return false;
-    }
+    await entry.mutex.acquire();
+    entry.heldBy.set(sessionId, 1);
+    return true;
   }
 
   /**
-   * 释放 advisory lock。
-   * 可重入: 需要调用 release 同样次数才能完全释放。
+   * Release one hold on the lock for `sessionId`.
+   *
+   * Reentrancy-aware: a session that acquired the lock N times must call
+   * `release` N times; only the final release actually unlocks the mutex and
+   * removes the entry.
+   *
+   * @returns `true` if a hold was released, `false` if the session did not
+   *          hold the lock (or no such lock exists).
    */
   release(key: bigint, sessionId: string): boolean {
     const entry = this.locks.get(key);
@@ -86,33 +108,60 @@ export class AdvisoryLockEngine {
       return false;
     }
 
-    if (!entry.heldBy.has(sessionId)) {
+    const count = entry.heldBy.get(sessionId);
+    if (count === undefined) {
       return false;
     }
 
-    entry.heldBy.delete(sessionId);
-
-    if (entry.heldBy.size === 0) {
-      entry.mutex.release();
-      this.locks.delete(key);
-      this.logger.debug({ key: String(key), sessionId }, 'Advisory lock released');
+    if (count > 1) {
+      entry.heldBy.set(sessionId, count - 1);
+      return true;
     }
 
+    // Final hold released by this session. Because each key is backed by a
+    // single exclusive Mutex, at most one session can hold it at any time, so
+    // clearing this session's entry empties the map and unlocks the key.
+    entry.heldBy.delete(sessionId);
+    entry.mutex.release();
+    this.locks.delete(key);
+    this.logger.debug({ key: String(key), sessionId }, 'Advisory lock released');
     return true;
   }
 
-  /** 当前被持有的 lock 数量 */
-  get lockCount(): number { return this.locks.size; }
+  /** Number of distinct keys currently held by any session. */
+  get lockCount(): number {
+    return this.locks.size;
+  }
 
-  /** 清理所有锁 (连接断开时使用) */
+  /**
+   * Release every hold (including reentrant holds) that `sessionId` has on any
+   * key (used when a connection closes).
+   *
+   * @returns The number of distinct keys that were released.
+   */
   releaseAllBySession(sessionId: string): number {
     let count = 0;
-    for (const [key, entry] of this.locks) {
-      if (entry.heldBy.has(sessionId)) {
-        this.release(key, sessionId);
-        count++;
-      }
+    // Snapshot the keys so we can safely delete entries while iterating.
+    for (const key of [...this.locks.keys()]) {
+      const entry = this.locks.get(key)!;
+      if (!entry.heldBy.has(sessionId)) continue;
+
+      // Drop every reentrant hold, then unlock the mutex once.
+      entry.heldBy.delete(sessionId);
+      entry.mutex.release();
+      this.locks.delete(key);
+      count++;
     }
     return count;
+  }
+
+  /** Lazily create and register the lock entry for `key`. */
+  private ensureEntry(key: bigint): LockEntry {
+    let entry = this.locks.get(key);
+    if (!entry) {
+      entry = { mutex: new Mutex(), heldBy: new Map() };
+      this.locks.set(key, entry);
+    }
+    return entry;
   }
 }
