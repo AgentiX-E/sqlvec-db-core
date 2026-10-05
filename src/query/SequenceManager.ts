@@ -105,11 +105,11 @@ export class SequenceManager {
 
     // Parse options
     const increment = this.extractNumericOpt(opts, /INCREMENT\s+(?:BY\s+)?([-+]?\d+)/i, 1);
-    const minValue = this.extractOpt(opts, /MINVALUE\s+(\d+)/i);
+    const minValue = this.extractOpt(opts, /MINVALUE\s+([-+]?\d+)/i);
     const noMinValue = /\bNO\s+MINVALUE\b/i.test(opts);
-    const maxValue = this.extractOpt(opts, /MAXVALUE\s+(\d+)/i);
+    const maxValue = this.extractOpt(opts, /MAXVALUE\s+([-+]?\d+)/i);
     const noMaxValue = /\bNO\s+MAXVALUE\b/i.test(opts);
-    const startValue = this.extractNumericOpt(opts, /START\s+(?:WITH\s+)?(\d+)/i, 1);
+    const startValue = this.extractNumericOpt(opts, /START\s+(?:WITH\s+)?([-+]?\d+)/i, 1);
     const cacheSize = this.extractNumericOpt(opts, /CACHE\s+(\d+)/i, this.options.defaultCacheSize);
     const isCycling = /\bCYCLE\b/i.test(opts) && !/\bNO\s+CYCLE\b/i.test(opts);
 
@@ -197,21 +197,29 @@ export class SequenceManager {
 
       let nextValue = seq.lastValue + seq.increment;
 
-      // Check boundaries
-      if (seq.maxValue !== null && nextValue > seq.maxValue) {
-        if (seq.isCycling) {
-          nextValue = seq.minValue;
-        } else {
-          throw new Error(`nextval: reached maximum value of sequence "${name}" (${seq.maxValue})`);
+      // Boundary check must be direction-aware: an ascending sequence can only
+      // exceed its upper bound, and a descending sequence can only fall below
+      // its lower bound. Checking both bounds unconditionally breaks descending
+      // sequences — their default maxValue is -1 (matching PostgreSQL), so any
+      // legitimate produced value (10, 9, ...) was wrongly reported as having
+      // exceeded the maximum on the very first nextval.
+      if (seq.increment > 0) {
+        if (seq.maxValue !== null && nextValue > seq.maxValue) {
+          if (seq.isCycling) {
+            nextValue = seq.minValue;
+          } else {
+            throw new Error(`nextval: reached maximum value of sequence "${name}" (${seq.maxValue})`);
+          }
         }
-      }
-      if (nextValue < seq.minValue) {
-        if (seq.isCycling && seq.maxValue !== null) {
-          nextValue = seq.maxValue;
-        } else if (seq.isCycling) {
-          nextValue = seq.minValue;
-        } else {
-          throw new Error(`nextval: reached minimum value of sequence "${name}" (${seq.minValue})`);
+      } else {
+        if (nextValue < seq.minValue) {
+          if (seq.isCycling && seq.maxValue !== null) {
+            nextValue = seq.maxValue;
+          } else if (seq.isCycling) {
+            nextValue = seq.minValue;
+          } else {
+            throw new Error(`nextval: reached minimum value of sequence "${name}" (${seq.minValue})`);
+          }
         }
       }
 
@@ -243,8 +251,11 @@ export class SequenceManager {
    *
    * @param sequenceName - Sequence name
    * @param value - New value (setval will set last_value so the next nextval returns this value - increment)
-   * @param isCalled - If true, next nextval returns value + increment; if false, next nextval returns value
-   * @returns The value (or value - increment if isCalled)
+   * @param isCalled - If true, last_value is set to `value` so the next nextval
+   *                   returns `value + increment`; if false, last_value is set to
+   *                   `value - increment` so the next nextval returns `value`.
+   * @returns The `value` argument (matching PostgreSQL's setval, which returns
+   *          the value it was given regardless of `isCalled`).
    */
   setVal(sequenceName: string, value: number, isCalled: boolean = true): number {
     const name = this.resolveSequenceName(sequenceName);
@@ -303,13 +314,13 @@ export class SequenceManager {
     const changes: string[] = [];
 
     const newIncrement = this.extractOpt(opts, /INCREMENT\s+(?:BY\s+)?([-+]?\d+)/i);
-    const newMin = this.extractOpt(opts, /MINVALUE\s+(\d+)/i);
-    const newMax = this.extractOpt(opts, /MAXVALUE\s+(\d+)/i);
+    const newMin = this.extractOpt(opts, /MINVALUE\s+([-+]?\d+)/i);
+    const newMax = this.extractOpt(opts, /MAXVALUE\s+([-+]?\d+)/i);
     const hasNoMin = /\bNO\s+MINVALUE\b/i.test(opts);
     const hasNoMax = /\bNO\s+MAXVALUE\b/i.test(opts);
     const newCache = this.extractOpt(opts, /CACHE\s+(\d+)/i);
-    const hasBareRestart = /\bRESTART\b/i.test(opts) && !/RESTART\s+WITH\s+\d+/i.test(opts);
-    const newRestart = this.extractOpt(opts, /RESTART\s+(?:WITH\s+)?(\d+)/i);
+    const hasBareRestart = /\bRESTART\b/i.test(opts) && !/RESTART\s+WITH\s+[-+]?\d+/i.test(opts);
+    const newRestart = this.extractOpt(opts, /RESTART\s+(?:WITH\s+)?([-+]?\d+)/i);
     const isCycling = /\b(?:CYCLE|NO\s+CYCLE)\b/i.test(opts);
 
     const updateParts: string[] = [];
