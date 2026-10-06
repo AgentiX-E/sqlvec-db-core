@@ -52,14 +52,18 @@ export interface CreateLikeIndexResult {
 
 // ── Regex Patterns ───────────────────────────────────────────────
 
-/** Matches `column LIKE 'pattern'` — column can be qualified (t.col) */
-const LIKE_RE = /(\w+(?:\.\w+)?)\s+LIKE\s+'([^']*)'/gi;
+/**
+ * Matches `column LIKE 'pattern'` — column can be qualified (t.col).
+ * The pattern group tolerates SQL single-quote escaping (`''` for a literal
+ * quote) so patterns containing apostrophes are not truncated mid-literal.
+ */
+const LIKE_RE = /(\w+(?:\.\w+)?)\s+LIKE\s+'((?:[^']|'')*)'/gi;
 
-/** Matches `column ILIKE 'pattern'` */
-const ILIKE_RE = /(\w+(?:\.\w+)?)\s+ILIKE\s+'([^']*)'/gi;
+/** Matches `column ILIKE 'pattern'` (see quote-escaping note on LIKE_RE) */
+const ILIKE_RE = /(\w+(?:\.\w+)?)\s+ILIKE\s+'((?:[^']|'')*)'/gi;
 
 /** Matches `column SIMILAR TO 'pattern'` (note: SIMILAR TO is two words) */
-const SIMILAR_TO_RE = /(\w+(?:\.\w+)?)\s+SIMILAR\s+TO\s+'([^']*)'/gi;
+const SIMILAR_TO_RE = /(\w+(?:\.\w+)?)\s+SIMILAR\s+TO\s+'((?:[^']|'')*)'/gi;
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -180,28 +184,16 @@ function rewriteOperator(
     const ftsQuery = buildFTSQuery(m.pattern);
     if (!ftsQuery) continue;
 
-    const isCaseSensitive = operator === 'LIKE';
     const tableName = m.colRef.includes('.') ? m.colRef.split('.')[0] : undefined;
+    const escapedFtsQuery = ftsQuery.replace(/'/g, "''");
 
-    let replacement: string;
-
-    if (isCaseSensitive) {
-      // Case-sensitive LIKE: keep original condition + FTS5 pre-filter
-      // FTS5 trigram is case-insensitive, so we need the original LIKE as post-filter
-      if (tableName) {
-        replacement = `(${m.fullMatch} AND ${tableName}.rowid IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH '${ftsQuery.replace(/'/g, "''")}'))`;
-      } else {
-        replacement = `(${m.fullMatch} AND rowid IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH '${ftsQuery.replace(/'/g, "''")}'))`;
-      }
-    } else {
-      // ILIKE or SIMILAR TO: FTS5 is already case-insensitive, so use it directly
-      // But keep original condition as safety filter (FTS5 can have false positives with short patterns)
-      if (tableName) {
-        replacement = `(${m.fullMatch} AND ${tableName}.rowid IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH '${ftsQuery.replace(/'/g, "''")}'))`;
-      } else {
-        replacement = `(${m.fullMatch} AND rowid IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH '${ftsQuery.replace(/'/g, "''")}'))`;
-      }
-    }
+    // Always retain the original condition as a post-filter and add the FTS5
+    // MATCH as a pre-filter. For LIKE this keeps case-sensitivity (FTS5 trigram
+    // is case-insensitive); for ILIKE/SIMILAR TO it guards against FTS5 false
+    // positives on sub-trigram-length patterns. The two cases therefore produce
+    // the identical rewrite shape — only the qualified/unqualified rowid differs.
+    const rowidExpr = tableName ? `${tableName}.rowid` : 'rowid';
+    const replacement = `(${m.fullMatch} AND ${rowidExpr} IN (SELECT rowid FROM ${ftsTable} WHERE ${ftsTable} MATCH '${escapedFtsQuery}'))`;
 
     const before = result.substring(0, m.index);
     const after = result.substring(m.index + m.fullMatch.length);
