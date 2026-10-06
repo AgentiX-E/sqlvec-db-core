@@ -244,6 +244,12 @@ describe('error paths and unclassified directions', () => {
     expect(c.getCursor('c')?.position).toBe(0);
   });
 
+  it('fetch falls back to NEXT with zero count (stays before first)', () => {
+    const c = declareScroll();
+    expect(c.fetch('c', 'BOGUS' as any, 0)).toEqual([]);
+    expect(c.getCursor('c')?.position).toBe(-1);
+  });
+
   it('move falls back to NEXT for an unclassified direction', () => {
     const c = declareScroll();
     expect(c.move('c', 'BOGUS', 1)).toBe(1);

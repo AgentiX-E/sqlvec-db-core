@@ -100,6 +100,15 @@ const CREATE_TABLE_TEMP_RE = /^\s*CREATE\s+(?:TEMP|TEMPORARY)\s+TABLE\s+(?:IF\s+
 const CREATE_TABLE_UNLOGGED_RE = /^\s*CREATE\s+UNLOGGED\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+/i;
 
 /**
+ * Extract the parts of a CREATE UNLOGGED TABLE ... AS statement.
+ *
+ * Group 1: optional `IF NOT EXISTS` literal (otherwise undefined)
+ * Group 2: table name
+ * Group 3: the `AS ...` tail
+ */
+const CREATE_UNLOGGED_TABLE_AS_RE = /^\s*CREATE\s+UNLOGGED\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(AS\s+.+)$/is;
+
+/**
  * Check for plain CREATE TABLE ... AS (no TEMP/UNLOGGED prefix)
  */
 const CREATE_TABLE_PLAIN_AS_RE = /^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[a-zA-Z_][a-zA-Z0-9_]*\s+AS\s+/i;
@@ -174,7 +183,9 @@ export function detectUnloggedCreateTableAs(sql: string): boolean {
  */
 export function rewriteCreateTableAs(sql: string): CreateTableAsResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
-    return { sql: sql ?? '', rewritten: false, type: 'none', isTemp: false };
+    // Normalize null/undefined/empty/whitespace-only input to an empty string
+    // so the returned `sql` never leaks a raw blank payload.
+    return { sql: '', rewritten: false, type: 'none', isTemp: false };
   }
 
   const trimmed = sql.trim();
@@ -203,25 +214,22 @@ export function rewriteCreateTableAs(sql: string): CreateTableAsResult {
   }
 
   // ── Case 2: CREATE UNLOGGED TABLE AS SELECT ────────────────────
-  const createUnloggedMatch = trimmed.match(CREATE_TABLE_UNLOGGED_RE);
-  if (createUnloggedMatch) {
-    // Extract the table name and the rest, handling IF NOT EXISTS
-    const tableNameMatch = trimmed.match(
-      /^\s*CREATE\s+UNLOGGED\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?([a-zA-Z_][a-zA-Z0-9_]*)\s+(AS\s+.+)$/is,
+  // A single capture-group regex both detects the UNLOGGED form and extracts
+  // the parts needed for the rewrite, replacing the previous two-step
+  // detect-then-extract that carried an unreachable inner guard.
+  const unloggedMatch = trimmed.match(CREATE_UNLOGGED_TABLE_AS_RE);
+  if (unloggedMatch) {
+    const ifNotExists = unloggedMatch[1] ? 'IF NOT EXISTS ' : '';
+    const tableName = unloggedMatch[2];
+    const rest = unloggedMatch[3];
+    const rewritten = `CREATE TABLE ${ifNotExists}${tableName} ${rest}`;
+
+    logger.debug(
+      { table: tableName, original: trimmed },
+      'CREATE UNLOGGED TABLE AS rewritten to plain CREATE TABLE AS',
     );
-    if (tableNameMatch) {
-      const tableName = tableNameMatch[1];
-      const rest = tableNameMatch[2];
-      const ifNotExists = /IF\s+NOT\s+EXISTS/i.test(trimmed) ? 'IF NOT EXISTS ' : '';
-      const rewritten = `CREATE TABLE ${ifNotExists}${tableName} ${rest}`;
 
-      logger.debug(
-        { table: tableName, original: trimmed },
-        'CREATE UNLOGGED TABLE AS rewritten to plain CREATE TABLE AS',
-      );
-
-      return { sql: rewritten, rewritten: true, type: 'create-table-as-unlogged', tableName, isTemp: false };
-    }
+    return { sql: rewritten, rewritten: true, type: 'create-table-as-unlogged', tableName, isTemp: false };
   }
 
   // ── Case 3: CREATE TEMP TABLE AS SELECT (already valid) ───────
