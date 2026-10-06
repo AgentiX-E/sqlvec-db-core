@@ -15,9 +15,11 @@
  * | 4        | Aggregation (detected in SQL) | DuckDB    | Vectorized aggregations               |
  * | 5        | Window functions (in SQL)     | DuckDB    | Native window evaluation              |
  * | 6        | Subquery (IN/EXISTS/derived)  | DuckDB    | DuckDB optimizer handles subqueries   |
- * | 7        | COUNT(DISTINCT) in SQL        | DuckDB    | Vectorized hash aggregation           |
- * | 8        | Estimated rows > threshold    | DuckDB    | Large scan prefers columnar           |
- * | 9        | Default: simple SELECT        | SQLite    | Point query, SQLite is sufficient     |
+ * | 7        | Estimated rows > threshold    | DuckDB    | Large scan prefers columnar           |
+ * | 8        | Default: simple SELECT        | SQLite    | Point query, SQLite is sufficient     |
+ *
+ * Note: COUNT(DISTINCT ...) is intentionally not a separate rule — it always
+ * contains `COUNT(` and is thus captured by the aggregation rule (rule 4).
  *
  * @see docs/analytics-optimization-design.md §6
  */
@@ -61,7 +63,13 @@ export interface QueryClassifierContext {
 // ──────────────────────────────────────────────
 
 export interface AnalyticQueryClassifierConfig {
+  /** When false, the classifier routes every statement to SQLite (no DuckDB). */
   enabled: boolean;
+  /**
+   * Reserved threshold for row-count estimation. This classifier uses only
+   * surface heuristics (no statistics), so this value does not currently
+   * influence routing — row-estimation lives in `CostEstimator`.
+   */
   analyticThreshold: number;
   circuitBreakerThreshold: number;
   circuitBreakerCooldownMs: number;
@@ -102,6 +110,11 @@ export class AnalyticQueryClassifier {
     // Config overrides
     if (this.config.alwaysRouteToSQLite) {
       return new AnalyticQueryClassifierResult(QueryTarget.SQLITE_OLTP, 'config: alwaysRouteToSQLite');
+    }
+
+    // Disabled: never route to DuckDB.
+    if (!this.config.enabled) {
+      return new AnalyticQueryClassifierResult(QueryTarget.SQLITE_OLTP, 'config: classifier disabled');
     }
 
     if (this.isCircuitBroken()) {
@@ -173,16 +186,10 @@ export class AnalyticQueryClassifier {
       );
     }
 
-    const hasCountDistinct = this.sqlHasCountDistinct(sql);
-    if (hasCountDistinct) {
-      return new AnalyticQueryClassifierResult(
-        QueryTarget.DUCKDB_OLAP,
-        'COUNT(DISTINCT) — vectorized hash aggregation',
-        0.8,
-      );
-    }
-
     // ── Rule 8: High-selectivity WHERE (point query) ⇒ SQLite ──
+    // Note: the former "COUNT(DISTINCT)" rule is removed — COUNT(DISTINCT ...)
+    // always contains `COUNT(` and is therefore already captured by the
+    // aggregation rule above, so that branch was unreachable.
     // Point queries (equality on indexed columns) are inherently OLTP — SQLite
     // handles them faster than DuckDB, and avoids stale DataBridge read-after-write.
     // Uses heuristic: simple equality in WHERE clause.
@@ -297,13 +304,6 @@ export class AnalyticQueryClassifier {
   }
 
   /**
-   * Detect COUNT(DISTINCT ...) in SQL text.
-   */
-  private sqlHasCountDistinct(sql: string): boolean {
-    return /\bCOUNT\s*\(\s*DISTINCT\b/i.test(sql);
-  }
-
-  /**
    * Detect equality predicates in WHERE clause (point queries).
    *
    * Heuristic: checks for `column = value` patterns that indicate
@@ -318,8 +318,11 @@ export class AnalyticQueryClassifier {
     const whereMatch = upper.match(/\bWHERE\b\s+(.+?)(?:\s+\b(GROUP\s+BY|ORDER\s+BY|LIMIT|HAVING|FETCH|FOR)\b|$)/i);
     if (!whereMatch) return false;
     const whereClause = whereMatch[1];
-    // Check for simple equality: column = literal (not IN/NOT IN/LIKE/BETWEEN/is null)
-    if (/[a-z_][a-z0-9_.]*\s*=\s*['"0-9]/.test(whereClause)) return true;
+    // Check for simple equality: column = literal (not IN/NOT IN/LIKE/BETWEEN/is null).
+    // `whereClause` is uppercased above, so the column pattern must accept
+    // uppercase letters (previously `[a-z_]` never matched an uppercased
+    // column name and the point-query rule was dead).
+    if (/[A-Z_][A-Z0-9_.]*\s*=\s*['"0-9]/.test(whereClause)) return true;
     // Also catch column = column (but this is less selective — skip)
     return false;
   }
