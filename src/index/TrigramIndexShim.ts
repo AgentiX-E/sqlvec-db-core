@@ -46,28 +46,21 @@ export interface LikeRewriteResult {
 /** Detects CREATE INDEX ... USING FTS5 LIKE <col> */
 const CREATE_FTS5_LIKE_RE = /CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s+ON\s+(\S+)\s+USING\s+FTS5\s+LIKE\s+(\S+)/i;
 
-/** Detects LIKE pattern: col LIKE '%foo%' */
-const LIKE_PATTERN_RE = /(\w+(?:\.\w+)?)\s+LIKE\s+'([^']*)'/i;
+/**
+ * Detects LIKE pattern: col LIKE '%foo%'.
+ * The pattern group tolerates SQL single-quote escaping (`''` for a literal
+ * quote) so patterns containing apostrophes are not truncated mid-literal.
+ */
+const LIKE_PATTERN_RE = /(\w+(?:\.\w+)?)\s+LIKE\s+'((?:[^']|'')*)'/i;
 
-/** Detects REGEXP pattern: col ~ 'pattern' or col ~* 'pattern' */
-const REGEX_PATTERN_RE = /(\w+(?:\.\w+)?)\s*~[*]?\s*'([^']*)'/i;
+/**
+ * Detects REGEXP pattern: col ~ 'pattern' or col ~* 'pattern'.
+ * The pattern group tolerates SQL single-quote escaping, as above.
+ */
+const REGEX_PATTERN_RE = /(\w+(?:\.\w+)?)\s*~[*]?\s*'((?:[^']|'')*)'/i;
 
 /** Detects LIMIT clause */
 const LIMIT_RE = /\s+LIMIT\s+(\d+)/i;
-
-/** Generates trigrams from a string */
-function generateTrigrams(s: string): string[] {
-  const trigrams: string[] = [];
-  const cleaned = s.toLowerCase();
-  if (cleaned.length < 3) {
-    trigrams.push(cleaned);
-    return trigrams;
-  }
-  for (let i = 0; i <= cleaned.length - 3; i++) {
-    trigrams.push(cleaned.substring(i, i + 3));
-  }
-  return [...new Set(trigrams)];
-}
 
 /**
  * Generate a trigram query string for FTS5.
@@ -180,20 +173,14 @@ export function rewriteLikeQuery(
 
   const trigramQuery = buildTrigramQuery(pattern);
 
-  // Replace the LIKE clause with FTS5 match + join
+  // Keep the original LIKE as a correctness filter and add the FTS5 trigram
+  // MATCH as a fast-path pre-filter. The two are AND-ed so FTS5 (approximate)
+  // narrows candidates before the exact LIKE re-checks them.
   const tableRef = colRef.includes('.') ? colRef.split('.')[0] : 't';
-  let rewritten = trimmed.replace(
+  const escapedQuery = trigramQuery.replace(/'/g, "''");
+  const rewritten = trimmed.replace(
     LIKE_PATTERN_RE,
-    `${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName}('${trigramQuery.replace(/'/g, "''")}') WHERE ${ftsTableName} MATCH '${trigramQuery.replace(/'/g, "''")}')`,
-  );
-
-  // Add a CAST to ensure the LIKE filter is also applied (FTS5 is approximate)
-  // Actually, keep the original LIKE condition with OR — FTS5 match is the fast path
-  // Better approach: use FTS5 match to filter first, then still apply LIKE for verification
-  const originalCondition = `${colRef} LIKE '${pattern}'`;
-  rewritten = trimmed.replace(
-    LIKE_PATTERN_RE,
-    `(${colRef} LIKE '${pattern}' AND ${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${trigramQuery.replace(/'/g, "''")}'))`,
+    `(${colRef} LIKE '${pattern}' AND ${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${escapedQuery}'))`,
   );
 
   logger.info({ original: trimmed, rewritten, pattern }, 'LIKE query rewritten for FTS5 trigram index');
@@ -228,11 +215,15 @@ export function rewriteRegexQuery(sql: string, ftsTableName: string): LikeRewrit
 
   // Use the longest literal part for trigram filtering
   const longestLiteral = literalParts.reduce((a, b) => (a.length >= b.length ? a : b));
-  const trigramQuery = buildTrigramQuery(longestLiteral);
+  const escapedQuery = buildTrigramQuery(longestLiteral).replace(/'/g, "''");
+  const escapedPattern = pattern.replace(/'/g, "''");
 
+  // Use a replacer callback so literal `$` anchors inside the regex pattern are
+  // not interpreted as String.replace substitution sequences (e.g. `$'`).
   const rewritten = trimmed.replace(
     REGEX_PATTERN_RE,
-    `(${regexMatch[1]} ~ '${pattern}' AND ${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${trigramQuery}'))`,
+    () =>
+      `(${regexMatch[1]} ~ '${escapedPattern}' AND ${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${escapedQuery}'))`,
   );
 
   logger.info({ original: trimmed, rewritten, pattern }, 'Regex query rewritten with trigram pre-filter');
