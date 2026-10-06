@@ -94,7 +94,6 @@ export type ExpressionIndexType =
   | 'subquery'
   | 'concat'
   | 'coalesce'
-  | 'composed'
   | 'unknown';
 
 /**
@@ -112,44 +111,16 @@ export function detectExpressionType(sql: string): ExpressionIndexType {
     ? expr.slice(1, -1).trim()
     : expr;
 
-  // Detect subquery
+  // Priority order: most specific pattern first, generic function/arithmetic
+  // as fallbacks.
   if (SUBQUERY_RE.test(inner)) return 'subquery';
-
-  // Detect CASE
   if (CASE_EXPR_RE.test(inner)) return 'case';
-
-  // Detect COALESCE/NULLIF
-  if (COALESCE_RE.test(inner)) {
-    if (COALESCE_RE.test(inner) || NULLIF_RE.test(inner)) return 'coalesce';
-  }
-
-  // Detect type cast
+  if (COALESCE_RE.test(inner) || NULLIF_RE.test(inner)) return 'coalesce';
   if (PG_TYPE_CAST_RE.test(inner)) return 'cast';
-
-  // Detect JSON operations
   if (PG_JSON_OP_RE.test(inner)) return 'json';
-
-  // Detect concatenation
   if (PG_CONCAT_RE.test(inner)) return 'concat';
-
-  // Detect function calls (fn_name(...))
   if (/[a-zA-Z_]\w*\s*\(/.test(inner)) return 'function';
-
-  // Detect arithmetic operators
   if (/[+\-*/%]/.test(inner)) return 'arithmetic';
-
-  // Multiple patterns
-  const patterns = [
-    /[a-zA-Z_]\w*\s*\(/,  // function call
-    /[+\-*/%]/,           // arithmetic
-    PG_TYPE_CAST_RE,       // type cast
-    PG_JSON_OP_RE,         // json op
-    CASE_EXPR_RE,          // case
-    SUBQUERY_RE,           // subquery
-    PG_CONCAT_RE,          // concat
-  ];
-  const matched = patterns.filter((p) => p.test(inner));
-  if (matched.length > 1) return 'composed';
 
   return 'unknown';
 }
@@ -170,17 +141,21 @@ export function detectEnhancedExpressionIndex(sql: string): boolean {
  *
  * | PG Expression            | Rewritten                       |
  * |--------------------------|---------------------------------|
- * | col::text                | CAST(col AS TEXT) or col        |
- * | (col::text)              | col                             |
- * | (col::integer)           | CAST(col AS INTEGER)            |
- * | (amount::numeric(10,2))  | CAST(amount AS NUMERIC)         |
+ * | col::text                | col                             |
+ * | (col::text)              | (col)                           |
+ * | (col::integer)           | (CAST(col AS INTEGER))          |
+ * | (amount::numeric(10,2))  | (CAST(amount AS NUMERIC))       |
  *
  * For expression indexes, SQLite may handle simple casts inline,
  * but we normalize them for consistency.
  */
 export function rewriteTypeCast(expression: string): string {
+  // Only rewrite the `col::type` cast itself; do NOT consume surrounding
+  // parentheses, which may belong to the CREATE INDEX expression wrapper
+  // (e.g. `CREATE INDEX ON t (col::text)`). Consuming them produced
+  // syntactically broken output like `CREATE INDEX ON t col`.
   return expression.replace(
-    /\(?\s*(\w+)\s*::\s*(\w+)(?:\([^)]*\))?\s*\)?/g,
+    /([\w.]+)\s*::\s*(\w+)(?:\([^)]*\))?/g,
     (match, column, type) => {
       const upperType = type.toUpperCase();
       // Simple aliases that SQLite handles natively
@@ -222,14 +197,17 @@ export function rewriteJsonAccess(expression: string): string {
     (_, column, key) => `json_extract(${column}, '$.${key}')`,
   );
 
-  // Rewrite data#>>'{path}' style
+  // Rewrite data#>>'{path}' style. The PG path is `{p1,p2,p3}`; the SQLite
+  // json path is `$.p1.p2.p3`. The previous rewrite emitted `'$.' + 'p1.p2'`,
+  // which uses `+` for string concatenation — invalid in SQLite (where `+` is
+  // numeric addition). Emit a single path literal instead.
   result = result.replace(
     /(\w+)\s*#>>\s*'\{([^}]+)\}'/g,
-    (_, column, path) => `json_extract(${column}, '$.' + '${path.replace(/,/g, '.')}')`,
+    (_, column, path) => `json_extract(${column}, '$.${path.replace(/,/g, '.')}')`,
   );
   result = result.replace(
     /(\w+)\s*#>\s*'\{([^}]+)\}'/g,
-    (_, column, path) => `json_extract(${column}, '$.' + '${path.replace(/,/g, '.')}')`,
+    (_, column, path) => `json_extract(${column}, '$.${path.replace(/,/g, '.')}')`,
   );
 
   return result;
@@ -311,12 +289,12 @@ export function enhanceExpressionIndex(sql: string): ExprIndexEnhancementResult 
   let rewritten = sql;
 
   // Step 1: Rewrite JSON access operators
-  if (expressionType === 'json' || expressionType === 'composed') {
+  if (expressionType === 'json') {
     rewritten = rewriteJsonAccess(rewritten);
   }
 
   // Step 2: Rewrite type casts
-  if (expressionType === 'cast' || expressionType === 'composed') {
+  if (expressionType === 'cast') {
     rewritten = rewriteTypeCast(rewritten);
   }
 
