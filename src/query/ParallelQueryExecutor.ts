@@ -133,7 +133,10 @@ export class ParallelQueryExecutor {
 
     this.options = {
       workerPath: opts.workerPath ?? resolveParallelWorkerPath(),
-      maxThreads: opts.maxThreads ?? this.config.maxThreads,
+      // Piscina requires a strictly positive maxThreads integer and throws an
+      // opaque error otherwise; clamp to at least 1 to match the config
+      // field's own `Math.max(1, ...)` guard.
+      maxThreads: Math.max(1, opts.maxThreads ?? this.config.maxThreads),
       taskTimeoutMs: opts.taskTimeoutMs ?? 60000,
     };
 
