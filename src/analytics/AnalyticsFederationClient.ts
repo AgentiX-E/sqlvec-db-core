@@ -67,11 +67,6 @@ export class AnalyticsFederationClient {
       this.strategies.push(new NodeTransportStrategy(duckDB, ntConfig));
     }
 
-    // If no user strategies, fallback to local only
-    if (this.strategies.length === 0) {
-      this.strategies.push(new LocalColumnarStrategy(duckDB));
-    }
-
     // Sort by priority (ascending)
     this.strategies.sort((a, b) => a.priority - b.priority);
   }
