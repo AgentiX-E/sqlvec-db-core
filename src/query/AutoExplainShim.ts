@@ -243,7 +243,13 @@ export function rewriteAutoExplain(sql: string): { sql: string; rewritten: boole
         break;
       }
       case 'auto_explain.log_level': {
-        instance.configure({ logLevel: value as any });
+        // Validate the level against the allowed union so an arbitrary value
+        // (e.g. "foo") cannot corrupt the typed config and silently fall back
+        // to `info` later in recordQuery.
+        const LEVELS: ReadonlyArray<AutoExplainConfig['logLevel']> = ['info', 'warn', 'debug', 'trace'];
+        if ((LEVELS as readonly string[]).includes(value.toLowerCase())) {
+          instance.configure({ logLevel: value.toLowerCase() as AutoExplainConfig['logLevel'] });
+        }
         break;
       }
     }

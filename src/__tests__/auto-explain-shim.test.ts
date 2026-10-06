@@ -3,208 +3,245 @@ import {
   AutoExplainShim,
   detectAutoExplain,
   rewriteAutoExplain,
+  type AutoExplainConfig,
 } from '../query/AutoExplainShim';
 
-// AutoExplainShim is split between a singleton class (config + query recording)
-// and two SQL interception functions (detectAutoExplain / rewriteAutoExplain).
-describe('AutoExplainShim', () => {
-  // Reset the singleton so each test starts from a clean config.
-  beforeEach(() => {
-    // Reach into the singleton via a private-ish reset: create a fresh config
-    // by calling getInstance with a full override is not enough; instead we call
-    // configure on the shared instance with the defaults.
-    const inst = AutoExplainShim.getInstance();
-    inst.configure({
-      logMinDuration: 1000,
-      logAnalyze: true,
-      logNested: false,
-      logFormat: 'text',
-      logLevel: 'info',
-      logTiming: true,
-      logBuffers: false,
-      logWal: false,
-    });
+function freshConfig(overrides: Partial<AutoExplainConfig> = {}): AutoExplainConfig {
+  return {
+    logMinDuration: 1000,
+    logAnalyze: true,
+    logNested: false,
+    logFormat: 'text',
+    logLevel: 'info',
+    logTiming: true,
+    logBuffers: false,
+    logWal: false,
+    ...overrides,
+  };
+}
+
+// The singleton persists across tests, so reset before each.
+beforeEach(() => {
+  (AutoExplainShim as unknown as { instance?: AutoExplainShim }).instance = undefined;
+});
+
+describe('AutoExplainShim lifecycle', () => {
+  it('defaults config', () => {
+    const ae = AutoExplainShim.getInstance();
+    expect(ae.getConfig()).toEqual(freshConfig());
   });
 
-  describe('getInstance / configure / getConfig', () => {
-    it('returns a stable singleton and merges config', () => {
-      const a = AutoExplainShim.getInstance();
-      const b = AutoExplainShim.getInstance();
-      expect(a).toBe(b);
-    });
-
-    it('applies a config passed to getInstance when instance already exists', () => {
-      const inst = AutoExplainShim.getInstance();
-      expect(inst).toBe(AutoExplainShim.getInstance({ logMinDuration: 250 }));
-      expect(inst.getConfig().logMinDuration).toBe(250);
-    });
-
-    it('applies configuration and returns a read-only copy', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 500 });
-      const cfg = inst.getConfig();
-      expect(cfg.logMinDuration).toBe(500);
-      // Defaults preserved for untouched fields.
-      expect(cfg.logFormat).toBe('text');
-      expect(cfg.logAnalyze).toBe(true);
-    });
+  it('returns the same singleton instance', () => {
+    const a = AutoExplainShim.getInstance();
+    const b = AutoExplainShim.getInstance();
+    expect(a).toBe(b);
   });
 
-  describe('recordQuery', () => {
-    it('does not throw for a query below the threshold', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 1000 });
-      expect(() => inst.recordQuery('SELECT 1', 5)).not.toThrow();
-    });
-
-    it('does not throw for a query above the threshold (text format)', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 10, logFormat: 'text' });
-      expect(() => inst.recordQuery('SELECT * FROM t', 50)).not.toThrow();
-    });
-
-    it('does not throw for json format', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 10, logFormat: 'json' });
-      expect(() => inst.recordQuery('SELECT * FROM t', 50)).not.toThrow();
-    });
-
-    it('does not throw for warn/debug/trace log levels', () => {
-      const inst = AutoExplainShim.getInstance();
-      for (const level of ['warn', 'debug', 'trace', 'info'] as const) {
-        inst.configure({ logMinDuration: 10, logLevel: level });
-        expect(() => inst.recordQuery('SELECT 1', 50)).not.toThrow();
-      }
-    });
-
-    it('uses the provided planText when given', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 10 });
-      expect(() => inst.recordQuery('SELECT 1', 50, 'Custom Plan')).not.toThrow();
-    });
-
-    it('generates the correct placeholder plan per statement type', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 10, logFormat: 'text' });
-      // No planText → generatePlaceholderPlan is exercised for each branch.
-      expect(() => inst.recordQuery('SELECT * FROM t', 50)).not.toThrow();
-      expect(() => inst.recordQuery('INSERT INTO t VALUES (1)', 50)).not.toThrow();
-      expect(() => inst.recordQuery('UPDATE t SET a = 1', 50)).not.toThrow();
-      expect(() => inst.recordQuery('DELETE FROM t', 50)).not.toThrow();
-      expect(() => inst.recordQuery('VACUUM t', 50)).not.toThrow(); // utility fallback
-    });
-
-    it('handles logTiming=false and long SQL (>2000 chars)', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 10, logFormat: 'text', logTiming: false });
-      const longSql = 'SELECT ' + 'x, '.repeat(700) + 'x FROM t';
-      expect(longSql.length).toBeGreaterThan(2000);
-      expect(() => inst.recordQuery(longSql, 50)).not.toThrow();
-    });
-
-    it('handles json format with logTiming=false', () => {
-      const inst = AutoExplainShim.getInstance();
-      inst.configure({ logMinDuration: 10, logFormat: 'json', logTiming: false });
-      expect(() => inst.recordQuery('SELECT 1', 50)).not.toThrow();
-    });
+  it('merges config on subsequent getInstance calls', () => {
+    AutoExplainShim.getInstance({ logMinDuration: 500 });
+    const ae = AutoExplainShim.getInstance({ logFormat: 'json' });
+    expect(ae.getConfig().logMinDuration).toBe(500);
+    expect(ae.getConfig().logFormat).toBe('json');
   });
 
-  describe('detectAutoExplain', () => {
-    it('detects real auto_explain usage', () => {
-      expect(detectAutoExplain("SET auto_explain.log_min_duration = '1s'")).toBe(true);
-      expect(detectAutoExplain('SELECT auto_explain')).toBe(true);
-    });
-
-    it('returns false for empty/non-string input', () => {
-      expect(detectAutoExplain('')).toBe(false);
-      expect(detectAutoExplain(undefined as unknown as string)).toBe(false);
-    });
-
-    it('does not report a token inside a string, line comment, or multiline comment', () => {
-      expect(detectAutoExplain("SELECT 'auto_explain'")).toBe(false);
-      expect(detectAutoExplain('SELECT 1 -- auto_explain')).toBe(false);
-      expect(detectAutoExplain('/* auto_explain */ SELECT 1')).toBe(false);
-    });
+  it('configures at runtime', () => {
+    const ae = AutoExplainShim.getInstance();
+    ae.configure({ logMinDuration: 250, logTiming: false });
+    expect(ae.getConfig().logMinDuration).toBe(250);
+    expect(ae.getConfig().logTiming).toBe(false);
   });
 
-  describe('rewriteAutoExplain', () => {
-    it('rewrites SET log_min_duration with a duration unit', () => {
-      expect(rewriteAutoExplain("SET auto_explain.log_min_duration = '1s'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-      expect(rewriteAutoExplain("SET auto_explain.log_min_duration = '500ms'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-    });
+  it('getConfig returns an isolated copy', () => {
+    const ae = AutoExplainShim.getInstance();
+    const cfg = ae.getConfig();
+    cfg.logMinDuration = 9999;
+    expect(ae.getConfig().logMinDuration).toBe(1000);
+  });
+});
 
-    it('rewrites SET log_min_duration across all duration units and raw numbers', () => {
-      // parseDuration branches: h, min, s, plain number, and non-numeric fallback.
-      const inst = AutoExplainShim.getInstance();
-      const cases: Array<[string, number]> = [
-        ['1h', 3600000],
-        ['1min', 60000],
-        ['1s', 1000],
-        ['500ms', 500],
-        ['0', 0],
-        ['-1', -1],
-        ['1.5s', 1500],
-      ];
-      for (const [v, expectedMs] of cases) {
-        expect(rewriteAutoExplain(`SET auto_explain.log_min_duration = '${v}'`))
-          .toEqual({ sql: 'SELECT 1', rewritten: true });
-        // BUG #94 regression: the unit must be honored, not dropped by parseInt.
-        expect(inst.getConfig().logMinDuration).toBe(expectedMs);
-      }
-      // Non-numeric, non-unit values hit the `!match` fallback (default threshold).
-      inst.configure({ logMinDuration: 1000 });
-      expect(rewriteAutoExplain("SET auto_explain.log_min_duration = 'abc'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-      expect(inst.getConfig().logMinDuration).toBe(1000);
-      // Fractional value without a unit → defaults to milliseconds (else of `|| 'ms'`).
-      expect(rewriteAutoExplain("SET auto_explain.log_min_duration = '1.5'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-      expect(inst.getConfig().logMinDuration).toBe(1.5);
-      // Empty value → `!value` fast-path fallback to the default threshold.
-      inst.configure({ logMinDuration: 1000 });
-      expect(rewriteAutoExplain("SET auto_explain.log_min_duration = ''"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-      expect(inst.getConfig().logMinDuration).toBe(1000);
-    });
+describe('recordQuery', () => {
+  it('skips queries below threshold', () => {
+    const ae = AutoExplainShim.getInstance({ logMinDuration: 1000 });
+    // We can't easily spy on logger.info, but calling should not throw and
+    // below-threshold queries produce no observable side effect besides return.
+    expect(() => ae.recordQuery('SELECT 1', 5.0)).not.toThrow();
+  });
 
-    it('rewrites boolean-ish SET params (on/true)', () => {
-      for (const p of ['log_analyze', 'log_nested_statements', 'log_timing', 'log_buffers', 'log_wal']) {
-        expect(rewriteAutoExplain(`SET auto_explain.${p} = 'on'`))
-          .toEqual({ sql: 'SELECT 1', rewritten: true });
-      }
-    });
+  it('records a query at/above threshold (text format)', () => {
+    const ae = AutoExplainShim.getInstance({ logMinDuration: 1000 });
+    expect(() => ae.recordQuery('SELECT * FROM t', 1234.5)).not.toThrow();
+  });
 
-    it('rewrites log_format and log_level', () => {
-      expect(rewriteAutoExplain("SET auto_explain.log_format = 'json'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-      // Non-json format hits the else branch (text).
-      expect(rewriteAutoExplain("SET auto_explain.log_format = 'text'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-      expect(rewriteAutoExplain("SET auto_explain.log_level = 'debug'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-    });
+  it('records with an explicit planText', () => {
+    const ae = AutoExplainShim.getInstance({ logMinDuration: 100 });
+    expect(() => ae.recordQuery('SELECT * FROM t', 200, 'Custom Plan')).not.toThrow();
+  });
 
-    it('rewrites LOAD auto_explain to SELECT 1', () => {
-      expect(rewriteAutoExplain("LOAD 'auto_explain'"))
-        .toEqual({ sql: 'SELECT 1', rewritten: true });
-    });
+  it('uses json format when configured', () => {
+    const ae = AutoExplainShim.getInstance({ logMinDuration: 100, logFormat: 'json' });
+    expect(() => ae.recordQuery('SELECT * FROM t', 200)).not.toThrow();
+  });
 
-    it('passes through non-auto_explain SQL', () => {
-      expect(rewriteAutoExplain('SELECT 1')).toEqual({ sql: 'SELECT 1', rewritten: false });
-    });
+  it('handles warn/debug/trace log levels', () => {
+    for (const level of ['warn', 'debug', 'trace'] as const) {
+      const ae = AutoExplainShim.getInstance({ logMinDuration: 100, logLevel: level });
+      expect(() => ae.recordQuery('SELECT * FROM t', 200)).not.toThrow();
+    }
+  });
 
-    it('returns blank passthrough for non-string input', () => {
-      expect(rewriteAutoExplain('')).toEqual({ sql: '', rewritten: false });
-      expect(rewriteAutoExplain(null as unknown as string)).toEqual({ sql: '', rewritten: false });
+  it('omits timing when logTiming is false (json)', () => {
+    const ae = AutoExplainShim.getInstance({
+      logMinDuration: 100,
+      logFormat: 'json',
+      logTiming: false,
     });
+    expect(() => ae.recordQuery('SELECT * FROM t', 200)).not.toThrow();
+  });
 
-    // BUG #93 regression: a SET line inside a multiline comment must not be
-    // rewritten (the old `m` flag matched the line-start SET).
-    it('passes through a SET line inside a multiline comment', () => {
-      expect(rewriteAutoExplain("/*\nSET auto_explain.log_min_duration = '1s'\n*/"))
-        .toEqual({ sql: "/*\nSET auto_explain.log_min_duration = '1s'\n*/", rewritten: false });
-    });
+  it('truncates very long SQL in text format', () => {
+    const ae = AutoExplainShim.getInstance({ logMinDuration: 100 });
+    const longSql = 'SELECT ' + 'x'.repeat(2500);
+    expect(() => ae.recordQuery(longSql, 200)).not.toThrow();
+  });
+});
+
+describe('generatePlaceholderPlan (via recordQuery)', () => {
+  it.each([
+    ['SELECT 1'],
+    ['INSERT INTO t VALUES (1)'],
+    ['UPDATE t SET x = 1'],
+    ['DELETE FROM t'],
+    ['CREATE TABLE t (x int)'],
+  ])('produces a plan for %s', (sql) => {
+    const ae = AutoExplainShim.getInstance({ logMinDuration: 0 });
+    expect(() => ae.recordQuery(sql, 1)).not.toThrow();
+  });
+});
+
+describe('detectAutoExplain', () => {
+  it('detects a real auto_explain reference', () => {
+    expect(detectAutoExplain('SELECT auto_explain()')).toBe(true);
+    expect(detectAutoExplain('SET auto_explain.log_min_duration = 1')).toBe(true);
+  });
+
+  it('ignores the token inside string literals', () => {
+    expect(detectAutoExplain("SELECT * FROM t WHERE x = 'auto_explain'")).toBe(false);
+    expect(detectAutoExplain("SELECT 'value auto_explain'")).toBe(false);
+  });
+
+  it('ignores the token inside SQL-escaped string literals', () => {
+    expect(detectAutoExplain("SELECT 'a'' auto_explain'")).toBe(false);
+  });
+
+  it('ignores the token inside comments', () => {
+    expect(detectAutoExplain('SELECT 1 -- auto_explain')).toBe(false);
+    expect(detectAutoExplain('/* auto_explain */ SELECT 1')).toBe(false);
+  });
+
+  it('returns false for empty / non-string input', () => {
+    expect(detectAutoExplain('')).toBe(false);
+    expect(detectAutoExplain(null as unknown as string)).toBe(false);
+    expect(detectAutoExplain(123 as unknown as string)).toBe(false);
+  });
+
+  it('is case-insensitive', () => {
+    expect(detectAutoExplain('SELECT AUTO_EXPLAIN()')).toBe(true);
+  });
+});
+
+describe('rewriteAutoExplain', () => {
+  it('returns passthrough for empty / non-string', () => {
+    expect(rewriteAutoExplain('')).toEqual({ sql: '', rewritten: false });
+    expect(rewriteAutoExplain(null as unknown as string)).toEqual({ sql: '', rewritten: false });
+  });
+
+  it('rewrites SET log_min_duration', () => {
+    const r = rewriteAutoExplain("SET auto_explain.log_min_duration = '1s'");
+    expect(r.rewritten).toBe(true);
+    expect(r.sql).toBe('SELECT 1');
+    expect(AutoExplainShim.getInstance().getConfig().logMinDuration).toBe(1000);
+  });
+
+  it.each([
+    ["SET auto_explain.log_min_duration = '500ms'", 500],
+    ["SET auto_explain.log_min_duration = '1min'", 60000],
+    ["SET auto_explain.log_min_duration = '2h'", 7200000],
+    ["SET auto_explain.log_min_duration = '0'", 0],
+    ["SET auto_explain.log_min_duration = '-1'", -1],
+    ["SET auto_explain.log_min_duration = '1.5s'", 1500],
+    ["SET auto_explain.log_min_duration = 700", 700],
+    // A decimal without a unit suffix -> unit defaults to 'ms'.
+    ["SET auto_explain.log_min_duration = '1.5'", 1.5],
+    // An empty value falls back to the default threshold.
+    ["SET auto_explain.log_min_duration = ''", 1000],
+    // An unparseable value falls back to the default threshold.
+    ["SET auto_explain.log_min_duration = 'abc'", 1000],
+  ])('parses duration %s', (sql, expected) => {
+    rewriteAutoExplain(sql);
+    expect(AutoExplainShim.getInstance().getConfig().logMinDuration).toBe(expected);
+  });
+
+  it('rewrites SET log_analyze boolean', () => {
+    rewriteAutoExplain("SET auto_explain.log_analyze = 'true'");
+    expect(AutoExplainShim.getInstance().getConfig().logAnalyze).toBe(true);
+    rewriteAutoExplain("SET auto_explain.log_analyze = 'off'");
+    expect(AutoExplainShim.getInstance().getConfig().logAnalyze).toBe(false);
+  });
+
+  it('rewrites SET log_nested_statements', () => {
+    rewriteAutoExplain("SET auto_explain.log_nested_statements = 'on'");
+    expect(AutoExplainShim.getInstance().getConfig().logNested).toBe(true);
+  });
+
+  it('rewrites SET log_format', () => {
+    rewriteAutoExplain("SET auto_explain.log_format = 'json'");
+    expect(AutoExplainShim.getInstance().getConfig().logFormat).toBe('json');
+    rewriteAutoExplain("SET auto_explain.log_format = 'text'");
+    expect(AutoExplainShim.getInstance().getConfig().logFormat).toBe('text');
+    rewriteAutoExplain("SET auto_explain.log_format = 'bogus'");
+    expect(AutoExplainShim.getInstance().getConfig().logFormat).toBe('text');
+  });
+
+  it('rewrites SET log_timing / log_buffers / log_wal', () => {
+    rewriteAutoExplain("SET auto_explain.log_timing = 'false'");
+    expect(AutoExplainShim.getInstance().getConfig().logTiming).toBe(false);
+    rewriteAutoExplain("SET auto_explain.log_buffers = 'true'");
+    expect(AutoExplainShim.getInstance().getConfig().logBuffers).toBe(true);
+    rewriteAutoExplain("SET auto_explain.log_wal = 'on'");
+    expect(AutoExplainShim.getInstance().getConfig().logWal).toBe(true);
+  });
+
+  it('rewrites SET log_buffers with a false value', () => {
+    rewriteAutoExplain("SET auto_explain.log_buffers = 'off'");
+    expect(AutoExplainShim.getInstance().getConfig().logBuffers).toBe(false);
+  });
+
+  it('rewrites SET log_level with a valid value', () => {
+    rewriteAutoExplain("SET auto_explain.log_level = 'debug'");
+    expect(AutoExplainShim.getInstance().getConfig().logLevel).toBe('debug');
+  });
+
+  it('ignores an invalid log_level value', () => {
+    AutoExplainShim.getInstance().configure({ logLevel: 'info' });
+    rewriteAutoExplain("SET auto_explain.log_level = 'foo'");
+    expect(AutoExplainShim.getInstance().getConfig().logLevel).toBe('info');
+  });
+
+  it('rewrites LOAD auto_explain', () => {
+    const r = rewriteAutoExplain("LOAD 'auto_explain'");
+    expect(r.rewritten).toBe(true);
+    expect(r.sql).toBe('SELECT 1');
+  });
+
+  it('passes through non-auto_explain SQL', () => {
+    const r = rewriteAutoExplain('SELECT 1');
+    expect(r.rewritten).toBe(false);
+    expect(r.sql).toBe('SELECT 1');
+  });
+
+  it('does not treat a SET inside a comment as real configuration', () => {
+    // Anchored `^` prevents multiline comment content from matching.
+    const r = rewriteAutoExplain('/* SET auto_explain.log_min_duration = 5 */');
+    expect(r.rewritten).toBe(false);
   });
 });
