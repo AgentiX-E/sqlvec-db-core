@@ -64,8 +64,10 @@ export function analyzeSubquery(
   tableName: string,
 ): SubqueryRewriteResult | null {
   try {
+    // parseFirst returns a Statement or throws — it never yields null. The
+    // try/catch below absorbs parse errors, so a successful call always
+    // produces a well-formed AST object.
     const stmt = parseFirst(sql);
-    if (!stmt || typeof stmt !== 'object') return null;
 
     // 只处理 SELECT 语句
     if ((stmt as any).type !== 'select') return null;
@@ -75,12 +77,20 @@ export function analyzeSubquery(
 
     const whereExpr = selectStmt.where;
 
+    // The outer table may be referenced by its real name or by an alias
+    // (e.g. "FROM orders o" makes "o.id" a reference to "orders"). Collect every
+    // identifier that can designate the outer table so correlation detection and
+    // join-condition extraction match aliased references correctly — matching
+    // only the real name silently misclassifies correlated subqueries as
+    // uncorrelated and rewrites them into semantically wrong joins.
+    const outerKeys = collectOuterTableKeys(selectStmt, tableName);
+
     // ── 1. IN / NOT IN 子查询 ──
-    const inResult = analyzeInSubquery(whereExpr, selectStmt, tableName);
+    const inResult = analyzeInSubquery(whereExpr, outerKeys, tableName);
     if (inResult !== undefined) return inResult;
 
     // ── 2. EXISTS / NOT EXISTS 子查询 ──
-    const existsResult = analyzeExistsSubquery(whereExpr, selectStmt, tableName);
+    const existsResult = analyzeExistsSubquery(whereExpr, outerKeys, tableName);
     if (existsResult !== undefined) return existsResult;
 
     // 没有检测到子查询
@@ -98,13 +108,15 @@ export function analyzeSubquery(
 export function extractSubqueryColumn(subquerySql: string): string | null {
   try {
     const stmt = parseFirst(subquerySql);
-    if (!stmt || (stmt as any).type !== 'select') return null;
+    if ((stmt as any).type !== 'select') return null;
 
     const selectStmt = stmt as any;
     const firstCol = selectStmt.columns?.[0]?.expr;
     if (!firstCol) return null;
 
-    if (firstCol.type === 'ref') {
+    // A bare `*` parses as `{ type: 'ref', name: '*' }`, which is not a concrete
+    // column name and cannot form a join condition.
+    if (firstCol.type === 'ref' && firstCol.name !== '*') {
       return firstCol.name as string;
     }
 
@@ -123,7 +135,7 @@ export function extractSubqueryColumn(subquerySql: string): string | null {
  */
 function analyzeInSubquery(
   whereExpr: any,
-  outerStmt: any,
+  outerKeys: string[],
   outerTable: string,
 ): SubqueryRewriteResult | undefined {
   // 必须是 binary 操作，并且操作符为 IN 或 NOT IN
@@ -162,7 +174,7 @@ function analyzeInSubquery(
   }
 
   // 检测子查询是否引用外层表（相关子查询）
-  const hasCorrelation = referencesOuterTable(subquery, outerTable);
+  const hasCorrelation = referencesOuterTable(subquery, outerKeys);
 
   const joinCondition = {
     leftTable: outerTable,
@@ -189,14 +201,14 @@ function analyzeInSubquery(
  */
 function analyzeExistsSubquery(
   whereExpr: any,
-  outerStmt: any,
+  outerKeys: string[],
   outerTable: string,
 ): SubqueryRewriteResult | undefined {
   // NOT EXISTS: unary(NOT) → call(exists) → select
   if (whereExpr.type === 'unary' && whereExpr.op === 'NOT') {
     const callExpr = extractExistsCall(whereExpr.operand);
     if (callExpr) {
-      return buildExistsResult(callExpr, outerTable, true);
+      return buildExistsResult(callExpr, outerKeys, outerTable, true);
     }
     return undefined;
   }
@@ -204,7 +216,7 @@ function analyzeExistsSubquery(
   // EXISTS: call(exists) → select
   const callExpr = extractExistsCall(whereExpr);
   if (callExpr) {
-    return buildExistsResult(callExpr, outerTable, false);
+    return buildExistsResult(callExpr, outerKeys, outerTable, false);
   }
 
   return undefined;
@@ -215,6 +227,7 @@ function analyzeExistsSubquery(
  */
 function buildExistsResult(
   subquery: any,
+  outerKeys: string[],
   outerTable: string,
   notExists: boolean,
 ): SubqueryRewriteResult {
@@ -224,10 +237,11 @@ function buildExistsResult(
   }
 
   // 检测是否引用外层表
-  const hasCorrelation = referencesOuterTable(subquery, outerTable);
+  const hasCorrelation = referencesOuterTable(subquery, outerKeys);
 
   // 尝试从子查询 WHERE 中提取关联条件作为连接条件
-  let joinCondition = extractCorrelationCondition(subquery, outerTable, subqueryTable);
+  const innerKeys = extractSubqueryTableKeys(subquery);
+  let joinCondition = extractCorrelationCondition(subquery, outerKeys, innerKeys, outerTable, subqueryTable);
 
   // 如果子查询没有指向外部表的引用（非相关），但有可用的 WHERE 条件，
   // 尝试从 WHERE 中提取第一个简单的列引用作为默认连接列
@@ -256,6 +270,25 @@ function buildExistsResult(
 // ── AST 工具函数 ──
 
 /**
+ * 收集外层表的所有可能标识符（真实表名 + 所有别名）。
+ *
+ * 子查询中对 `FROM orders o` 的外层列引用会被解析为 `ref.table.name === 'o'`
+ * （别名），而 `ref.table.name === 'orders'` 只在未加别名时出现。只收集真实
+ * 表名会漏掉别名引用，导致相关子查询被误判为非相关。
+ */
+function collectOuterTableKeys(selectStmt: any, tableName: string): string[] {
+  const keys = new Set<string>([tableName]);
+  for (const fromItem of selectStmt.from ?? []) {
+    // A `table` FROM item always carries a `name` object with `name`/`alias`.
+    if (fromItem.type === 'table') {
+      keys.add(fromItem.name.name);
+      if (fromItem.name.alias) keys.add(fromItem.name.alias);
+    }
+  }
+  return [...keys];
+}
+
+/**
  * 提取子查询内的表名（第一个 FROM 中的表）。
  */
 function extractSubqueryTable(subquery: any): string | null {
@@ -265,6 +298,23 @@ function extractSubqueryTable(subquery: any): string | null {
     return fromItem.name.name;
   }
   return null;
+}
+
+/**
+ * 提取子查询内表的所有可能标识符（真实表名 + 别名）。
+ */
+function extractSubqueryTableKeys(subquery: any): string[] {
+  const keys: string[] = [];
+  // The sole caller (buildExistsResult) guarantees a non-empty `from` via
+  // extractSubqueryTable before reaching this point.
+  for (const fromItem of subquery.from) {
+    // A `table` FROM item always carries a `name` object with `name`/`alias`.
+    if (fromItem.type === 'table') {
+      keys.push(fromItem.name.name);
+      if (fromItem.name.alias) keys.push(fromItem.name.alias);
+    }
+  }
+  return keys;
 }
 
 /**
@@ -284,7 +334,7 @@ function extractSubquerySelectColumn(subquery: any): string | null {
  * 结构：{ type: 'call', function: { name: 'exists' }, args: [ selectStmt ] }
  */
 function extractExistsCall(expr: any): any | null {
-  if (!expr || typeof expr !== 'object') return null;
+  if (!expr) return null;
   if (
     expr.type === 'call' &&
     expr.function?.name &&
@@ -304,14 +354,14 @@ function extractExistsCall(expr: any): any | null {
  * 遍历子查询的 WHERE（以及 HAVING）AST 树，
  * 寻找 type='ref' 且 table.name === outerTable 的节点。
  */
-function referencesOuterTable(subquery: any, outerTable: string): boolean {
+function referencesOuterTable(subquery: any, outerKeys: string[]): boolean {
   // 只在 WHERE 和 HAVING 中检查相关性
   const checkNodes: any[] = [];
   if (subquery.where) checkNodes.push(subquery.where);
   if (subquery.having) checkNodes.push(subquery.having);
 
   for (const node of checkNodes) {
-    const found = findRefToTable(node, outerTable);
+    const found = findRefToTable(node, outerKeys);
     if (found) return true;
   }
   return false;
@@ -320,14 +370,13 @@ function referencesOuterTable(subquery: any, outerTable: string): boolean {
 /**
  * 在 AST 子树中查找对指定表的列引用。
  */
-function findRefToTable(ast: any, tableName: string): boolean {
+function findRefToTable(ast: any, tableKeys: string[]): boolean {
   if (!ast || typeof ast !== 'object') return false;
 
   if (
     ast.type === 'ref' &&
-    ast.table &&
-    ast.table.name &&
-    ast.table.name === tableName
+    ast.table?.name &&
+    tableKeys.includes(ast.table.name)
   ) {
     return true;
   }
@@ -337,10 +386,10 @@ function findRefToTable(ast: any, tableName: string): boolean {
     const val = ast[key];
     if (Array.isArray(val)) {
       for (const item of val) {
-        if (findRefToTable(item, tableName)) return true;
+        if (findRefToTable(item, tableKeys)) return true;
       }
     } else if (typeof val === 'object') {
-      if (findRefToTable(val, tableName)) return true;
+      if (findRefToTable(val, tableKeys)) return true;
     }
   }
 
@@ -353,6 +402,8 @@ function findRefToTable(ast: any, tableName: string): boolean {
  */
 function extractCorrelationCondition(
   subquery: any,
+  outerKeys: string[],
+  innerKeys: string[],
   outerTable: string,
   innerTable: string,
 ): { leftTable: string; leftColumn: string; rightTable: string; rightColumn: string } | null {
@@ -364,7 +415,7 @@ function extractCorrelationCondition(
     innerCol: string;
   }> = [];
 
-  collectEqualsConditions(subquery.where, outerTable, innerTable, conditions);
+  collectEqualsConditions(subquery.where, outerKeys, innerKeys, outerTable, innerTable, conditions);
 
   if (conditions.length > 0) {
     const c = conditions[0];
@@ -384,11 +435,16 @@ function extractCorrelationCondition(
  */
 function collectEqualsConditions(
   ast: any,
+  outerKeys: string[],
+  innerKeys: string[],
   outerTable: string,
   innerTable: string,
   result: Array<{ outerCol: string; innerCol: string }>,
 ): void {
   if (!ast || typeof ast !== 'object') return;
+
+  const isOuter = (name: string | undefined) => !!name && outerKeys.includes(name);
+  const isInner = (name: string | undefined) => !!name && innerKeys.includes(name);
 
   if (
     ast.type === 'binary' &&
@@ -400,12 +456,12 @@ function collectEqualsConditions(
     const rightTableName = ast.right.table?.name;
 
     // outer.col = inner.col
-    if (leftTableName === outerTable && rightTableName === innerTable) {
+    if (isOuter(leftTableName) && isInner(rightTableName)) {
       result.push({ outerCol: ast.left.name, innerCol: ast.right.name });
       return;
     }
     // inner.col = outer.col
-    if (leftTableName === innerTable && rightTableName === outerTable) {
+    if (isInner(leftTableName) && isOuter(rightTableName)) {
       result.push({ outerCol: ast.right.name, innerCol: ast.left.name });
       return;
     }
@@ -417,41 +473,28 @@ function collectEqualsConditions(
     const val = ast[key];
     if (Array.isArray(val)) {
       for (const item of val) {
-        collectEqualsConditions(item, outerTable, innerTable, result);
+        collectEqualsConditions(item, outerKeys, innerKeys, outerTable, innerTable, result);
       }
     } else if (typeof val === 'object') {
-      collectEqualsConditions(val, outerTable, innerTable, result);
+      collectEqualsConditions(val, outerKeys, innerKeys, outerTable, innerTable, result);
     }
   }
 }
 
 /**
- * 将 select 子查询序列化为 SQL 字符串（近似）。
+ * 将 select 子查询序列化为 SQL 字符串。
+ *
+ * `toSql.statement` is the canonical serializer provided by pgsql-ast-parser
+ * and never throws for a well-formed select AST. The catch branch returns an
+ * empty string as a defensive last resort so a serialization failure degrades
+ * to "no original SQL captured" rather than crashing the planner.
  */
 function serializeSelect(subquery: any): string {
-  if (!subquery || subquery.type !== 'select') return '';
+  if (subquery?.type !== 'select') return '';
   try {
     const { toSql } = require('pgsql-ast-parser');
     return toSql.statement(subquery);
   } catch {
-    // 降级：手工拼接
-    const cols = (subquery.columns || [])
-      .map((c: any) => {
-        if (c.expr?.type === 'ref') return c.expr.name || '*';
-        if (c.expr?.type === 'integer') return String(c.expr.value);
-        return '*';
-      })
-      .join(', ');
-
-    const from = subquery.from
-      ?.map((f: any) => f.name?.name || '')
-      .filter(Boolean)
-      .join(', ');
-
-    let sql = `SELECT ${cols} FROM ${from}`;
-    if (subquery.where) {
-      sql += ' WHERE ...'; // 简化
-    }
-    return sql;
+    return '';
   }
 }
