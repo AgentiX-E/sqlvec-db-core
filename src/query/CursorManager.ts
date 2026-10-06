@@ -136,9 +136,12 @@ export class CursorManager {
       case 'LAST':
         cursor.position = cursor.rows.length - 1;
         break;
-      case 'ABSOLUTE':
-        cursor.position = Math.max(-1, Math.min(count - 1, cursor.rows.length - 1));
+      case 'ABSOLUTE': {
+        // n>0 => n-th row (1-based); n=0 => before first; n<0 => n-th from end.
+        const idx = count > 0 ? count - 1 : count < 0 ? cursor.rows.length + count : -1;
+        cursor.position = Math.max(-1, Math.min(idx, cursor.rows.length - 1));
         break;
+      }
       case 'RELATIVE':
         cursor.position = Math.max(-1, Math.min(cursor.position + count, cursor.rows.length - 1));
         break;
@@ -259,12 +262,15 @@ export class CursorManager {
         if (!cursor.scroll) {
           throw new Error('Cannot fetch backward on a non-scroll cursor');
         }
-        const start = Math.max(cursor.position - count, -1);
-        const end = cursor.position;
-        for (let i = end - 1; i > start; i--) {
+        // Walk backward from position-1 down to the (clamped) target, returning
+        // up to `count` rows. `i >= newPos` (rather than `>`) and the `i >= 0`
+        // guard together prevent both the off-by-one (which returned zero rows
+        // for PRIOR 1) and the negative-index underflow at the start of the set.
+        const newPos = Math.max(cursor.position - count, -1);
+        for (let i = cursor.position - 1; i >= newPos && i >= 0; i--) {
           results.push(rows[i]);
         }
-        cursor.position = start + 1;
+        cursor.position = newPos;
         break;
       }
 
@@ -289,19 +295,27 @@ export class CursorManager {
       }
 
       case 'ABSOLUTE': {
-        const idx = Math.max(0, Math.min(count - 1, len - 1));
+        // PostgreSQL ABSOLUTE n: n>0 => the n-th row (1-based); n=0 => before
+        // the first row (position -1, no row); n<0 => n-th row from the end.
+        const idx = count > 0 ? count - 1 : count < 0 ? len + count : -1;
         if (idx >= 0 && idx < len) {
           results.push(rows[idx]);
           cursor.position = idx;
+        } else {
+          cursor.position = idx < 0 ? -1 : len - 1;
         }
         break;
       }
 
       case 'RELATIVE': {
-        const idx = Math.max(0, Math.min(cursor.position + count, len - 1));
+        // Relative to the current position. A negative count moves backward and
+        // may land before the first row (position -1), which must not clamp to 0.
+        const idx = cursor.position + count;
         if (idx >= 0 && idx < len) {
           results.push(rows[idx]);
           cursor.position = idx;
+        } else {
+          cursor.position = idx < 0 ? -1 : len - 1;
         }
         break;
       }
