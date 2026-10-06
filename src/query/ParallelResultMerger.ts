@@ -129,9 +129,14 @@ export class ParallelResultMerger {
         });
         insertMany(rows);
 
-        // Build proper re-aggregation SQL with aggregate function mapping
-        const reAggSql = options.tableName
-          ? buildReaggregateSql(options.sql, colNames, options.tableName)
+        // Build proper re-aggregation SQL with aggregate function mapping.
+        // If the caller omitted an explicit tableName (e.g. for a non-aggregate
+        // ORDER BY/LIMIT query), infer it from the `FROM` clause so the rewrite
+        // still targets `_ms_scatter` instead of re-running the original SQL
+        // against a non-existent source table.
+        const effectiveTable = options.tableName || extractTableName(options.sql) || '';
+        const reAggSql = effectiveTable
+          ? buildReaggregateSql(options.sql, colNames, effectiveTable)
           : options.sql;
 
         return memDb.prepare(reAggSql).all() as Record<string, any>[];
@@ -169,15 +174,19 @@ export function buildReaggregateSql(
 
   const selectClause = selectMatch[1];
 
-  // Extract GROUP BY / ORDER BY / LIMIT / HAVING
-  const groupByMatch = sql.match(/\bGROUP\s+BY\b\s+(.+?)(?:\s+(?:ORDER\s+BY|LIMIT|HAVING|$))/is);
-  const orderByMatch = sql.match(/\bORDER\s+BY\b\s+(.+?)(?:\s+(?:LIMIT|$))/i);
+  // Extract GROUP BY / ORDER BY / LIMIT / HAVING.
+  // The clauses are delimited by a following keyword OR end-of-string. The
+  // previous pattern required `\s+` before `$`, which failed to match when a
+  // clause sat at the very end of the SQL (no trailing whitespace), dropping
+  // the clause entirely.
+  const groupByMatch = sql.match(/\bGROUP\s+BY\b\s+(.+?)(?=$|\s+(?:ORDER\s+BY|LIMIT|HAVING))/is);
+  const orderByMatch = sql.match(/\bORDER\s+BY\b\s+(.+?)(?=$|\s+LIMIT)/i);
   const limitMatch = sql.match(/\bLIMIT\b\s+(\d+)/i);
-  const havingMatch = sql.match(/\bHAVING\b\s+(.+?)(?:\s+(?:ORDER\s+BY|LIMIT|$))/i);
+  const havingMatch = sql.match(/\bHAVING\b\s+(.+?)(?=$|\s+(?:ORDER\s+BY|LIMIT))/i);
 
   const groupByCols = groupByMatch ? groupByMatch[1].trim().split(/\s*,\s*/) : [];
   const groupKeys = groupByCols.map(c => c.replace(/"/g, '').trim());
-  const hasCountCol = perShardCols.some(c => /^cnt|^count$/i.test(c) || c === 'COUNT(*)');
+  const hasCountCol = perShardCols.some(c => /^cnt|^count$/i.test(c) || /^count\s*\(\s*\*?\s*\)$/i.test(c));
 
   // Parse SELECT expressions (split by top-level commas)
   const exprs = splitTopLevelCommas(selectClause);
@@ -199,7 +208,7 @@ export function buildReaggregateSql(
         ? (perShardCols.includes(alias) ? alias : null)
         : perShardCols.find(c =>
             c.toLowerCase() === inferAggAlias(argStr, funcName).toLowerCase() ||
-            c === trimmed.trim()
+            c.toLowerCase() === trimmed.trim().toLowerCase()
           );
       const colName = matchCol || inferAggAlias(argStr, funcName);
       const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
@@ -218,7 +227,9 @@ export function buildReaggregateSql(
             break;
           case 'AVG': {
             if (hasCountCol && groupKeys.length > 0) {
-              const cntCol = perShardCols.find(c => /^cnt|^count$/i.test(c) || c === 'COUNT(*)') || 'cnt';
+              // hasCountCol is true iff some column matches this same pattern,
+              // so find() is guaranteed to return a column here.
+              const cntCol = perShardCols.find(c => /^cnt|^count$/i.test(c) || /^count\s*\(\s*\*?\s*\)$/i.test(c))!;
               newExprs.push(
                 `(CASE WHEN SUM(${q(cntCol)}) = 0 THEN NULL ELSE SUM(${q(colName)} * ${q(cntCol)}) / SUM(${q(cntCol)}) END)${alias ? ` AS ${alias}` : ` AS ${funcName.toLowerCase()}`}`
               );
@@ -227,8 +238,6 @@ export function buildReaggregateSql(
             }
             break;
           }
-          default:
-            newExprs.push(trimmed.replace(new RegExp(`\\b${escapeRegex(tableName)}\\b`, 'gi'), '_ms_scatter'));
         }
       } else {
         newExprs.push(trimmed.replace(new RegExp(`\\b${escapeRegex(tableName)}\\b`, 'gi'), '_ms_scatter'));
@@ -259,13 +268,17 @@ function replaceTableName(sql: string, oldName: string, newName: string): string
   return sql.replace(new RegExp(`\\b${escaped}\\b`, 'gi'), newName);
 }
 
+function extractTableName(sql: string): string | null {
+  const match = sql.match(/\bFROM\s+([A-Za-z_][\w.]*)/i);
+  return match ? match[1] : null;
+}
+
 function inferAggAlias(argStr: string, funcName: string): string {
-  const arg = argStr.trim();
-  if (arg === '*') {
-    const lower = funcName.toLowerCase();
-    return lower === 'count' ? 'cnt' : lower;
-  }
-  return arg.replace(/[^a-zA-Z0-9_]/g, '_');
+  // SQLite's default result-column name for `FUNC(expr)` is the verbatim
+  // expression text (e.g. `SUM(x)` → `SUM(x)`, `COUNT(*)` → `COUNT(*)`).
+  // Return that form (lowercased) so it matches a per-shard column named by
+  // SQLite when no explicit AS alias was supplied.
+  return `${funcName.toLowerCase()}(${argStr.trim()})`;
 }
 
 function splitTopLevelCommas(str: string): string[] {
