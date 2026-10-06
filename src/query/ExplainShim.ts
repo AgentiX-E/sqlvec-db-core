@@ -76,9 +76,11 @@ const LIST_SUBQUERY_RE = /^(LIST\s+SUBQUERY)\s+(\d+)$/i;
 const CO_ROUTINE_RE = /^(CO-ROUTINE)\s+(\d+)$/i;
 
 /**
- * Matches "CREATE BLOOM FILTER" or "BLOOM FILTER ON <table>"
+ * Matches "CREATE BLOOM FILTER" or "BLOOM FILTER ON <table>".
+ * Group 1 is the operation ("CREATE BLOOM FILTER" or "BLOOM FILTER"),
+ * group 2 is the optional target table following "ON".
  */
-const BLOOM_FILTER_RE = /^((?:CREATE\s+)?BLOOM\s+FILTER(?:\s+ON\s+\S+)?)$/i;
+const BLOOM_FILTER_RE = /^((?:CREATE\s+)?BLOOM\s+FILTER)(?:\s+ON\s+(\S+))?$/i;
 
 /**
  * Matches "MERGE" or "GROUP BY SORT" etc.
@@ -93,8 +95,10 @@ const MISC_RE = /^(MERGE|GROUP\s+BY\s+SORT|CORRELATED\s+SCALAR\s+SUBQUERY)(?:\s+
  * Returns true if the SQL starts with EXPLAIN or EXPLAIN ANALYZE.
  */
 export function detectExplain(sql: string): boolean {
-  const trimmed = sql.trim().toUpperCase();
-  return trimmed.startsWith('EXPLAIN');
+  const trimmed = sql.trim();
+  // `EXPLAIN` must be a standalone token (followed by whitespace or end of
+  // string) so identifiers like `EXPLAINING` are not misdetected.
+  return /^EXPLAIN\b/i.test(trimmed);
 }
 
 /**
@@ -108,27 +112,36 @@ export function detectExplain(sql: string): boolean {
  */
 export function rewriteExplain(sql: string): { sql: string; rewritten: boolean; analyze: boolean } {
   const trimmed = sql.trim();
-  const upper = trimmed.toUpperCase().replace(/\s+/g, ' ');
 
-  let analyze = false;
-  let innerSql = trimmed;
-
-  if (upper.startsWith('EXPLAIN ANALYZE ')) {
-    analyze = true;
-    innerSql = trimmed.slice('EXPLAIN ANALYZE '.length).trim();
-  } else if (upper.startsWith('EXPLAIN ')) {
-    innerSql = trimmed.slice('EXPLAIN '.length).trim();
-  } else if (upper === 'EXPLAIN') {
-    // Standalone EXPLAIN with no inner SQL — just return passthrough
-    return { sql: trimmed, rewritten: false, analyze: false };
-  } else {
-    // Not an EXPLAIN statement
-    return { sql: trimmed, rewritten: false, analyze: false };
+  // Match "EXPLAIN ANALYZE <inner>" first, then "EXPLAIN <inner>", using word
+  // boundaries and capturing the inner SQL from the *trimmed* string. This
+  // avoids the slice-length corruption that occurred when the original input
+  // contained multiple whitespace characters between tokens.
+  const analyzeMatch = /^EXPLAIN\s+ANALYZE\b(?:\s+(.*))?$/i.exec(trimmed);
+  if (analyzeMatch) {
+    const innerSql = (analyzeMatch[1] ?? '').trim();
+    if (!innerSql) {
+      return { sql: trimmed, rewritten: false, analyze: true };
+    }
+    const rewritten = `EXPLAIN QUERY PLAN ${innerSql}`;
+    logger.debug({ original: sql, rewritten, analyze: true }, 'rewriteExplain');
+    return { sql: rewritten, rewritten: true, analyze: true };
   }
 
-  const rewritten = `EXPLAIN QUERY PLAN ${innerSql}`;
-  logger.debug({ original: sql, rewritten, analyze }, 'rewriteExplain');
-  return { sql: rewritten, rewritten: true, analyze };
+  const explainMatch = /^EXPLAIN\b(?:\s+(.*))?$/i.exec(trimmed);
+  if (explainMatch) {
+    const innerSql = (explainMatch[1] ?? '').trim();
+    if (!innerSql) {
+      // Standalone EXPLAIN with no inner SQL — just return passthrough
+      return { sql: trimmed, rewritten: false, analyze: false };
+    }
+    const rewritten = `EXPLAIN QUERY PLAN ${innerSql}`;
+    logger.debug({ original: sql, rewritten, analyze: false }, 'rewriteExplain');
+    return { sql: rewritten, rewritten: true, analyze: false };
+  }
+
+  // Not an EXPLAIN statement
+  return { sql: trimmed, rewritten: false, analyze: false };
 }
 
 // ============================================================
@@ -185,7 +198,7 @@ export function parseDetail(detail: string): { type: string; table: string; deta
   const bloomMatch = trimmed.match(BLOOM_FILTER_RE);
   if (bloomMatch) {
     type = bloomMatch[1].toUpperCase();
-    table = '';
+    table = bloomMatch[2] || '';
     detailStr = '';
     return { type, table, detail: detailStr };
   }
