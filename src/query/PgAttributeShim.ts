@@ -78,9 +78,11 @@ export interface PragmaTableInfoColumn {
   cid: number;
   name: string;
   type: string;
-  notnull: boolean;
+  // SQLite PRAGMA table_info returns `notnull` as the integer 0/1 (and `pk`
+  // as 0/1/2/...). Accept both the integer reality and a plain boolean.
+  notnull: boolean | number;
   dflt_value: string | null;
-  pk: boolean;
+  pk: boolean | number;
   hidden?: number;
 }
 
@@ -126,11 +128,21 @@ const DEFAULT_TYPE_INFO = { oid: 25, len: -1, byval: false, storage: 'x', align:
 
 /**
  * Determine PG type info from a SQLite column type string.
+ *
+ * The caller may supply a custom type map (for integration with pg_type);
+ * otherwise the built-in PostgreSQL OID map is used. `customTypeMap` entries
+ * override built-in entries by exact (upper-cased, modifier-stripped) type name.
  */
-function getTypeInfo(typeName: string): { oid: number; len: number; byval: boolean; storage: string; align: string } {
+function getTypeInfo(
+  typeName: string,
+  typeMap: Record<string, { oid: number; len: number; byval: boolean; storage: string; align: string }> = PG_TYPE_MAP,
+): { oid: number; len: number; byval: boolean; storage: string; align: string } {
   const upper = typeName?.trim().toUpperCase() || '';
   // Handle type modifiers like VARCHAR(255), DECIMAL(10,2)
   const baseType = upper.replace(/\(.*\)/, '');
+  const fromMap = typeMap?.[baseType];
+  if (fromMap) return fromMap;
+  // Fall back to the built-in map, then to the generic text-like default.
   return PG_TYPE_MAP[baseType] || DEFAULT_TYPE_INFO;
 }
 
@@ -183,11 +195,15 @@ export function getPgAttributes(
   const rows: PgAttributeRow[] = [];
 
   for (const col of columns) {
-    const typeInfo = getTypeInfo(col.type);
+    const typeInfo = getTypeInfo(col.type, typeMap);
     const attnum = col.cid + 1; // PG uses 1-based column numbers
 
     // Determine if column has default
     const atthasdef = col.dflt_value !== null && col.dflt_value !== undefined;
+
+    // SQLite PRAGMA table_info returns `notnull` as 0/1 (an integer), not a
+    // boolean. Normalize to a real boolean for pg_attribute.attnotnull.
+    const attnotnull = !!col.notnull;
 
     rows.push({
       attrelid: tableOid,
@@ -202,7 +218,7 @@ export function getPgAttributes(
       attbyval: typeInfo.byval,
       attstorage: typeInfo.storage,
       attalign: typeInfo.align,
-      attnotnull: col.notnull,
+      attnotnull,
       atthasdef,
       atthasmissing: false,  // No missing values
       attidentity: '',       // Not an identity column by default
