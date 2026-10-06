@@ -163,10 +163,20 @@ export class OperatorClassShim {
     if (this.tableInitialized || !this.db) return;
 
     try {
-      const executor = this.db.exec || this.db.execute;
-      if (typeof executor !== 'function') return;
+      // Invoke the DDL executor through the database object so the method's
+      // `this` binding is preserved. Extracting `db.exec`/`db.execute` into a
+      // local variable and calling it detached would lose the receiver (and
+      // better-sqlite3 methods throw in that case), silently skipping table
+      // creation.
+      const runDdl = (sql: string): void => {
+        if (typeof this.db.exec === 'function') {
+          this.db.exec(sql);
+        } else if (typeof this.db.execute === 'function') {
+          this.db.execute(sql);
+        }
+      };
 
-      executor(
+      runDdl(
         `CREATE TABLE IF NOT EXISTS _sqlvec_opclasses (
           opclass_name TEXT NOT NULL,
           type_name TEXT NOT NULL,
@@ -176,7 +186,7 @@ export class OperatorClassShim {
           PRIMARY KEY (opclass_name, index_method)
         )`,
       );
-      executor(
+      runDdl(
         `CREATE TABLE IF NOT EXISTS _sqlvec_opfamilies (
           opfamily_name TEXT NOT NULL,
           index_method TEXT NOT NULL,
