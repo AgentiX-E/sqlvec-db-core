@@ -58,6 +58,37 @@ export interface ScanWorkerResult {
 // ── Worker Function ─────────────────────────────────────────────
 
 /**
+ * Fold a `rowid >= ? AND rowid <= ?` predicate into a base SELECT statement.
+ *
+ * The predicate is inserted into the existing WHERE clause (or introduced as a
+ * new WHERE when there is none), and is always placed BEFORE any trailing
+ * ORDER BY / GROUP BY / HAVING / LIMIT / OFFSET clause so the resulting SQL
+ * remains grammatically valid.
+ */
+function appendRowIdFilter(baseSql: string): string {
+  const trimmed = baseSql.trim();
+  const upper = trimmed.toUpperCase();
+
+  // Locate the first top-level trailing clause; everything before it is the
+  // head (select list + FROM + optional WHERE), which is where the predicate
+  // belongs.
+  const trailingRe = /\b(ORDER\s+BY|GROUP\s+BY|HAVING|LIMIT|OFFSET)\b/i;
+  const trailingMatch = trailingRe.exec(upper);
+
+  const headEnd = trailingMatch ? trailingMatch.index : trimmed.length;
+  const head = trimmed.slice(0, headEnd).trimEnd();
+  const tail = trailingMatch ? trimmed.slice(trailingMatch.index).trim() : '';
+
+  const hasWhere = /\bWHERE\b/i.test(head);
+  const connector = hasWhere ? ' AND ' : ' WHERE ';
+  const rowIdFilter = `rowid >= ? AND rowid <= ?`;
+
+  return tail
+    ? `${head}${connector}${rowIdFilter} ${tail}`
+    : `${head}${connector}${rowIdFilter}`;
+}
+
+/**
  * Scan a rowid range on a single SQLite database connection.
  *
  * Opens the database in read-only mode, applies WAL pragma for concurrent
@@ -68,7 +99,10 @@ export interface ScanWorkerResult {
  */
 export default function scanChunk(task: ScanWorkerTask): ScanWorkerResult {
   const start = performance.now();
-  const { dbPath, baseSql, params, startRowId, endRowId, timeoutMs = 30000 } = task;
+  // NOTE: better-sqlite3 executes `stmt.all()` synchronously, so a true query
+  // timeout cannot be enforced mid-scan; `timeoutMs` is accepted for interface
+  // compatibility but is not interruptible. We keep the parameter documented.
+  const { dbPath, baseSql, params, startRowId, endRowId } = task;
 
   let db: Database.Database | null = null;
 
@@ -84,24 +118,11 @@ export default function scanChunk(task: ScanWorkerTask): ScanWorkerResult {
     // Set a reasonable cache size (~2MB) for scan-heavy workloads
     db.pragma('cache_size = -2000');
 
-    // Apply timeout via a short-lived timeout check
-    // (better-sqlite3 doesn't support query timeout natively;
-    //  we simulate it by checking elapsed time in the iterator)
-    const deadline = performance.now() + timeoutMs;
-
-    // Construct the final SQL with rowid range
-    // Important: the base SQL must NOT already have a WHERE clause that conflicts
-    // We append the rowid range as an additional AND condition
-    let finalSql: string;
-    const upperSql = baseSql.trim().toUpperCase();
-
-    // Determine if base SQL already has a WHERE clause
-    const hasWhere = /\bWHERE\b/.test(upperSql);
-    if (hasWhere) {
-      finalSql = `${baseSql} AND rowid >= ? AND rowid <= ?`;
-    } else {
-      finalSql = `${baseSql} WHERE rowid >= ? AND rowid <= ?`;
-    }
+    // Construct the final SQL with the rowid range folded into the WHERE
+    // clause (or appended as a new WHERE when absent). The rowid predicate is
+    // inserted BEFORE any trailing ORDER BY / GROUP BY / HAVING / LIMIT/OFFSET
+    // clause so it cannot break the statement's grammar.
+    const finalSql = appendRowIdFilter(baseSql);
 
     const stmt = db.prepare(finalSql);
 
