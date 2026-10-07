@@ -406,7 +406,7 @@ function extractOrderBy(rest: string): {
         const orderByCols = extractOrderByColumns(afterOb);
 
         // Everything after ORDER BY (LIMIT/OFFSET)
-        const afterOrderBy = extractAfterOrderBy(afterOb, orderByCols.length);
+        const afterOrderBy = extractAfterOrderBy(afterOb, orderByCols);
 
         return { orderByCols, beforeOrderBy, afterOrderBy };
       }
@@ -480,21 +480,14 @@ function extractOrderByColumns(afterOb: string): string {
 
 /**
  * Extract everything after the ORDER BY clause (LIMIT, OFFSET, etc.).
+ *
+ * `afterOb` begins with the already-extracted ORDER BY columns (there is no
+ * leading whitespace because the `ORDER BY` keyword match consumed it), so what
+ * follows those columns is the trailing LIMIT/OFFSET.
  */
-function extractAfterOrderBy(afterOb: string, orderByLen: number): string {
-  // If orderByLen == 0, the entire afterOb is what follows ORDER BY
-  let remaining = afterOb;
-
-  // Skip past the ORDER BY columns
-  const colStr = extractOrderByColumns(afterOb);
-  if (colStr.length > 0) {
-    const idx = afterOb.indexOf(colStr);
-    if (idx >= 0) {
-      remaining = afterOb.substring(idx + colStr.length).trim();
-    }
-  }
-
-  return remaining;
+function extractAfterOrderBy(afterOb: string, orderByCols: string): string {
+  if (orderByCols.length === 0) return afterOb;
+  return afterOb.substring(orderByCols.length).trim();
 }
 
 /**

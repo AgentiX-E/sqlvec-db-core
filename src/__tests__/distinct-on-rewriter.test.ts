@@ -283,5 +283,30 @@ describe('DistinctOnRewriter', () => {
       const result = rewriteDistinctOn('SELECT DISTINCT ON () b FROM t');
       expect(result.rewritten).toBe(false);
     });
+
+    it('leaves a query unchanged when DISTINCT ON appears only inside a WITH CTE', () => {
+      // detectDistinctOn sees the token, but the main SELECT has no DISTINCT ON,
+      // so extractDistinctOnContent finds no match after the WITH prefix is
+      // stripped and the rewriter leaves the statement unchanged.
+      const result = rewriteDistinctOn(
+        'WITH c AS (SELECT DISTINCT ON (a) x FROM t) SELECT * FROM c',
+      );
+      expect(result.rewritten).toBe(false);
+    });
+
+    it('preserves LIMIT when ORDER BY is immediately followed by it (empty order-by list)', () => {
+      // Malformed but tolerated: ORDER BY with no column list still lets the
+      // LIMIT land on the outer query.
+      const result = rewriteDistinctOn('SELECT DISTINCT ON (a) x FROM t ORDER BY LIMIT 5');
+      expect(result.rewritten).toBe(true);
+      expect(result.sql).toContain('LIMIT 5');
+    });
+
+    it('leaves a malformed WITH query unchanged', () => {
+      const result = rewriteDistinctOn(
+        'WITH c AS (SELECT 1 SELECT DISTINCT ON (a) x FROM t',
+      );
+      expect(result.rewritten).toBe(false);
+    });
   });
 });
