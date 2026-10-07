@@ -142,7 +142,7 @@ export function tableStatsQuery(tableName: string, columns: string[]): string {
       `SELECT`,
       `  '${col.replace(/'/g, "''")}' AS column_name,`,
       `  COUNT(*) AS row_count,`,
-      `  SUM(CASE WHEN "${safeCol}" IS NULL THEN 1 ELSE 0 END) AS null_count,`,
+      `  IFNULL(SUM(CASE WHEN "${safeCol}" IS NULL THEN 1 ELSE 0 END), 0) AS null_count,`,
       `  COUNT(DISTINCT "${safeCol}") AS distinct_count,`,
       `  MIN("${safeCol}") AS min_value,`,
       `  MAX("${safeCol}") AS max_value`,
@@ -272,14 +272,11 @@ export function analyzeTable(db: Database.Database, tableName: string): AnalyzeR
   // 2. Discover columns via PRAGMA
   const columns = db.prepare(`SELECT name FROM pragma_table_info(?)`).all(tableName) as { name: string }[];
   if (columns.length === 0) {
-    // Table doesn't exist or has no columns
-    const sqlCheck = `SELECT COUNT(*) AS cnt FROM "${safeTable}"`;
-    const exists = db.prepare(sqlCheck).get() as { cnt: number } | undefined;
-    if (!exists) {
-      throw new Error(`analyzeTable: table "${tableName}" not found`);
-    }
-    // Table exists but has no discoverable columns (shouldn't happen)
-    return { tableName, statsCount: 0, histogramCount: 0, statsColumns: [] };
+    // SQLite does not permit a table (or view) with zero columns, so an empty
+    // pragma_table_info result can only mean the table does not exist. Throw a
+    // descriptive error rather than the raw "no such table" from a follow-up
+    // query.
+    throw new Error(`analyzeTable: table "${tableName}" not found`);
   }
 
   const columnNames = columns.map(c => c.name);
@@ -292,6 +289,8 @@ export function analyzeTable(db: Database.Database, tableName: string): AnalyzeR
   let statsCount = 0;
   for (const col of columnNames) {
     const safeCol = col.replace(/"/g, '""');
+    // An aggregate query without GROUP BY always returns exactly one row, so
+    // `row` is never undefined.
     const row = db.prepare(`
       SELECT
         COUNT(*) AS row_count,
@@ -300,68 +299,72 @@ export function analyzeTable(db: Database.Database, tableName: string): AnalyzeR
         MIN("${safeCol}") AS min_value,
         MAX("${safeCol}") AS max_value
       FROM "${safeTable}"
-    `).get() as any;
+    `).get() as {
+      row_count: number;
+      null_count: number;
+      distinct_count: number;
+      min_value: any;
+      max_value: any;
+    };
 
-    if (row) {
-      db.prepare(`
-        INSERT INTO "${STATS_TABLE}" (table_name, column_name, row_count, null_count, null_fraction, distinct_count, mcv_values, mcv_frequencies, min_value, max_value, analyzed_at)
-        VALUES (?, ?, ?, ?, CAST(? AS REAL) / MAX(CAST(? AS REAL), 1.0), ?, '[]', '[]', ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
-      `).run(
-        tableName, col,
-        row.row_count, row.null_count, row.null_count, row.row_count,
-        row.distinct_count, row.min_value, row.max_value,
-      );
-      statsCount++;
+    db.prepare(`
+      INSERT INTO "${STATS_TABLE}" (table_name, column_name, row_count, null_count, null_fraction, distinct_count, mcv_values, mcv_frequencies, min_value, max_value, analyzed_at)
+      VALUES (?, ?, ?, ?, CAST(? AS REAL) / MAX(CAST(? AS REAL), 1.0), ?, '[]', '[]', ?, ?, CAST(strftime('%s', 'now') AS INTEGER))
+    `).run(
+      tableName, col,
+      row.row_count, row.null_count, row.null_count, row.row_count,
+      row.distinct_count, row.min_value, row.max_value,
+    );
+    statsCount++;
 
-      // 5. Collect MCV
-      const mcvRows = db.prepare(`
-        SELECT "${safeCol}" AS val, COUNT(*) AS freq
+    // 5. Collect MCV
+    const mcvRows = db.prepare(`
+      SELECT "${safeCol}" AS val, COUNT(*) AS freq
+      FROM "${safeTable}"
+      WHERE "${safeCol}" IS NOT NULL
+      GROUP BY "${safeCol}"
+      ORDER BY freq DESC
+      LIMIT ${MCV_LIMIT}
+    `).all() as any[];
+
+    const mcvVals = mcvRows.map((r: any) => r.val);
+    const mcvFreqs = mcvRows.map((r: any) => r.freq);
+
+    db.prepare(`
+      UPDATE "${STATS_TABLE}" SET mcv_values = ?, mcv_frequencies = ?
+      WHERE table_name = ? AND column_name = ?
+    `).run(JSON.stringify(mcvVals), JSON.stringify(mcvFreqs), tableName, col);
+
+    // 6. Collect histogram
+    const histogramRows = db.prepare(`
+      WITH ranked AS (
+        SELECT "${safeCol}" AS val,
+          NTILE(${MAX_HISTOGRAM_BUCKETS}) OVER (ORDER BY "${safeCol}") AS bucket
         FROM "${safeTable}"
         WHERE "${safeCol}" IS NOT NULL
-        GROUP BY "${safeCol}"
-        ORDER BY freq DESC
-        LIMIT ${MCV_LIMIT}
-      `).all() as any[];
+      )
+      SELECT bucket - 1 AS bucket_index, MIN(val) AS bucket_min, MAX(val) AS bucket_max, COUNT(*) AS bucket_count
+      FROM ranked
+      GROUP BY bucket
+      ORDER BY bucket_index
+    `).all() as any[];
 
-      const mcvVals = mcvRows.map((r: any) => r.val);
-      const mcvFreqs = mcvRows.map((r: any) => r.freq);
-
+    for (const hb of histogramRows) {
       db.prepare(`
-        UPDATE "${STATS_TABLE}" SET mcv_values = ?, mcv_frequencies = ?
-        WHERE table_name = ? AND column_name = ?
-      `).run(JSON.stringify(mcvVals), JSON.stringify(mcvFreqs), tableName, col);
-
-      // 6. Collect histogram
-      const histogramRows = db.prepare(`
-        WITH ranked AS (
-          SELECT "${safeCol}" AS val,
-            NTILE(${MAX_HISTOGRAM_BUCKETS}) OVER (ORDER BY "${safeCol}") AS bucket
-          FROM "${safeTable}"
-          WHERE "${safeCol}" IS NOT NULL
-        )
-        SELECT bucket - 1 AS bucket_index, MIN(val) AS bucket_min, MAX(val) AS bucket_max, COUNT(*) AS bucket_count
-        FROM ranked
-        GROUP BY bucket
-        ORDER BY bucket_index
-      `).all() as any[];
-
-      for (const hb of histogramRows) {
-        db.prepare(`
-          INSERT INTO "${HISTOGRAM_TABLE}" (table_name, column_name, bucket_index, bucket_min, bucket_max, bucket_count)
-          VALUES (?, ?, ?, ?, ?, ?)
-        `).run(tableName, col, hb.bucket_index, hb.bucket_min, hb.bucket_max, hb.bucket_count);
-      }
+        INSERT INTO "${HISTOGRAM_TABLE}" (table_name, column_name, bucket_index, bucket_min, bucket_max, bucket_count)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `).run(tableName, col, hb.bucket_index, hb.bucket_min, hb.bucket_max, hb.bucket_count);
     }
   }
 
-  // 7. Verify inserted stats
-  const statsRow = db.prepare(`SELECT COUNT(*) AS cnt FROM "${STATS_TABLE}" WHERE table_name = ?`).get(tableName) as any;
-  const histRow = db.prepare(`SELECT COUNT(*) AS cnt FROM "${HISTOGRAM_TABLE}" WHERE table_name = ?`).get(tableName) as any;
+  // 7. Verify inserted stats (aggregate COUNT(*) always returns one row)
+  const statsRow = db.prepare(`SELECT COUNT(*) AS cnt FROM "${STATS_TABLE}" WHERE table_name = ?`).get(tableName) as { cnt: number };
+  const histRow = db.prepare(`SELECT COUNT(*) AS cnt FROM "${HISTOGRAM_TABLE}" WHERE table_name = ?`).get(tableName) as { cnt: number };
 
   return {
     tableName,
-    statsCount: Number(statsRow?.cnt ?? 0),
-    histogramCount: Number(histRow?.cnt ?? 0),
+    statsCount: Number(statsRow.cnt),
+    histogramCount: Number(histRow.cnt),
     statsColumns: columnNames,
   };
 }
