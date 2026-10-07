@@ -68,9 +68,12 @@ export function rewriteGINIndex(sql: string): GINIndexResult {
     return { sql: trimmed, rewritten: false, strategy: 'not_gin' };
   }
 
-  // Extract index name, table name, and column
+  // Extract index name, table name, and column list.
+  // The ON clause may carry a schema-qualified name (schema.table), and the
+  // column list may contain multiple columns (`col1, col2`), so both must be
+  // captured in full rather than truncated at the first `\w` token.
   const idxNameMatch = trimmed.match(/CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)/i);
-  const tableNameMatch = trimmed.match(/ON\s+(\w+)/i);
+  const tableNameMatch = trimmed.match(/ON\s+([\w."`]+)/i);
   const colMatch = trimmed.match(/\(([^)]+)\)/);
 
   const idxName = idxNameMatch ? idxNameMatch[1].replace(/["`]/g, '') : 'gin_idx';
@@ -83,24 +86,31 @@ export function rewriteGINIndex(sql: string): GINIndexResult {
     return { sql: rewritten, rewritten: true, strategy: 'gin_unknown' };
   }
 
+  // Split the column list so that every column gets the `new.` / `old.` prefix
+  // in the trigger bodies. Without this, a multi-column index produced
+  // `new.col1, col2` (the second column missing its qualifier).
+  const columns = colName.split(',').map((c) => c.trim()).filter(Boolean);
+  const newCols = columns.map((c) => `new.${c}`).join(', ');
+  const oldCols = columns.map((c) => `old.${c}`).join(', ');
+
   const ftsTable = `__gin_${idxName}`;
 
   const createFts = `CREATE VIRTUAL TABLE ${ftsTable} USING fts5(${colName}, tokenize='porter unicode61', content='${tableName}', content_rowid='rowid');`;
 
   const syncInsert = `
 CREATE TRIGGER ${ftsTable}_ai AFTER INSERT ON ${tableName} BEGIN
-  INSERT INTO ${ftsTable}(rowid, ${colName}) VALUES (new.rowid, new.${colName});
+  INSERT INTO ${ftsTable}(rowid, ${colName}) VALUES (new.rowid, ${newCols});
 END;`;
 
   const syncDelete = `
 CREATE TRIGGER ${ftsTable}_ad AFTER DELETE ON ${tableName} BEGIN
-  INSERT INTO ${ftsTable}(${ftsTable}, rowid, ${colName}) VALUES ('delete', old.rowid, old.${colName});
+  INSERT INTO ${ftsTable}(${ftsTable}, rowid, ${colName}) VALUES ('delete', old.rowid, ${oldCols});
 END;`;
 
   const syncUpdate = `
 CREATE TRIGGER ${ftsTable}_au AFTER UPDATE OF ${colName} ON ${tableName} BEGIN
-  INSERT INTO ${ftsTable}(${ftsTable}, rowid, ${colName}) VALUES ('delete', old.rowid, old.${colName});
-  INSERT INTO ${ftsTable}(rowid, ${colName}) VALUES (new.rowid, new.${colName});
+  INSERT INTO ${ftsTable}(${ftsTable}, rowid, ${colName}) VALUES ('delete', old.rowid, ${oldCols});
+  INSERT INTO ${ftsTable}(rowid, ${colName}) VALUES (new.rowid, ${newCols});
 END;`;
 
   const populate = `INSERT INTO ${ftsTable}(rowid, ${colName}) SELECT rowid, ${colName} FROM ${tableName};`;
@@ -139,10 +149,14 @@ export function rewriteArrayContains(
   const arrValues = match[2].split(',').map((v) => v.trim().replace(/^['"]|['"]$/g, ''));
   const ftsQuery = arrValues.map((v) => `"${v.replace(/"/g, '""')}"`).join(' ');
 
-  const tableRef = colRef.includes('.') ? colRef.split('.')[0] : 't';
+  // When the column reference is alias-qualified (`p.arr_col`) emit `p.rowid`;
+  // when it is unqualified, emit a bare `rowid` (a single-table query has no
+  // ambiguity). The previous code hard-coded the alias `t` for the unqualified
+  // case, which produced `t.rowid` against an unrelated table name.
+  const tablePrefix = colRef.includes('.') ? `${colRef.split('.')[0]}.` : '';
   const rewritten = sql.replace(
     ARRAY_CONTAINS_RE,
-    `${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${ftsQuery}')`,
+    `${tablePrefix}rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${ftsQuery}')`,
   );
 
   logger.info({ original: sql, rewritten }, 'Array @> rewritten for GIN/FTS5 index');
@@ -168,10 +182,12 @@ export function rewriteArrayOverlaps(
   const arrValues = match[2].split(',').map((v) => v.trim().replace(/^['"]|['"]$/g, ''));
   const ftsQuery = arrValues.map((v) => `"${v.replace(/"/g, '""')}"`).join(' OR ');
 
-  const tableRef = colRef.includes('.') ? colRef.split('.')[0] : 't';
+  // Same alias handling as rewriteArrayContains: alias-qualified → `p.rowid`,
+  // unqualified → bare `rowid` (never the hard-coded `t`).
+  const tablePrefix = colRef.includes('.') ? `${colRef.split('.')[0]}.` : '';
   const rewritten = sql.replace(
     ARRAY_OVERLAPS_RE,
-    `${tableRef}.rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${ftsQuery}')`,
+    `${tablePrefix}rowid IN (SELECT rowid FROM ${ftsTableName} WHERE ${ftsTableName} MATCH '${ftsQuery}')`,
   );
 
   logger.info({ original: sql, rewritten }, 'Array && rewritten for GIN/FTS5 index');
@@ -426,14 +442,22 @@ export class GINIndexRuntime {
 
     switch (op) {
       case '@>': {
+        // Array contains: every queried element must be present as a key.
+        // The array type indexes elements directly as keys (kvKey is the bare
+        // element), so intersects on keyIndex rather than the jsonb kvIndex.
+        if (this.colType === 'array') {
+          const elements = this._arrayQueryElements(query);
+          if (elements.length === 0) {
+            return this._allRowids();
+          }
+          return this._intersectKeys(elements);
+        }
+
         // JSONB contains: all key-value pairs from query must match
         const qEntries = GINIndexRuntime.parseJSONB(typeof query === 'string' ? query : JSON.stringify(query));
         // Empty query (e.g. '{}') matches all rows
         if (qEntries.size === 0) {
-          return [...[...this.keyIndex.values()].reduce((acc, set) => {
-            for (const r of set) acc.add(r);
-            return acc;
-          }, new Set<number>())];
+          return this._allRowids();
         }
 
         let resultSet: Set<number> | null = null;
@@ -475,20 +499,7 @@ export class GINIndexRuntime {
         // All keys exist
         const keys = Array.isArray(query) ? query.map(String) : String(query).split(',').map(s => s.trim());
         if (keys.length === 0) return [];
-
-        let resultSet: Set<number> | null = null;
-        for (const key of keys) {
-          const rows = this.keyIndex.get(key);
-          if (!rows || rows.size === 0) return [];
-
-          if (resultSet === null) {
-            resultSet = new Set(rows);
-          } else {
-            resultSet = new Set([...resultSet].filter((r: number) => (rows as Set<number>).has(r)));
-          }
-        }
-
-        return resultSet ? [...resultSet] : [];
+        return this._intersectKeys(keys);
       }
 
       case '=':
@@ -538,6 +549,53 @@ export class GINIndexRuntime {
 
   // ── Private helpers ──────────────────────────────
 
+  /**
+   * Every rowid currently present in the index (union of all keyIndex sets).
+   */
+  private _allRowids(): number[] {
+    const all = new Set<number>();
+    for (const set of this.keyIndex.values()) {
+      for (const r of set) all.add(r);
+    }
+    return [...all];
+  }
+
+  /**
+   * Turn an array `@>` query value into a list of element strings.
+   * Accepts a JS array, a JSON array string, a PG `{a,b}` string, or an
+   * `ARRAY['a','b']` string.
+   */
+  private _arrayQueryElements(query: any): string[] {
+    if (Array.isArray(query)) {
+      return query.map(String);
+    }
+    if (typeof query === 'string') {
+      const trimmed = query.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        return trimmed.slice(1, -1).split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean);
+      }
+      return GINIndexRuntime.parseArray(trimmed).filter(Boolean);
+    }
+    return [String(query)];
+  }
+
+  /**
+   * Intersect the rowid sets of the given keys (all keys must be present).
+   */
+  private _intersectKeys(keys: string[]): number[] {
+    let resultSet: Set<number> | null = null;
+    for (const key of keys) {
+      const rows = this.keyIndex.get(key);
+      if (!rows || rows.size === 0) return [];
+      if (resultSet === null) {
+        resultSet = new Set(rows);
+      } else {
+        resultSet = new Set([...resultSet].filter((r: number) => rows.has(r)));
+      }
+    }
+    return resultSet ? [...resultSet] : [];
+  }
+
   private _parseValueEntries(rowid: number, value: string): Array<{ key: string; kvKey: string | null }> {
     const result: Array<{ key: string; kvKey: string | null }> = [];
 
@@ -551,7 +609,9 @@ export class GINIndexRuntime {
       for (const el of elements) {
         result.push({ key: el, kvKey: el });
       }
-    } else if (this.colType === 'tsvector') {
+    } else {
+      // Only 'tsvector' remains: 'simple' never reaches this method because
+      // insert() routes it to the fallback map.
       const lexemes = GINIndexRuntime.parseTsvector(value);
       for (const lex of lexemes) {
         result.push({ key: lex, kvKey: null });
