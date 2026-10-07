@@ -90,8 +90,11 @@ export function rewriteVectorIndex(sql: string): VectorIndexResult {
     return { sql: trimmed, rewritten: false };
   }
 
-  const schema = match[1] || match[3];
+  // match[1] is the index-name schema, match[3] is the table schema. They are
+  // distinct; only the table schema participates in the qualified table name.
+  const indexSchema = match[1];
   const indexName = match[2];
+  const tableSchema = match[3];
   const tableName = match[4];
   const indexType = match[5].toLowerCase() as 'hnsw' | 'ivfpq';
   const columnName = match[6];
@@ -110,25 +113,27 @@ export function rewriteVectorIndex(sql: string): VectorIndexResult {
     }
   }
 
-  const qualTable = schema ? `${schema}.${tableName}` : tableName;
+  const qualTable = tableSchema ? `${tableSchema}.${tableName}` : tableName;
+  const qualIndex = indexSchema ? `${indexSchema}.${indexName}` : indexName;
 
   logger.info(
     `[VectorIndexShim] Intercepted ${indexType.toUpperCase()} index creation: ` +
-    `"${indexName}" ON "${qualTable}" ("${columnName}") ` +
+    `"${qualIndex}" ON "${qualTable}" ("${columnName}") ` +
     (withClause ? `WITH (${withClause}) ` : '') +
     `— converted to no-op (delegated to VectorEngine)`
   );
 
-  // Normalise metric: 'cosine' → 'ip' (HNSW uses IP for cosine with normalized vectors)
-  // 'l2sq' → 'l2' (HNSW uses 'l2' internally)
+  // Normalise metric for the VectorEngine:
+  //   'l2sq'   → 'l2'  (HNSW stores squared-L2 internally as 'l2')
+  //   'cosine' → 'ip'  (cosine over normalized vectors is inner product)
   const rawMetric = (params.metric || params.distance || 'l2sq').toLowerCase();
-  const metric = rawMetric === 'l2sq' ? 'l2' : rawMetric;
+  const metric = rawMetric === 'l2sq' ? 'l2' : rawMetric === 'cosine' ? 'ip' : rawMetric;
 
   return {
-    sql: `-- Vector index "${indexName}" ON ${qualTable} (${indexType}, column=${columnName}) — managed by VectorEngine`,
+    sql: `-- Vector index "${qualIndex}" ON ${qualTable} (${indexType}, column=${columnName}) — managed by VectorEngine`,
     rewritten: true,
     meta: {
-      indexName,
+      indexName: qualIndex,
       tableName: qualTable,
       columnName,
       indexType,
