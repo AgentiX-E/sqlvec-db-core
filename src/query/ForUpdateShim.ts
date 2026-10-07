@@ -67,9 +67,11 @@ export interface ForUpdateClause {
 const FOR_CLAUSE_PATTERN = /\s+FOR\s+(NO\s+KEY\s+UPDATE|KEY\s+SHARE|SHARE|UPDATE)(?:\s+OF\s+([^\s,]+(?:\s*,\s*[^\s,]+)*))?(?:\s+(NOWAIT|SKIP\s+LOCKED))?\s*;?\s*$/i;
 
 /**
- * Simpler pattern just to detect the presence of a FOR [NO KEY] UPDATE / FOR [KEY] SHARE clause.
+ * Simpler pattern just to detect the presence of a FOR UPDATE / FOR SHARE
+ * clause. Lists the four real lock strengths explicitly (matching
+ * FOR_CLAUSE_PATTERN) so it does NOT accept the nonexistent "NO KEY SHARE".
  */
-const FOR_CLAUSE_DETECT = /\s+FOR\s+(?:NO\s+KEY\s+)?(?:UPDATE|SHARE|KEY\s+SHARE)\b/i;
+const FOR_CLAUSE_DETECT = /\s+FOR\s+(?:NO\s+KEY\s+UPDATE|KEY\s+SHARE|SHARE|UPDATE)\b/i;
 
 // ── Public API ───────────────────────────────────────────────────
 
@@ -212,8 +214,11 @@ export function parseForUpdate(sql: string): ForUpdateClause | null {
  * ```
  */
 export function stripForUpdate(sql: string): string {
-  if (typeof sql !== 'string' || sql.trim().length === 0) {
-    return sql ?? '';
+  if (typeof sql !== 'string') {
+    return '';
+  }
+  if (sql.trim().length === 0) {
+    return sql;
   }
 
   // Replace the FOR clause with empty string
