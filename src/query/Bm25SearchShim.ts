@@ -82,7 +82,6 @@ function tokenize(text: string): string[] {
 export class Bm25SearchShim {
   private tfidf: any = null;
   private available: boolean = false;
-  private docCount: number = 0;
 
   // In-memory document index: Map<docId, Map<term, tf>>
   private documents: Map<string, Map<string, number>> = new Map();
@@ -91,8 +90,6 @@ export class Bm25SearchShim {
 
   // Registered FTS configurations per table
   private ftsConfigs: Map<string, FtsConfig> = new Map();
-  // Per-table doc ID counter
-  private docCounters: Map<string, number> = new Map();
 
   constructor() {
     try {
@@ -116,10 +113,6 @@ export class Bm25SearchShim {
       tableName: tableName.toLowerCase(),
       columns: columns.map((c) => c.toLowerCase()),
     });
-
-    if (!this.docCounters.has(tableName.toLowerCase())) {
-      this.docCounters.set(tableName.toLowerCase(), 0);
-    }
 
     logger.info({ tableName, columns }, 'FTS config registered');
   }
@@ -150,7 +143,10 @@ export class Bm25SearchShim {
     const config = this.ftsConfigs.get(tableName.toLowerCase());
     if (!config) return;
 
-    const docId = `${tableName}:${rowId}`;
+    // Lowercase tableName for the docId so it matches search()/removeRow(),
+    // which also lowercase. Mixed-case table names previously produced a
+    // docId that never matched on lookup.
+    const docId = `${tableName.toLowerCase()}:${rowId}`;
     const termFreqs = new Map<string, number>();
 
     for (const col of config.columns) {
@@ -166,9 +162,11 @@ export class Bm25SearchShim {
         localFreq.set(token, (localFreq.get(token) || 0) + 1);
       }
 
-      // Normalize TF by document length
+      // Normalize TF by document length. totalTokens is guaranteed positive
+      // here: localFreq is non-empty only when tokens is non-empty (each entry
+      // is derived from a token), so totalTokens === tokens.length > 0.
       for (const [term, freq] of localFreq) {
-        const tf = totalTokens > 0 ? freq / totalTokens : 0;
+        const tf = freq / totalTokens;
         termFreqs.set(term, (termFreqs.get(term) || 0) + tf);
       }
     }
@@ -182,7 +180,7 @@ export class Bm25SearchShim {
     const oldTerms = this.documents.get(docId);
     if (oldTerms) {
       for (const term of oldTerms.keys()) {
-        const currentDf = this.docFreq.get(term) || 1;
+        const currentDf = this.getDocumentFrequency(term);
         if (currentDf <= 1) {
           this.docFreq.delete(term);
         } else {
@@ -191,13 +189,16 @@ export class Bm25SearchShim {
       }
     }
 
+    // Empty documents must not be stored: a zero-term entry would inflate the
+    // total document count (documents.size) and dilute every term's IDF
+    // (which uses that count as N). Remove any prior entry instead.
+    if (termFreqs.size === 0) {
+      this.documents.delete(docId);
+      logger.debug({ tableName, rowId }, 'FTS: empty document removed');
+      return;
+    }
+
     this.documents.set(docId, termFreqs);
-
-    // Count docs for this table
-    const counter = this.docCounters.get(tableName.toLowerCase()) || 0;
-    this.docCounters.set(tableName.toLowerCase(), counter + 1);
-    this.docCount = this.getTotalDocCount();
-
     logger.debug({ tableName, rowId, terms: termFreqs.size }, 'FTS: document indexed');
   }
 
@@ -206,11 +207,11 @@ export class Bm25SearchShim {
    * Called on DELETE.
    */
   removeRow(tableName: string, rowId: string | number): void {
-    const docId = `${tableName}:${rowId}`;
+    const docId = `${tableName.toLowerCase()}:${rowId}`;
     const oldTerms = this.documents.get(docId);
     if (oldTerms) {
       for (const term of oldTerms.keys()) {
-        const currentDf = this.docFreq.get(term) || 1;
+        const currentDf = this.getDocumentFrequency(term);
         if (currentDf <= 1) {
           this.docFreq.delete(term);
         } else {
@@ -269,7 +270,7 @@ export class Bm25SearchShim {
         const tf = termFreqs.get(keyword) || 0;
         if (tf === 0) continue;
 
-        const df = this.docFreq.get(keyword) || 1;
+        const df = this.getDocumentFrequency(keyword);
         const idf = Math.log((docCount - df + 0.5) / (df + 0.5) + 1);
 
         // BM25 scoring formula
@@ -302,7 +303,7 @@ export class Bm25SearchShim {
    */
   detectMatchAgainst(sql: string): FtsMatchQuery | null {
     const match = sql.match(
-      /MATCH\s*\(\s*(\w+)\s*\)\s*AGAINST\s*\(\s*'([^']+)'\s*\)/i,
+      /MATCH\s*\(\s*(["\`]?\w+["\`]?)\s*\)\s*AGAINST\s*\(\s*'([^']+)'\s*\)/i,
     );
     if (!match) return null;
 
@@ -393,6 +394,18 @@ export class Bm25SearchShim {
   }
 
   /**
+   * Fetch the document frequency for a term, defaulting to 1 when absent.
+   *
+   * The document-frequency map never stores a zero (terms are added with an
+   * increment and removed when their count would reach zero), so `?? 1`
+   * suffices: it only guards an absent key, matching the reference-count
+   * invariant that a present term always has df >= 1.
+   */
+  private getDocumentFrequency(term: string): number {
+    return this.docFreq.get(term) ?? 1;
+  }
+
+  /**
    * Check if the `natural` package is available.
    */
   isAvailable(): boolean {
@@ -412,7 +425,5 @@ export class Bm25SearchShim {
   clear(): void {
     this.documents.clear();
     this.docFreq.clear();
-    this.docCounters.clear();
-    this.docCount = 0;
   }
 }
