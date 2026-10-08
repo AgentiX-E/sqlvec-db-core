@@ -842,7 +842,8 @@ const SPATIAL_OP_POINT_PATTERN =
  * These are mapped to R-tree coordinate space as:
  *   minX = x1, maxX = x2, minY = y1, maxY = y2
  *
- * For point operators (~=), bounds = [x, x, y, y] since min==max for point equality.
+ * For point operators (~=), bounds = [x, y, x, y] since min==max for point
+ * equality in both dimensions.
  *
  * @param rtreeTable - Name of the R-tree virtual table
  * @param parentTable - Name of the parent table (or alias)
@@ -856,7 +857,7 @@ export function buildRTreeSpatialWhere(
   op: string,
   bounds: number[],
 ): string {
-  // bounds come as [x1, y1, x2, y2] from box(x1,y1,x2,y2) or [x, x, y, y] for point ~=.
+  // bounds come as [x1, y1, x2, y2] from box(x1,y1,x2,y2) or [x, y, x, y] for point ~=.
   // Map to R-tree coordinate space: minX=x1, maxX=x2, minY=y1, maxY=y2
   const [x1, y1, x2, y2] = bounds;
   const minX = Math.min(x1, x2);
@@ -1165,7 +1166,7 @@ export function rewriteKnnOrderBy(sql: string): KnnRewriteResult {
   // Step 3: Extract the column extraction expressions for x and y
   // The data coordinates are stored as "x y" in the column (point_xy format).
   // We extract them for distance computation.
-  const colRef = colName.includes('.') ? colName : colName;
+  const colRef = colName;
   const colX = `CAST(SUBSTR(${colRef}, 1, INSTR(${colRef}, ' ') - 1) AS REAL)`;
   const colY = `CAST(SUBSTR(${colRef}, INSTR(${colRef}, ' ') + 1) AS REAL)`;
 
@@ -1334,11 +1335,14 @@ export class GiSTIndexRuntime {
     }
 
     if (value == null) {
-      // Remove from fallback map
+      // Remove from fallback map (rowid is no longer associated with a
+      // parseable value). Decrement size here so getSize() stays accurate,
+      // unlike the previous code which removed the entry but never decremented.
       for (const [v, rows] of this.fallback) {
         if (rows.has(rowid)) {
           rows.delete(rowid);
           if (rows.size === 0) this.fallback.delete(v);
+          this.size = Math.max(0, this.size - 1);
           return;
         }
       }
