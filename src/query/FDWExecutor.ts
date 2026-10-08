@@ -108,15 +108,20 @@ export class FDWExecutor {
    * @param serverName - Name of the server to unregister.
    */
   unregisterForeignServer(serverName: string): void {
-    this.servers.delete(serverName);
+    const server = this.servers.get(serverName);
 
-    // Drop any cached connections.
-    const connKey = `server:${serverName}`;
-    const conn = this.dbConnections.get(connKey);
-    if (conn) {
-      conn.close();
-      this.dbConnections.delete(connKey);
+    // Close any cached connection. querySqlite() keys connections by the
+    // server's file path, so look it up by path — the previous code used a
+    // `server:<name>` key that never matched, leaking the connection.
+    if (server) {
+      const conn = this.dbConnections.get(server.path);
+      if (conn) {
+        conn.close();
+        this.dbConnections.delete(server.path);
+      }
     }
+
+    this.servers.delete(serverName);
 
     // Drop all tables referencing this server.
     for (const [localName, table] of this.tables) {
@@ -453,7 +458,13 @@ export class FDWExecutor {
    * Evaluate a single WHERE condition against a row.
    */
   private evaluateCondition(row: Record<string, any>, condition: string): boolean {
-    const match = condition.match(/^([`"\w.]+)\s*(=|!=|<|>|<=|>=|LIKE|NOT\s+LIKE)\s*(.+)$/i);
+    // Operators are ordered longest-first so that multi-character operators
+    // (NOT LIKE, <=, >=, !=) are matched before their single-character
+    // prefixes. Ordering `<` before `<=` previously made `age <= 25` parse as
+    // `<` + `= 25`, which then evaluated `Number('= 25')` as NaN.
+    const match = condition.match(
+      /^([`"\w.]+)\s*(NOT\s+LIKE|LIKE|!=|<=|>=|=|<|>)\s*(.+)$/i,
+    );
     if (!match) return true;
 
     const [, col, op, rawValue] = match;
@@ -484,10 +495,19 @@ export class FDWExecutor {
   }
 
   /**
-   * Simple LIKE pattern matching (% and _ wildcards).
+   * Simple LIKE pattern matching (% and _ wildcards, case-insensitive).
+   *
+   * Regular-expression metacharacters in the pattern are escaped first so
+   * that only `%` and `_` act as SQL wildcards. Without this, a literal `.`
+   * or `(` in the pattern would be interpreted as regex syntax, causing
+   * both wrong matches (`A.ice` matching `Alice`) and crashes on invalid
+   * regex (`(A` → "Unterminated group").
    */
   private likeMatch(value: string, pattern: string): boolean {
-    const regexStr = '^' + pattern.replace(/%/g, '.*').replace(/_/g, '.') + '$';
+    const regexStr =
+      '^' +
+      escapeRegex(pattern).replace(/%/g, '.*').replace(/_/g, '.') +
+      '$';
     return new RegExp(regexStr, 'i').test(value);
   }
 
