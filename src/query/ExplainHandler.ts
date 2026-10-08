@@ -172,54 +172,41 @@ export const DEFAULT_EXPLAIN_OPTIONS: ExplainOptions = {
  */
 function parseExplainOptions(sql: string, baseOptions: ExplainOptions): { innerSql: string; options: ExplainOptions } {
   const options = { ...baseOptions };
-  let innerSql = sql;
 
-  // Match EXPLAIN (option1, option2, ...) inner_STATEMENT
-  // Supported options: ANALYZE, VERBOSE, COSTS, TIMING, BUFFERS, FORMAT JSON/YAML
+  // This function is only called (from stripExplain) after the caller has
+  // already matched the parenthetical EXPLAIN (...) form, so the regex below
+  // always matches; there is no non-parenthetical path to guard.
   const parentheticalMatch = sql.match(
     /^\s*EXPLAIN\s+\(([^)]+)\)\s+(.*)/is,
-  );
+  )!;
+  const optsStr = parentheticalMatch[1].toUpperCase();
+  const innerSql = parentheticalMatch[2];
 
-  if (parentheticalMatch) {
-    const optsStr = parentheticalMatch[1].toUpperCase();
-    innerSql = parentheticalMatch[2];
+  // Parse individual options
+  const parts = optsStr.split(',').map(s => s.trim());
 
-    // Parse individual options
-    const parts = optsStr.split(',').map(s => s.trim());
-
-    for (const part of parts) {
-      if (part === 'ANALYZE') {
-        options.analyze = true;
-      } else if (part === 'VERBOSE') {
-        options.verbose = true;
-      } else if (part === 'COSTS') {
-        options.costs = true;
-      } else if (part === 'COSTS FALSE' || part === 'COSTS OFF') {
-        options.costs = false;
-      } else if (part === 'TIMING') {
-        options.timing = true;
-      } else if (part === 'TIMING FALSE' || part === 'TIMING OFF') {
-        options.timing = false;
-      } else if (part === 'BUFFERS') {
-        options.buffers = true;
-      } else if (/^FORMAT\s+JSON$/i.test(part)) {
-        options.format = 'json';
-      } else if (/^FORMAT\s+YAML$/i.test(part)) {
-        options.format = 'yaml';
-      } else if (/^FORMAT\s+TEXT$/i.test(part)) {
-        options.format = 'text';
-      }
+  for (const part of parts) {
+    if (part === 'ANALYZE') {
+      options.analyze = true;
+    } else if (part === 'VERBOSE') {
+      options.verbose = true;
+    } else if (part === 'COSTS') {
+      options.costs = true;
+    } else if (part === 'COSTS FALSE' || part === 'COSTS OFF') {
+      options.costs = false;
+    } else if (part === 'TIMING') {
+      options.timing = true;
+    } else if (part === 'TIMING FALSE' || part === 'TIMING OFF') {
+      options.timing = false;
+    } else if (part === 'BUFFERS') {
+      options.buffers = true;
+    } else if (/^FORMAT\s+JSON$/i.test(part)) {
+      options.format = 'json';
+    } else if (/^FORMAT\s+YAML$/i.test(part)) {
+      options.format = 'yaml';
+    } else if (/^FORMAT\s+TEXT$/i.test(part)) {
+      options.format = 'text';
     }
-
-    return { innerSql, options };
-  }
-
-  // Also handle "EXPLAIN VERBOSE SELECT ..." (non-parenthetical)
-  const verboseMatch = sql.match(/^\s*EXPLAIN\s+VERBOSE\s+(.*)/is);
-  if (verboseMatch) {
-    options.verbose = true;
-    innerSql = verboseMatch[1];
-    return { innerSql, options };
   }
 
   return { innerSql, options };
@@ -355,11 +342,11 @@ export class ExplainHandler {
     this.options = { ...this.options, ...options };
 
     // Parse the inner SQL to determine the plan
-    // P0-4: Convert QueryExecutionStats to array format for the plan builder
-    const planResult = !Array.isArray(executionResult) && executionResult
-      ? (executionResult as QueryExecutionStats).resultRows ?? []
-      : executionResult as any[] | undefined;
-    const planTree = this.buildPlanTree(innerSql, planResult);
+    // Pass the raw executionResult through so that ANALYZE mode can read the
+    // real execTimeMs/actualRows off a QueryExecutionStats object. Extracting
+    // `.resultRows` here would discard those measured values and force
+    // applyActuals() to fall back to a hardcoded 0.5 ms.
+    const planTree = this.buildPlanTree(innerSql, executionResult);
 
     const planningTime = performance.now() - startTime;
 
@@ -393,30 +380,32 @@ export class ExplainHandler {
     }
 
     try {
+      // pgsql-ast-parser's parse() either returns a non-empty statement array
+      // or throws (it never returns an empty array for any input, including
+      // blank/comment-only strings), so there is no need to guard for an empty
+      // result here — the catch below handles every parse failure.
       const ast = parse(sql.trim());
-      if (!ast || ast.length === 0) {
-        return this.buildUnknownPlan(sql);
-      }
-
       const stmt = ast[0];
+      const stmtType: string = stmt.type;
 
-      switch ((stmt as any).type) {
-        case 'select':
-          return this.buildSelectPlan(stmt, executionResult, sql);
-        case 'insert':
-          return this.buildInsertPlan(stmt);
-        case 'update':
-          return this.buildUpdatePlan(stmt);
-        case 'delete':
-          return this.buildDeletePlan(stmt);
-        case 'create table':
-        case 'create index':
-        case 'alter table':
-        case 'drop':
-          return this.buildDDLPlan(stmt);
-        default:
-          return this.buildUnknownPlan(sql);
+      // Route by statement type. Everything that is not a DML statement is
+      // treated as DDL (create/alter/drop/truncate/view/…), so that each DDL
+      // type is covered rather than falling through to the unknown plan. The
+      // previous switch only recognised a handful of `create`/`alter`/`drop`
+      // types, so `TRUNCATE` and `CREATE VIEW` were misreported as Custom Scan.
+      if (stmtType === 'select') {
+        return this.buildSelectPlan(stmt, executionResult, sql);
       }
+      if (stmtType === 'insert') {
+        return this.buildInsertPlan(stmt);
+      }
+      if (stmtType === 'update') {
+        return this.buildUpdatePlan(stmt);
+      }
+      if (stmtType === 'delete') {
+        return this.buildDeletePlan(stmt);
+      }
+      return this.buildDDLPlan(stmt);
     } catch {
       return this.buildUnknownPlan(sql);
     }
@@ -440,38 +429,19 @@ export class ExplainHandler {
 
     if (stmt.from) {
       for (const fromItem of stmt.from) {
-        // pgsql-ast-parser: simple table
-        if (fromItem.type === 'table' && fromItem.name) {
-          tableNames.push(fromItem.name.name || 'unknown');
+        // pgsql-ast-parser: simple table (both sides of a JOIN are separate
+        // `{ type: 'table', name }` items; the joined-from item carries a
+        // `.join` struct with `type` and `on`).
+        if (fromItem.type === 'table') {
+          // pgsql-ast-parser: a table-from item always carries name: { name }.
+          tableNames.push(fromItem.name.name);
         }
 
-        // pgsql-ast-parser: table with JOIN (second item has .join)
         if (fromItem.join) {
-          // The join.table gives the joined table name
-          const joinTable = fromItem.join.table;
-          if (joinTable?.name) {
-            tableNames.push(joinTable.name);
-          }
           hasJoin = true;
           joinCondition = fromItem.join.on
             ? this.exprToString(fromItem.join.on)
             : undefined;
-        }
-
-        // Legacy: joined tables in a `joins` array
-        if (fromItem.joins) {
-          for (const join of fromItem.joins) {
-            if (join.table?.name) tableNames.push(join.table.name);
-            hasJoin = true;
-            joinCondition = join.on ? this.exprToString(join.on) : joinCondition;
-          }
-        }
-
-        // Legacy: fromItem itself is a join type
-        if (fromItem.type === 'join') {
-          if (fromItem.table?.name) tableNames.push(fromItem.table.name);
-          hasJoin = true;
-          joinCondition = fromItem.on ? this.exprToString(fromItem.on) : undefined;
         }
       }
     }
@@ -498,7 +468,27 @@ export class ExplainHandler {
       children[0].filter = this.exprToString(stmt.where);
     }
 
-    // Step 3: Aggregate node (GROUP BY or aggregate functions)
+    // Step 3: Join node — must wrap the scan nodes BEFORE aggregate/sort/limit,
+    // so the plan tree reads scan → join → aggregate → sort → limit. The
+    // previous code placed this wrap after aggregate/sort/limit, which
+    // inverted the tree for `GROUP BY` + `JOIN` queries (a Hash Join ended up
+    // on top of the Aggregate node instead of beneath it).
+    if (hasJoin && children.length <= 2 && !children.some(c => c.nodeType === 'Hash Join' || c.nodeType === 'Nested Loop')) {
+      const joinNode: PlanNode = {
+        nodeType: 'Hash Join',
+        joinType: 'INNER',
+        hashCond: joinCondition,
+        startupCost: this.sumChildCost(children).startup + 2,
+        totalCost: this.sumChildCost(children).total + 10,
+        planRows: Math.ceil(children.reduce((sum, c) => sum + c.planRows, 0) * 0.8),
+        planWidth: 48,
+        plans: [...children],
+      };
+      children.length = 0;
+      children.push(joinNode);
+    }
+
+    // Step 4: Aggregate node (GROUP BY or aggregate functions)
     const hasAggregate = this.detectAggregate(stmt);
     if (hasAggregate) {
       const aggNode: PlanNode = {
@@ -513,35 +503,42 @@ export class ExplainHandler {
         ),
         planWidth: 32,
         strategy: hasAggregate === 'hash' ? 'HashAggregate' : 'GroupAggregate',
-        plans: children.length > 0 ? [...children] : undefined,
+        plans: [...children],
       };
       children.length = 0;
       children.push(aggNode);
     }
 
-    // Step 4: Sort node (ORDER BY)
+    // Step 5: Sort node (ORDER BY)
     if (stmt.orderBy && stmt.orderBy.length > 0) {
       const sortKey = stmt.orderBy
         .map((ob: any) => {
-          const key = this.exprToString(ob.expr);
-          return ob.type === 'desc' ? `${key} DESC` : `${key} ASC`;
+          // pgsql-ast-parser models ORDER BY items as { by, order? } where
+          // `order` is 'ASC' | 'DESC'. The previous code read `ob.expr` and
+          // `ob.type`, which do not exist, so every key rendered as " ASC".
+          const key = this.exprToString(ob.by);
+          const dir = (ob.order ?? '').toUpperCase();
+          return dir === 'DESC' ? `${key} DESC` : `${key} ASC`;
         })
         .join(', ');
 
       const sortNode: PlanNode = {
         nodeType: 'Sort',
         startupCost: this.sumChildCost(children).total + 1,
-        totalCost: this.sumChildCost(children).total + Math.log(children[0]?.planRows || 100) * 5,
-        planRows: children[0]?.planRows || 100,
+        // children is guaranteed non-empty (a scan/join/aggregate precedes
+        // Sort) and getTableStats always returns rows >= 1, so planRows is
+        // never 0 here.
+        totalCost: this.sumChildCost(children).total + Math.log(children[0].planRows) * 5,
+        planRows: children[0].planRows,
         planWidth: 32,
         sortKey,
-        plans: children.length > 0 ? [...children] : undefined,
+        plans: [...children],
       };
       children.length = 0;
       children.push(sortNode);
     }
 
-    // Step 5: Limit node
+    // Step 6: Limit node
     const limitValue = this.extractLimitValue(stmt);
     if (limitValue !== undefined) {
       const limitNode: PlanNode = {
@@ -550,38 +547,24 @@ export class ExplainHandler {
         totalCost: this.sumChildCost(children).total + 0.01,
         planRows: limitValue,
         planWidth: 32,
-        plans: children.length > 0 ? [...children] : undefined,
+        plans: [...children],
       };
       children.length = 0;
       children.push(limitNode);
     }
 
-    // If no aggregate/sort/limit was added and there's a join, wrap scans in a join node
-    if (hasJoin && children.length <= 2 && !children.some(c => c.nodeType === 'Hash Join' || c.nodeType === 'Nested Loop')) {
-      const joinNode: PlanNode = {
-        nodeType: 'Hash Join',
-        joinType: 'INNER',
-        hashCond: joinCondition,
-        startupCost: this.sumChildCost(children).startup + 2,
-        totalCost: this.sumChildCost(children).total + 10,
-        planRows: Math.ceil(children.reduce((sum, c) => sum + c.planRows, 0) * 0.8),
-        planWidth: 48,
-        plans: children.length > 0 ? [...children] : undefined,
-      };
-      children.length = 0;
-      children.push(joinNode);
-    }
-
     // If ANALYZE and result provided, fill in actuals
     if (this.options.analyze && executionResult) {
-      // P0-4: Convert QueryExecutionStats to array for applyActuals
+      // Convert QueryExecutionStats to array for applyActuals. `children`
+      // is guaranteed non-empty here because a scan node is always pushed
+      // above (via makeScanNode on tableNames[0] || 'unknown').
       const actualsInput = !Array.isArray(executionResult)
         ? [(executionResult as QueryExecutionStats)]
         : executionResult;
-      this.applyActuals(children.length > 0 ? children[0] : undefined as any, actualsInput);
+      this.applyActuals(children[0], actualsInput);
     }
 
-    return children[0] || this.makeScanNode('unknown');
+    return children[0];
   }
 
   /**
@@ -604,8 +587,10 @@ export class ExplainHandler {
     try {
       const safeTable = table.replace(/[^a-zA-Z0-9_]/g, '');
       if (!safeTable) return { rows: 1000 };
-      const row = this.db.prepare(`SELECT COUNT(*) AS cnt FROM "${safeTable}"`).get() as { cnt: number } | undefined;
-      const count = row?.cnt ?? 1000;
+      const row = this.db.prepare(`SELECT COUNT(*) AS cnt FROM "${safeTable}"`).get() as { cnt: number };
+      // SELECT COUNT(*) always returns exactly one row, so `row` and its
+      // `cnt` column are always present.
+      const count = row.cnt;
       return { rows: Math.max(1, count) };
     } catch {
       return { rows: 1000 };
@@ -625,8 +610,9 @@ export class ExplainHandler {
       const col = expr.left?.type === 'ref' ? expr.left.name : null;
       if (!col) return 1.0;
 
-      const op = expr.op || expr.operator || '';
-      const value = expr.right?.value ?? expr.right?.name ?? undefined;
+      const op = expr.op;
+      // A comparison's right side always carries a scalar value.
+      const value = expr.right.value;
 
       return this.statCollector.estimateSelectivity(table, col, op, value);
     } catch {
@@ -733,7 +719,8 @@ export class ExplainHandler {
   // ──────────────────────────────────────────────
 
   private buildInsertPlan(stmt: any): PlanNode {
-    const tableName = stmt.into?.name || 'unknown';
+    // pgsql-ast-parser always emits `into: { name: ... }` for INSERT.
+    const tableName = stmt.into.name;
     return {
       nodeType: 'Insert',
       relationName: tableName,
@@ -745,10 +732,11 @@ export class ExplainHandler {
   }
 
   private buildUpdatePlan(stmt: any): PlanNode {
-    const tableName = stmt.table?.name || 'unknown';
+    // pgsql-ast-parser always emits `table: { name: ... }` for UPDATE.
+    const tableName = stmt.table.name;
     const whereClause = stmt.where ? this.exprToString(stmt.where) : undefined;
 
-    const tableRows = this.getTableStats(tableName || 'unknown').rows;
+    const tableRows = this.getTableStats(tableName).rows;
     const scan: PlanNode = {
       nodeType: 'Seq Scan',
       relationName: tableName,
@@ -771,10 +759,11 @@ export class ExplainHandler {
   }
 
   private buildDeletePlan(stmt: any): PlanNode {
-    const tableName = stmt.from?.name || 'unknown';
+    // pgsql-ast-parser always emits `from: { name: ... }` for DELETE.
+    const tableName = stmt.from.name;
     const whereClause = stmt.where ? this.exprToString(stmt.where) : undefined;
 
-    const tableRows = this.getTableStats(tableName || 'unknown').rows;
+    const tableRows = this.getTableStats(tableName).rows;
     const scan: PlanNode = {
       nodeType: 'Seq Scan',
       relationName: tableName,
@@ -799,7 +788,7 @@ export class ExplainHandler {
   private buildDDLPlan(stmt: any): PlanNode {
     const tableName =
       stmt.name?.name || stmt.table?.name || stmt.names?.[0]?.name || 'unknown';
-    const ddlType = (stmt.type || 'unknown').replace(/\b\w/g, (c: string) => c.toUpperCase());
+    const ddlType = stmt.type.replace(/\b\w/g, (c: string) => c.toUpperCase());
 
     return {
       nodeType: ddlType,
@@ -899,33 +888,36 @@ export class ExplainHandler {
   private exprToString(expr: any): string {
     if (!expr || typeof expr !== 'object') return String(expr ?? '');
 
-    if (expr.type === 'ref') return expr.name || '?';
+    if (expr.type === 'ref') return expr.name;
     if (expr.type === 'integer') return String(expr.value);
     if (expr.type === 'string') return `'${expr.value}'`;
-    if (expr.type === 'float') return String(expr.value);
+    // pgsql-ast-parser models real literals as `type: 'numeric'` (not
+    // 'float'); without this branch `1.5` fell through to toSql.expr and was
+    // rendered with spurious parentheses as "(1.5)".
+    if (expr.type === 'float' || expr.type === 'numeric') return String(expr.value);
     if (expr.type === 'boolean') return String(expr.value);
     if (expr.type === 'null') return 'NULL';
-    if (expr.type === 'star') return '*';
+    // Note: pgsql-ast-parser does not emit a `star` node type — `SELECT *`
+    // is represented as a `ref` whose name is '*', handled above. Likewise
+    // it never emits `type: 'in'`; IN/NOT IN are `binary` nodes with op
+    // 'IN'/'NOT IN' and a `list` on the right. Both former branches were
+    // dead and have been removed.
     if (expr.type === 'binary') {
-      const op = expr.op || expr.operator || '?';
+      const op = expr.op;
       const left = this.exprToString(expr.left);
       const right = this.exprToString(expr.right);
       return `${left} ${op} ${right}`;
     }
     if (expr.type === 'unary') {
-      return `${expr.operator} ${this.exprToString(expr.operand)}`;
+      // pgsql-ast-parser models unary expressions as { type: 'unary', op,
+      // operand }; the previous code read `expr.operator` (undefined), so
+      // `-x` rendered as "undefined x".
+      const op = expr.op;
+      return `${op}${op ? ' ' : ''}${this.exprToString(expr.operand)}`;
     }
     if (expr.type === 'call') {
       const args = (expr.args || []).map((a: any) => this.exprToString(a)).join(', ');
-      return `${expr.function?.name || ''}(${args})`;
-    }
-    if (expr.type === 'in') {
-      const left = this.exprToString(expr.left);
-      const values = (expr.values || [])
-        .map((v: any) => this.exprToString(v))
-        .join(', ');
-      const not = expr.not ? 'NOT ' : '';
-      return `${left} ${not}IN (${values})`;
+      return `${expr.function.name}(${args})`;
     }
 
     try {
@@ -947,19 +939,18 @@ export class ExplainHandler {
   }
 
   private detectAggregate(stmt: any): string | false {
-    if (!stmt) return false;
-    const cols = stmt.columns || stmt.select || [];
+    const cols = stmt.columns;
     for (const col of cols) {
       const expr = col.expr;
       if (expr?.type === 'call') {
-        const fn = String(expr.function?.name || '').toUpperCase();
+        const fn = String(expr.function.name).toUpperCase();
         if (['COUNT', 'SUM', 'AVG', 'MIN', 'MAX'].includes(fn)) {
-          return 'hash'; // hash aggregate
+          return 'hash'; // hash aggregate for aggregate functions
         }
       }
     }
     if (stmt.groupBy && stmt.groupBy.length > 0) {
-      return 'hash';
+      return 'group'; // plain GROUP BY (de-duplication) uses GroupAggregate
     }
     return false;
   }
@@ -967,16 +958,25 @@ export class ExplainHandler {
   private detectEqualityOnPK(where: any, rawSql?: string): boolean {
     // 1) Try AST-level detection (pgsql-ast-parser uses `.op`, not `.operator`)
     if (where && typeof where === 'object') {
-      if (where.type === 'binary' && (where.op === '=' || where.operator === '=')) {
-        const left = where.left;
-        if (left?.type === 'ref') {
-          const name = left.name || '';
-          if (name === 'id' || name.endsWith('_id')) return true;
+      if (where.type === 'binary') {
+        if (where.op === '=' || where.operator === '=') {
+          const left = where.left;
+          if (left?.type === 'ref') {
+            const name = left.name;
+            if (name === 'id' || name.endsWith('_id')) return true;
+          }
         }
+        // AST is authoritative: a binary operator other than '=' (OR, AND,
+        // >, <, ...) is not a PK equality. The previous fallthrough let the
+        // string-level fallback re-detect `WHERE id = 1 OR id = 2` as an
+        // equality (its /WHERE\s+id\s*=/ regex matched the leading `id =`),
+        // producing a bogus single-row Index Scan.
+        return false;
       }
     }
 
-    // 2) Fallback: string-level detection
+    // 2) Fallback: string-level detection (only when the AST shape is not a
+    // binary expression, e.g. where is absent).
     if (rawSql) {
       const upper = rawSql.toUpperCase();
       return /WHERE\s+(?:id\s*=|.*?_id\s*=)/i.test(upper);
@@ -987,13 +987,8 @@ export class ExplainHandler {
 
   private extractLimitValue(stmt: any): number | undefined {
     if (!stmt.limit) return undefined;
-    // pgsql-ast-parser v12: stmt.limit.limit.value
-    if (stmt.limit?.limit?.value !== undefined) return stmt.limit.limit.value;
-    // pgsql-ast-parser v11: stmt.limit.value
-    if (stmt.limit.value !== undefined) return stmt.limit.value;
-    // Other
-    if (typeof stmt.limit === 'number') return stmt.limit;
-    return undefined;
+    // pgsql-ast-parser (^12.x) models LIMIT/n as { limit: { limit: { value } } }.
+    return stmt.limit.limit?.value;
   }
 
   private applyActuals(node: PlanNode | undefined, executionResult: any[]): void {
@@ -1259,13 +1254,45 @@ export class ExplainHandler {
 
       case 'text':
       default: {
-        return this.formatPlanTree(
-          this.buildPlanTree(
-            '', // dummy — we already have the plan
-          ),
-        );
+        // Convert the ExplainNode back to a PlanNode shape and format it. The
+        // previous code ignored `explainNode` entirely and called
+        // buildPlanTree('') — which parses an empty string — so text output
+        // was always a bogus "Custom Scan" regardless of the real plan.
+        return this.formatPlanTree(this.explainNodeToPlanNode(explainNode));
       }
     }
+  }
+
+  /**
+   * Convert a public ExplainNode back to the internal PlanNode shape, so the
+   * text formatter (which operates on PlanNode) can render it. This is the
+   * inverse of planNodeToExplainNode.
+   */
+  private explainNodeToPlanNode(node: ExplainNode): PlanNode {
+    const plan: PlanNode = {
+      nodeType: node.NodeType,
+      startupCost: node.StartupCost,
+      totalCost: node.TotalCost,
+      planRows: node.PlanRows,
+      planWidth: node.PlanWidth,
+      relationName: node.RelationName,
+      filter: node.Filter,
+      indexName: node.IndexName,
+      indexCond: node.IndexCond,
+      sortKey: node.SortKey,
+      strategy: node.Strategy,
+      hashCond: node.HashCond,
+      joinType: node.JoinType,
+      alias: node.Alias,
+      actualStartupTime: node.ActualStartupTime,
+      actualTotalTime: node.ActualTotalTime,
+      actualRows: node.ActualRows,
+      actualLoops: node.ActualLoops,
+    };
+    if (node.Plans && node.Plans.length > 0) {
+      plan.plans = node.Plans.map(child => this.explainNodeToPlanNode(child));
+    }
+    return plan;
   }
 
   /**
@@ -1280,13 +1307,9 @@ export class ExplainHandler {
 
     this.options = { ...this.options, ...options };
 
-    // Build the plan tree
-    const planResult = !Array.isArray(executionResult) && executionResult
-      ? (executionResult as QueryExecutionStats).resultRows ?? []
-      : executionResult as any[] | undefined;
-
-    // Build internal PlanNode for summary computation
-    const planNode = this.buildPlanTree(innerSql, planResult);
+    // Build the plan tree, passing the raw executionResult so ANALYZE mode
+    // can read real execTimeMs/actualRows (see buildPlan above).
+    const planNode = this.buildPlanTree(innerSql, executionResult);
 
     // Convert to ExplainNode for output
     const explainNode = ExplainHandler.planNodeToExplainNode(planNode);
