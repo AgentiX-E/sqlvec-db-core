@@ -44,8 +44,16 @@ const META_TABLE_PREFIX = '__rum_meta_';
 /** Prefix for the content sync trigger */
 const TRIGGER_PREFIX = '__rum_sync_';
 
-/** Regex to detect CREATE INDEX ... USING rum in SQL */
-const RUM_DDL_RE = /\bCREATE\s+(UNIQUE\s+)?INDEX\s+(IF\s+NOT\s+EXISTS\s+)?(\S+)\s+ON\s+(\S+)\s+USING\s+rum\s*\(/i;
+/** Regex to detect CREATE INDEX ... USING rum in SQL.
+ *
+ * Index and table names may be bare words or quoted identifiers (double- or
+ * backtick-quoted, in which case they may contain spaces). Group layout:
+ *   1: UNIQUE            (optional)
+ *   2: IF NOT EXISTS     (optional)
+ *   3: double-quoted index name | 4: backtick-quoted index name | 5: bare index name
+ *   6: double-quoted table name | 7: backtick-quoted table name | 8: bare table name
+ */
+const RUM_DDL_RE = /\bCREATE\s+(UNIQUE\s+)?INDEX\s+(IF\s+NOT\s+EXISTS\s+)?(?:"([^"]+)"|`([^`]+)`|(\S+))\s+ON\s+(?:"([^"]+)"|`([^`]+)`|(\S+))\s+USING\s+rum\s*\(/i;
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -266,9 +274,13 @@ export function queryRumShim(
     throw new Error(`RUM shim '${indexName}' not found (FTS5 table missing)`);
   }
 
-  // Get the original table name from the stored config
+  // Get the original table name from the stored config. The config's
+  // indexName is derived from the FTS5 table name (which was built from the
+  // sanitised index name), so we must look it up by the sanitised name — not
+  // the raw caller-provided name (which may contain characters such as '-'
+  // that get replaced by sanitise()).
   const configs = listRumShims(db);
-  const config = configs.find(c => c.indexName === indexName);
+  const config = configs.find(c => c.indexName === idxName);
   if (!config) {
     throw new Error(`RUM shim config for '${indexName}' not found in metadata`);
   }
@@ -399,21 +411,25 @@ export function listRumShims(
       ).all(`${TRIGGER_PREFIX}${indexName}_fts_insert`);
 
       if (triggers.length > 0) {
-        const triggerSql: string = (triggers as any[])[0].sql || '';
+        const triggerSql: string = (triggers as any[])[0].sql;
         const match = triggerSql.match(/AFTER INSERT ON\s+"?(\w+)"?/i);
         if (match) tableName = match[1];
       }
 
-      // Check for metadata table
+      // Check for the metadata table and recover the original ordering column
+      // name from the insert trigger (it references NEW."<column>").
       const metaExists = db.prepare(
         `SELECT name FROM sqlite_master WHERE type='table' AND name=?`,
       ).get(metaTableName(indexName));
 
       let orderByColumn: string | undefined;
       if (metaExists) {
-        const metaInfo = db.pragma(`table_info('${metaTableName(indexName)}')`);
-        const orderCol = (metaInfo as any[]).find((c: any) => c.name === 'order_value');
-        if (orderCol) orderByColumn = 'order_value'; // we store it generically
+        const insTriggers = db.prepare(
+          `SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?`,
+        ).all(`${TRIGGER_PREFIX}${indexName}_insert`);
+        const insSql: string = (insTriggers as any[])[0]?.sql;
+        const colMatch = insSql.match(/CAST\(NEW\."(\w+)"\s+AS\s+REAL\)/i);
+        if (colMatch) orderByColumn = colMatch[1];
       }
 
       configs.push({
@@ -460,8 +476,9 @@ export function rewriteRumCreateIndex(sql: string): string | null {
 
   if (!match) return null;
 
-  const indexName = (match[3] || '').replace(/["']/g, '');
-  const tableName = (match[4] || '').replace(/["']/g, '');
+  // The regex guarantees at least one of the three name groups matches.
+  const indexName = (match[3] || match[4] || match[5]).replace(/["'`]/g, '');
+  const tableName = (match[6] || match[7] || match[8]).replace(/["'`]/g, '');
 
   // Extract the column list from the DDL
   const parenStart = sql.indexOf('(');
@@ -470,14 +487,16 @@ export function rewriteRumCreateIndex(sql: string): string | null {
 
   const colList = sql.substring(parenStart + 1, parenEnd);
 
-  // Parse columns: handle both simple column names and column WITH OPTIONS
+  // Parse columns: handle both simple column names and column WITH OPTIONS.
+  // A column may be bare or quoted (double/backtick), in which case it may
+  // contain spaces.
   const columns: string[] = [];
   for (const part of colList.split(',')) {
     const trimmed = part.trim();
     // Extract just the column name (before any operator class or options)
-    const colMatch = trimmed.match(/^"?(\w+)"?/);
+    const colMatch = trimmed.match(/^(?:"([^"]+)"|`([^`]+)`|"?(\w+)"?)/);
     if (colMatch) {
-      columns.push(colMatch[1]);
+      columns.push(colMatch[1] || colMatch[2] || colMatch[3]);
     }
   }
 
