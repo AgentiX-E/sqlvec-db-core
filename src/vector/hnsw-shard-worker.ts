@@ -152,8 +152,15 @@ export function buildShard(data: ShardWorkerData): ShardWorkerResult {
 
 /**
  * Worker entry-point: only executes when loaded as a real worker thread.
+ *
+ * `isMainThread` alone is insufficient to detect the worker context: test
+ * runners such as Vitest's `--pool=threads` execute test files inside worker
+ * threads (so `isMainThread` is `false`) yet do not pass a `workerData`
+ * payload. Guarding on `workerData` as well ensures the entry-point only runs
+ * when the file is launched via `new Worker(path, { workerData })`, where a
+ * payload is always present.
  */
-if (!isMainThread) {
+if (!isMainThread && workerData) {
   const data = workerData as ShardWorkerData;
   const result = buildShard(data);
   parentPort!.postMessage(result);
