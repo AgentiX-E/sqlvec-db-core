@@ -1272,4 +1272,92 @@ describe('PlPgSqlEngine', () => {
       expect(r.returnValue).toBe(0);
     });
   });
+
+  describe('deep expression branch coverage', () => {
+    it('substr with no count argument takes the undefined-count ternary branch', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x TEXT; BEGIN x := substr('hello', 3); RETURN x; END; $$`);
+      expect(r.returnValue).toBe('llo');
+    });
+
+    it('substring with no count argument takes the undefined-count ternary branch', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x TEXT; BEGIN x := substring('hello', 3); RETURN x; END; $$`);
+      expect(r.returnValue).toBe('llo');
+    });
+
+    it('splitArgs skips a trailing empty segment after a comma', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x TEXT; BEGIN x := concat('a',); RETURN x; END; $$`);
+      expect(r.returnValue).toBe('a');
+    });
+
+    it('a parenthesised non-function expression evaluates via the non-function branch', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x INT; BEGIN x := (1 + 2); RETURN x; END; $$`);
+      expect(r.returnValue).toBe(3);
+    });
+
+    it('a zero-argument function inside a compound expression takes the empty-args branch', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x DOUBLE PRECISION; BEGIN x := random() + 0; RETURN x; END; $$`);
+      expect(typeof r.returnValue).toBe('number');
+    });
+
+    it('an undeclared argument inside a compound expression resolves as a raw token', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x TEXT; BEGIN x := upper(nondeclared_var) || ''; RETURN x; END; $$`);
+      expect(r.returnValue).toBe('NONDECLARED_VAR');
+    });
+
+    it('a function returning null inside a compound expression takes the null branch', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x TEXT; BEGIN x := nullif(1, 1) || ''; RETURN x; END; $$`);
+      expect(r.returnValue).toBe('null');
+    });
+
+    it('a null condition produces a false result without string coercion', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x INT := 0; BEGIN IF NULL THEN x := 1; END IF; RETURN x; END; $$`);
+      expect(r.returnValue).toBe(0);
+    });
+
+    it('FOREACH with no array expression evaluates the empty-string fallback', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN FOREACH x IN ARRAY LOOP NULL; END LOOP; END; $$`);
+      expect(r.success).toBe(true);
+    });
+
+    it('tokenizes a qualified name whose dot is the final character of the input', async () => {
+      // A trailing dot (no following identifier) exercises the `sql[j + 1] || ''`
+      // guard in the tokenizer's qualified-name loop, where sql[j + 1] is undefined.
+      const parsed = parsePlPgSql('x := a.');
+      expect(parsed.raw).toBe('x := a.');
+    });
+
+    it('parses a RAISE whose string literal is an unterminated single quote', async () => {
+      // A trailing lone quote inside a BEGIN block yields a STRING token of
+      // length < 2, exercising the `raw` fallback branch of the raw.slice(1, -1)
+      // ternary in parseRaise. The block then fails on the missing END, which is
+      // the expected outcome for this malformed input.
+      expect(() => parsePlPgSql("BEGIN RAISE NOTICE '")).toThrow(/END/);
+    });
+
+    it('coerces a message-less Error via the String(err) fallback in the exception handler', async () => {
+      const e = createPlPgSqlEngine();
+      // RAISE EXCEPTION '' throws new Error(''), whose .message is the empty
+      // string; the handler's err.message || String(err) then takes the String side.
+      const r = await e.execute(`DO $$ BEGIN RAISE EXCEPTION ''; EXCEPTION WHEN OTHERS THEN RETURN 'caught'; END; $$`);
+      expect(r.returnValue).toBe('caught');
+    });
+
+    it('SELECT INTO skips positional assignment when the target index exceeds the row width', async () => {
+      const e = createPlPgSqlEngine();
+      // One-column row {x: 1} but three targets: idx 0 falls back positionally,
+      // while idx 1 and 2 exceed values.length and hit the implicit else branch.
+      e.setQueryCallback(async () => [{ x: 1 }]);
+      const r = await e.execute(`DO $$ DECLARE a INT; b INT; c INT; BEGIN SELECT 1 INTO a, b, c; RETURN a + b; END; $$`);
+      expect(r.returnValue).toBe(1);
+    });
+  });
 });

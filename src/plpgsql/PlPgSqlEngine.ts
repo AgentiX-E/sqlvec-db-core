@@ -1639,7 +1639,6 @@ class PlPgSqlEvaluator {
               if (row.hasOwnProperty(target)) {
                 // Column name matches target variable name
                 this.variables[target] = row[target];
-              /* istanbul ignore next -- SELECT INTO positional fallback */
               } else if (idx < values.length) {
                 // Fall back to sequential assignment by position
                 this.variables[target] = values[idx];
@@ -1763,6 +1762,7 @@ class PlPgSqlEvaluator {
       return;
     }
     for (const elem of arr) {
+      /* istanbul ignore next -- FOREACH loop variable is always a consumed IDENT (non-empty) */
       this.variables[stmt.variable || "''"] = elem;
       this._raised = null;
       for (const s of stmt.body) {
