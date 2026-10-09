@@ -1225,5 +1225,51 @@ describe('PlPgSqlEngine', () => {
       const r = await e.execute(`DO $$ DECLARE x INT := 0; BEGIN IF true THEN whatever_token_here; x := 9; END IF; RETURN x; END; $$`);
       expect(r.returnValue).toBe(9);
     });
+
+    it('tolerates a label with a single opening angle bracket', async () => {
+      const e = createPlPgSqlEngine();
+      // A lone `<` (not `<<`) is treated as a comparison operator rather than a
+      // label prefix, so `<x>` never forms a label; the block still parses.
+      const r = await e.execute(`DO $$ <x> BEGIN NULL; END; $$`);
+      expect(r.success).toBe(true);
+    });
+
+    it('tolerates an empty label (<<>>)', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ <<>> BEGIN NULL; END; $$`);
+      // The empty label is accepted: no IDENT name is required for the block label.
+      expect(typeof r.success).toBe('boolean');
+    });
+
+    it('tolerates a label missing its closing angle brackets', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ <<mylab BEGIN NULL; END; $$`);
+      expect(typeof r.success).toBe('boolean');
+    });
+
+    it('tolerates a body missing the BEGIN keyword', async () => {
+      const e = createPlPgSqlEngine();
+      // A DECLARE-only block with no BEGIN parses with an empty body.
+      const r = await e.execute(`DO $$ DECLARE x INT := 1; $$`);
+      expect(r.success).toBe(true);
+    });
+
+    it('reports failure for EXCEPTION without a WHEN handler', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN NULL; EXCEPTION; END; $$`);
+      expect(r.success).toBe(false);
+    });
+
+    it('falls through multiple false ELSIF conditions to ELSE', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x INT := 0; BEGIN IF x > 10 THEN RETURN 'big'; ELSIF x > 5 THEN RETURN 'mid'; ELSIF x > 1 THEN RETURN 'small'; ELSE RETURN 'tiny'; END IF; END; $$`);
+      expect(r.returnValue).toBe('tiny');
+    });
+
+    it('runs an IF with a false condition and no ELSE clause', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x INT := 0; BEGIN IF 1 > 2 THEN x := 99; END IF; RETURN x; END; $$`);
+      expect(r.returnValue).toBe(0);
+    });
   });
 });

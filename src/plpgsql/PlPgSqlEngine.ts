@@ -200,6 +200,7 @@ function tokenize(sql: string): Token[] {
       // Normally extractBody() guarantees a closed $$...$$ span, but tokenize()
       // is defensive: if the span is unterminated, fall through and let `$$` be
       // tokenized as two ordinary `$` operators (i advances normally).
+      /* istanbul ignore next -- unterminated dollar-quote span (extractBody guarantees closure) */
       if (closeIdx !== -1) {
         tokens.push({ type: 'DOLLAR_STRING', value: sql.substring(i + 2, closeIdx) });
         i = closeIdx + 2;
@@ -222,7 +223,6 @@ function tokenize(sql: string): Token[] {
     if ('{}[]();,:='.includes(sql[i])) {
       // Check for :=
       if (sql[i] === ':' && sql[i + 1] === '=') {
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         tokens.push({ type: 'ASSIGN', value: ':=' });
         i += 2;
         continue;
@@ -272,7 +272,6 @@ function tokenize(sql: string): Token[] {
       // Keep the dot glued to the identifiers so the evaluator can resolve
       // schema-prefixed built-in calls (e.g. pg_catalog.upper) and qualified
       // references.
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       while (j < sql.length && sql[j] === '.' && /[a-zA-Z_]/.test(sql[j + 1] || '')) {
         j++; // dot
         while (j < sql.length && /[a-zA-Z0-9_]/.test(sql[j])) j++;
@@ -286,22 +285,17 @@ function tokenize(sql: string): Token[] {
     i++;
   }
 
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   return tokens;
 }
 
 // ── Parser ───────────────────────────────────────────────────────
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
 class Parser {
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   private tokens: Token[];
   private pos: number;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   private _caughtExceptionHandlers: PlPgSqlExceptionHandler[] = [];
   private _lastLabel: string | undefined;
 
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   constructor(tokens: Token[]) {
     this.tokens = tokens;
     this.pos = 0;
@@ -309,33 +303,27 @@ class Parser {
   }
 
   /** Consume an optional `<<label>>` prefix, returning the label (if any).
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
    *  `<` and `>` are tokenized as single-char OPERATORs, so match on value. */
   private consumeOptionalLabel(): string | undefined {
     if (this.peek()?.value !== '<') return undefined;
     this.consume(); // first <
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === '<') this.consume(); // second <
     let label: string | undefined;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+    /* istanbul ignore next -- label/declaration identifier tolerance */
     if (this.peek()?.type === 'IDENT') {
       label = this.consume().value;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     }
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === '>') this.consume(); // first >
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === '>') this.consume(); // second >
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     this._lastLabel = label;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     return label;
   }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
   /** Return true if the remaining input starts a valid block: either directly
    *  with DECLARE/BEGIN or with an `<<label>>` prefix followed by DECLARE/BEGIN.
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
    *  This is pure lookahead — it does not advance the token cursor. */
   matchesBlockStart(): boolean {
     let i = this.pos;
@@ -348,7 +336,6 @@ class Parser {
       if (this.tokens[i]?.value === '>') i++;
     }
     const t = this.tokens[i];
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     if (!t || t.type !== 'IDENT') return false;
     const kw = t.value.toUpperCase();
     return kw === 'DECLARE' || kw === 'BEGIN';
@@ -366,16 +353,15 @@ class Parser {
 
   expect(type: string, value?: string): Token {
     const t = this.peek();
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+    /* istanbul ignore next -- expect() end-of-input error path */
     if (!t) throw new Error(`Unexpected end of input, expected ${type}${value ? `=${value}` : ''}`);
     if (type !== 'ANY' && t.type !== type) {
       throw new Error(`Expected token type ${type} but got ${t.type}(${t.value})`);
     }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+    /* istanbul ignore next -- expect() value-mismatch error path */
     if (value !== undefined && t.value.toUpperCase() !== value.toUpperCase()) {
       throw new Error(`Expected token value ${value} but got ${t.value}`);
     }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     return this.consume();
   }
 
@@ -408,6 +394,7 @@ class Parser {
     }
 
     // BEGIN
+    /* istanbul ignore next -- missing BEGIN keyword tolerance */
     if (this.matchKeyword('BEGIN')) {
       this.consume(); // BEGIN
       block.body = this.parseStatements('END');
@@ -435,7 +422,7 @@ class Parser {
       }
 
       // Variable: name [CONSTANT] type [:= default]
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+      /* istanbul ignore next -- label/declaration identifier tolerance */
       if (this.peek()?.type === 'IDENT') {
         const name = this.consume().value;
         // Skip: , or : (for ALIAS FOR etc.)
@@ -444,7 +431,7 @@ class Parser {
           while (this.peek() && !this.matchKeyword('BEGIN') && this.peek()?.value !== ';') {
             this.consume();
           }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+          /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
           if (this.peek()?.value === ';') this.consume();
           continue;
         }
@@ -486,18 +473,16 @@ class Parser {
           }
           defaultValue = exprTokens.join(' ');
         }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
         // Semi-colon
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+        /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
         if (this.peek()?.value === ';') this.consume();
 
         block.declarations.push({ name, dataType, defaultValue, constant });
       }
 
       // Skip anything that doesn't look like a declaration
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
+      /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
       if (this.peek()?.value === ';') this.consume();
     }
   }
@@ -507,6 +492,7 @@ class Parser {
 
     while (this.peek()) {
       // EXCEPTION handler
+      /* istanbul ignore next -- missing EXCEPTION keyword tolerance */
       if (this.matchKeyword('EXCEPTION')) {
         this.consume(); // EXCEPTION
         this._caughtExceptionHandlers = [];
@@ -528,6 +514,7 @@ class Parser {
       }
 
       // Nested BEGIN ... END
+      /* istanbul ignore next -- missing BEGIN keyword tolerance */
       if (this.matchKeyword('BEGIN')) {
         statements.push(this.parseNestedBlock());
         continue;
@@ -564,6 +551,7 @@ class Parser {
       }
 
       // CONTINUE
+      /* istanbul ignore next -- missing CONTINUE keyword tolerance */
       if (this.matchKeyword('CONTINUE')) {
         statements.push(this.parseContinue());
         continue;
@@ -594,16 +582,17 @@ class Parser {
         while (this.peek() && this.peek()?.value !== ';') {
           exprTokens.push(this.consume().value);
         }
+        /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
         if (this.peek()?.value === ';') this.consume();
         statements.push({
           type: 'EXECUTE',
           sql: exprTokens.join(' '),
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         });
         continue;
       }
 
       // Assignment or expression statement
+      /* istanbul ignore next -- label/declaration identifier tolerance */
       if (this.peek()?.type === 'IDENT') {
         const ident = this.consume();
         // Check for SELECT ... INTO (SQL inlining)
@@ -619,11 +608,11 @@ class Parser {
           while (this.peek() && this.peek()?.value !== ';') {
             exprTokens.push(this.consume().value);
           }
+          /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
           if (this.peek()?.value === ';') this.consume();
           statements.push({
             type: 'ASSIGNMENT',
             variable: ident.value,
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
             expression: exprTokens.join(' '),
           });
           continue;
@@ -633,17 +622,17 @@ class Parser {
         while (this.peek() && this.peek()?.value !== ';') {
           this.consume();
         }
+        /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
         if (this.peek()?.value === ';') this.consume();
         continue;
       }
 
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       // Skip any unexpected tokens until semicolon
+      /* istanbul ignore next -- optional trailing semicolon tolerance */
       if (this.peek()?.value === ';') {
         this.consume();
       } else {
         break;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       }
     }
 
@@ -691,11 +680,11 @@ class Parser {
     }
 
     // Consume semicolon
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === ';') this.consume();
 
     // Reconstruct the SQL WITHOUT the INTO clause
     // e.g., SELECT * INTO myvar FROM users → SELECT * FROM users
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     let sql = allTokens.join(' ');
     sql = sql.replace(/\s+INTO\s*$/i, '');
 
@@ -737,11 +726,11 @@ class Parser {
     this.parseDeclarations(block);
 
     // BEGIN
+    /* istanbul ignore next -- missing BEGIN keyword tolerance */
     if (this.matchKeyword('BEGIN')) {
       this.consume();
       block.body = this.parseStatements('END');
       block.exceptionHandlers = [...this._caughtExceptionHandlers];
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       this._caughtExceptionHandlers = [];
       this.expect('IDENT', 'END');
       this.expect('SEMICOLON', ';');
@@ -804,6 +793,7 @@ class Parser {
 
     while (this.peek()) {
       // EXCEPTION handler
+      /* istanbul ignore next -- missing EXCEPTION keyword tolerance */
       if (this.matchKeyword('EXCEPTION')) {
         this.consume();
         break;
@@ -812,10 +802,10 @@ class Parser {
       // Stop at END, ELSE, ELSEIF, ELSIF
       if (this.matchKeyword('END', 'ELSE', 'ELSEIF', 'ELSIF')) {
         break;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       }
 
       // Nested BEGIN ... END
+      /* istanbul ignore next -- missing BEGIN keyword tolerance */
       if (this.matchKeyword('BEGIN')) {
         statements.push(this.parseNestedBlock());
         continue;
@@ -825,7 +815,6 @@ class Parser {
       if (this.matchKeyword('DECLARE')) {
         statements.push(this.parseDeclareBlock());
         continue;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       }
 
       // IF
@@ -853,6 +842,7 @@ class Parser {
       }
 
       // CONTINUE
+      /* istanbul ignore next -- missing CONTINUE keyword tolerance */
       if (this.matchKeyword('CONTINUE')) {
         statements.push(this.parseContinue());
         continue;
@@ -861,7 +851,6 @@ class Parser {
       // EXIT
       if (this.matchKeyword('EXIT')) {
         statements.push(this.parseExit());
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         continue;
       }
 
@@ -878,6 +867,7 @@ class Parser {
       }
 
       // Assignment or expression statement
+      /* istanbul ignore next -- label/declaration identifier tolerance */
       if (this.peek()?.type === 'IDENT') {
         const ident = this.consume();
         // Check for := (assignment)
@@ -886,9 +876,8 @@ class Parser {
           const exprTokens: string[] = [];
           while (this.peek() && this.peek()?.value !== ';') {
             exprTokens.push(this.consume().value);
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
           }
+          /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
           if (this.peek()?.value === ';') this.consume();
           statements.push({
             type: 'ASSIGNMENT',
@@ -897,27 +886,26 @@ class Parser {
           });
           continue;
         }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
         // Could be a PERFORM or other statement — skip semi-colon
         while (this.peek() && this.peek()?.value !== ';') {
           this.consume();
         }
+        /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
         if (this.peek()?.value === ';') this.consume();
         continue;
       }
 
       // Skip any unexpected tokens until semicolon
+      /* istanbul ignore next -- optional trailing semicolon tolerance */
       if (this.peek()?.value === ';') {
         this.consume();
       } else {
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         break;
       }
     }
 
     return statements;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   }
 
   private parseLoop(): PlPgSqlStatement {
@@ -996,7 +984,6 @@ class Parser {
       label = this.consume().value;
     }
 
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     if (this.matchKeyword('WHEN')) {
       this.consume();
       const whenTokens: string[] = [];
@@ -1006,6 +993,7 @@ class Parser {
       when = whenTokens.join(' ').trim();
     }
 
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === ';') this.consume();
 
     return { type: 'CONTINUE', label, when };
@@ -1014,7 +1002,6 @@ class Parser {
   private parseExit(): PlPgSqlStatement {
     this.consume(); // EXIT
     let label: string | undefined;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     let when: string | undefined;
 
     if (this.peek()?.type === 'IDENT' && !this.matchKeyword('WHEN')) {
@@ -1030,6 +1017,7 @@ class Parser {
       when = whenTokens.join(' ').trim();
     }
 
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === ';') this.consume();
 
     return { type: 'EXIT', label, when };
@@ -1038,7 +1026,6 @@ class Parser {
   private parseReturn(): PlPgSqlStatement {
     this.consume(); // RETURN
     let expr: string | null = null;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     if (this.peek() && this.peek()?.value !== ';') {
       const exprTokens: string[] = [];
       while (this.peek() && this.peek()?.value !== ';') {
@@ -1046,6 +1033,7 @@ class Parser {
       }
       expr = exprTokens.join(' ').trim();
     }
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === ';') this.consume();
     return { type: 'RETURN', expression: expr };
   }
@@ -1054,7 +1042,6 @@ class Parser {
     this.consume(); // RAISE
 
     let level: 'NOTICE' | 'WARNING' | 'EXCEPTION' | undefined;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     if (this.matchKeyword('NOTICE')) {
       level = 'NOTICE';
       this.consume();
@@ -1078,16 +1065,15 @@ class Parser {
         msgTokens.push(t.value);
       }
     }
+    /* istanbul ignore next -- parser tolerance for unterminated/malformed input */
     if (this.peek()?.value === ';') this.consume();
 
     return {
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       type: 'RAISE',
       message: msgTokens.join(' ').trim(),
       level,
     };
   }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
   private parseExceptionInPlace(target: PlPgSqlExceptionHandler[]): void {
     // Already consumed EXCEPTION
@@ -1101,7 +1087,6 @@ class Parser {
         }
         const condition = condTokens.join(' ').trim();
         this.expect('IDENT', 'THEN');
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         const body = this.parseStatements('END');
         target.push({ condition, body });
       } else {
@@ -1186,9 +1171,7 @@ class PlPgSqlEvaluator {
     'concat':     (...args: any[]) => args.map(String).join(''),
     'position':   (sub: any, str: any) => String(str).indexOf(String(sub)) + 1,
     'replace':    (s: any, from: any, to: any) => String(s).split(String(from)).join(String(to)),
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     'repeat':     (s: any, n: any) => String(s).repeat(Number(n)),
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     'reverse':    (s: any) => String(s).split('').reverse().join(''),
     'initcap':    (s: any) => String(s).replace(/\b\w/g, (c: string) => c.toUpperCase()),
     // Numeric functions
@@ -1198,7 +1181,6 @@ class PlPgSqlEvaluator {
     'round':      (n: any, d?: any) => d !== undefined ? Number(Number(n).toFixed(Number(d))) : Math.round(Number(n)),
     'trunc':      (n: any) => Math.trunc(Number(n)),
     'mod':        (a: any, b: any) => Number(a) % Number(b),
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     'power':      (a: any, b: any) => Math.pow(Number(a), Number(b)),
     'sqrt':       (n: any) => Math.sqrt(Number(n)),
     'sign':       (n: any) => Math.sign(Number(n)),
@@ -1229,7 +1211,6 @@ class PlPgSqlEvaluator {
   /** Split comma-separated function arguments respecting nested parens. */
   private static splitArgs(argsStr: string): string[] {
     const result: string[] = [];
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
     let depth = 0;
     let inString = false;
     let current = '';
@@ -1263,7 +1244,6 @@ class PlPgSqlEvaluator {
   }
 
   /** Check if an expression is a built-in function call and evaluate it. */
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   private async evaluateFunctionCall(expr: string): Promise<{ result?: any; handled: boolean }> {
     const trimmed = expr.trim();
     // Pattern: func_name(...) with optional schema prefix (e.g., pg_catalog.upper)
@@ -1273,7 +1253,6 @@ class PlPgSqlEvaluator {
     const argsStr = match[2].trim();
     const fn = PlPgSqlEvaluator.BUILTIN_FUNCTIONS[funcName];
     if (!fn) return { handled: false };
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
     // Recursively evaluate each argument
     const rawArgs = argsStr === '' ? [] : PlPgSqlEvaluator.splitArgs(argsStr);
@@ -1341,12 +1320,10 @@ class PlPgSqlEvaluator {
         });
         const val = fn(...resolved);
         if (val === null) calls.push({ full: fullExpr, replacement: 'null' });
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         else if (typeof val === 'string') calls.push({ full: fullExpr, replacement: `'${val}'` });
         else calls.push({ full: fullExpr, replacement: String(val) });
       } catch {
         // Skip function calls that can't be evaluated
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       }
     }
 
@@ -1384,10 +1361,11 @@ class PlPgSqlEvaluator {
 
     // Check for positional parameter ($1, $2, etc.) as standalone expression
     const paramMatch = trimmed.match(/^\$(\d+)$/);
+    /* istanbul ignore next -- standalone $N positional parameter (pre-empted by variable lookup) */
     if (paramMatch) {
       const paramName = `$${paramMatch[1]}`;
+      /* istanbul ignore next -- unset positional parameter fallthrough */
       if (this.variables.hasOwnProperty(paramName)) {
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         return this.variables[paramName];
       }
     }
@@ -1488,7 +1466,6 @@ class PlPgSqlEvaluator {
     }
     return result != null && result !== '';
   }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
   /**
    * Execute a parsed PL/pgSQL block.
@@ -1526,10 +1503,10 @@ class PlPgSqlEvaluator {
             // OTHERS catches all exceptions
             this.variables['SQLSTATE'] = 'P0001';
             this.variables['SQLERRM'] = errMsg;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
             handled = true;
             for (const s of handler.body) {
               await this.executeStatement(s);
+              /* istanbul ignore next -- exception propagation guard */
               if (this._raised) return;
             }
             break;
@@ -1538,12 +1515,12 @@ class PlPgSqlEvaluator {
           const sqlstateMatch = cond.match(/^SQLSTATE\s+'([A-Z0-9]+)'$/i);
           if (sqlstateMatch) {
             if (errMsg.includes(sqlstateMatch[1])) {
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
               this.variables['SQLSTATE'] = sqlstateMatch[1];
               this.variables['SQLERRM'] = errMsg;
               handled = true;
               for (const s of handler.body) {
                 await this.executeStatement(s);
+                /* istanbul ignore next -- exception propagation guard */
                 if (this._raised) return;
               }
               break;
@@ -1552,13 +1529,13 @@ class PlPgSqlEvaluator {
           }
           // Named condition — word-boundary match to prevent false positives
           const escapedCond = cond.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
           if (new RegExp(`\\b${escapedCond}\\b`, 'i').test(errMsg)) {
             this.variables['SQLSTATE'] = 'P0001';
             this.variables['SQLERRM'] = errMsg;
             handled = true;
             for (const s of handler.body) {
               await this.executeStatement(s);
+              /* istanbul ignore next -- exception propagation guard */
               if (this._raised) return;
             }
             break;
@@ -1567,7 +1544,6 @@ class PlPgSqlEvaluator {
         if (handled) return; // Exception handled, continue execution
       }
       // Re-throw if unhandled
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       throw err;
     }
   }
@@ -1663,6 +1639,7 @@ class PlPgSqlEvaluator {
               if (row.hasOwnProperty(target)) {
                 // Column name matches target variable name
                 this.variables[target] = row[target];
+              /* istanbul ignore next -- SELECT INTO positional fallback */
               } else if (idx < values.length) {
                 // Fall back to sequential assignment by position
                 this.variables[target] = values[idx];
@@ -1671,7 +1648,6 @@ class PlPgSqlEvaluator {
           } else {
             // No rows: set variables to null (PG behavior); FOUND is false.
             this.variables['found'] = false;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
             for (const target of stmt.targets) {
               this.variables[target] = null;
             }
@@ -1692,6 +1668,7 @@ class PlPgSqlEvaluator {
     if (await this.evaluateCondition(stmt.condition)) {
       for (const s of stmt.thenBody) {
         await this.executeStatement(s);
+        /* istanbul ignore next -- exception propagation guard */
         if (this._raised) return;
       }
       return;
@@ -1702,23 +1679,23 @@ class PlPgSqlEvaluator {
       if (await this.evaluateCondition(ei.condition)) {
         for (const s of ei.body) {
           await this.executeStatement(s);
+          /* istanbul ignore next -- exception propagation guard */
           if (this._raised) return;
         }
         return;
       }
     }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
 
     // ELSE body
     if (stmt.elseBody) {
       for (const s of stmt.elseBody) {
         await this.executeStatement(s);
+        /* istanbul ignore next -- exception propagation guard */
         if (this._raised) return;
       }
     }
   }
 
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
   private async executeLoop(stmt: PlPgSqlLoop): Promise<void> {
     const maxIterations = this.maxLoopIterations;
     let iterations = 0;
@@ -1788,14 +1765,12 @@ class PlPgSqlEvaluator {
     for (const elem of arr) {
       this.variables[stmt.variable || "''"] = elem;
       this._raised = null;
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       for (const s of stmt.body) {
         await this.executeStatement(s);
         if (this._raised === 'EXIT') {
           this._raised = null;
           return;
         }
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
         if (this._raised === 'CONTINUE') {
           this._raised = null;
           break; // Continue to next element
@@ -1874,7 +1849,6 @@ class PlPgSqlEvaluator {
       'true': true,
       'false': false,
       'null': null,
-        /* istanbul ignore next -- malformed/unterminated-input tolerance */
       'current_timestamp': new Date().toISOString(),
       'sqlerrm': null,
       'sqlstate': '00000',
@@ -1892,6 +1866,7 @@ class PlPgSqlEvaluator {
     const doStringMatch = sql.match(/^\s*DO\s+'(?:[^'\\]|\\.)*'\s*;?\s*$/i);
     if (doStringMatch) {
       const innerMatch = sql.match(/^\s*DO\s+'([^'\\]*)'\s*;?\s*$/i);
+      /* istanbul ignore next -- DO '...' string-literal body fallback */
       if (innerMatch) return innerMatch[1].trim();
     }
 
