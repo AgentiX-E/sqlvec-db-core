@@ -415,6 +415,16 @@ describe('parseWindowSQL', () => {
     const r = parseWindowSQL('SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND x FOLLOWING) FROM t');
     expect(r!.over.frame.end).toEqual({ type: 'FOLLOWING', offset: 0 });
   });
+
+  it('regex path: non-numeric PRECEDING bound (string → offset 0)', () => {
+    const r = parseWindowSQL('SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN y PRECEDING AND CURRENT ROW) FROM t');
+    expect(r!.over.frame.start).toEqual({ type: 'PRECEDING', offset: 0 });
+  });
+
+  it('regex path: unrecognizable single-token bound falls back to CURRENT ROW', () => {
+    const r = parseWindowSQL('SELECT sum(x) OVER (ORDER BY id ROWS BETWEEN FOO AND 2 FOLLOWING) FROM t');
+    expect(r!.over.frame.start).toEqual({ type: 'CURRENT_ROW' });
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -648,6 +658,26 @@ describe('executeWindowFunction — aggregates (ROWS frame)', () => {
     const out = executeWindowFunction(rows, 'avg', ['v'], makeSpec({ frame }));
     // For the first row, start = index 1, end = index 0 → empty frame.
     expect(out[0].avg).toBeNull();
+  });
+
+  it('MIN with an empty frame gives null (Infinity sentinel)', () => {
+    const frame: WindowFrame = {
+      type: 'ROWS',
+      start: { type: 'FOLLOWING', offset: 1 },
+      end: { type: 'PRECEDING', offset: 1 },
+    };
+    const out = executeWindowFunction(rows, 'min', ['v'], makeSpec({ frame }));
+    expect(out[0].min).toBeNull();
+  });
+
+  it('MAX with an empty frame gives null (-Infinity sentinel)', () => {
+    const frame: WindowFrame = {
+      type: 'ROWS',
+      start: { type: 'FOLLOWING', offset: 1 },
+      end: { type: 'PRECEDING', offset: 1 },
+    };
+    const out = executeWindowFunction(rows, 'max', ['v'], makeSpec({ frame }));
+    expect(out[0].max).toBeNull();
   });
 
   it('ROWS start=FOLLOWING clamps to the end', () => {
@@ -1622,6 +1652,44 @@ describe('executeWindowFunction — RANGE frame (dates)', () => {
     // 'a' peers [1,2] sum to 3; 'b' alone sums to 3
     expect(out.map(o => o.sum)).toEqual([3, 3, 3]);
   });
+
+  it('RANGE end=FOLLOWING with string values walks the peer group forward', () => {
+    const rows = [
+      { s: 'a', v: 1 },
+      { s: 'a', v: 2 },
+      { s: 'b', v: 3 },
+    ];
+    const frame: WindowFrame = {
+      type: 'RANGE',
+      start: { type: 'UNBOUNDED_PRECEDING' },
+      end: { type: 'FOLLOWING', offset: 1 },
+    };
+    const out = executeWindowFunction(rows, 'sum', ['v'], makeSpec({
+      orderBy: [{ column: 's', order: 'ASC' }],
+      frame,
+    }));
+    // end boundary walks forward through 'a' peers (idx++) before stopping at 'b'
+    expect(out.map(o => o.sum)).toEqual([3, 3, 6]);
+  });
+
+  it('RANGE end=PRECEDING with string values falls back to current index', () => {
+    const rows = [
+      { s: 'a', v: 1 },
+      { s: 'a', v: 2 },
+      { s: 'b', v: 3 },
+    ];
+    const frame: WindowFrame = {
+      type: 'RANGE',
+      start: { type: 'UNBOUNDED_PRECEDING' },
+      end: { type: 'PRECEDING', offset: 1 },
+    };
+    const out = executeWindowFunction(rows, 'sum', ['v'], makeSpec({
+      orderBy: [{ column: 's', order: 'ASC' }],
+      frame,
+    }));
+    // string currentValue hits the non-numeric/non-date fallback → current index
+    expect(out.map(o => o.sum)).toEqual([1, 3, 6]);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2065,3 +2133,45 @@ function makeSpec(overrides: Partial<WindowSpec> = {}): WindowSpec {
     ...overrides,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// executeWindowFunction — defensive fallback for invalid frame bound types
+// (the open union types are sealed, but runtime input may still be malformed)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('executeWindowFunction — invalid frame bound fallback', () => {
+  const rows = [{ v: 1 }, { v: 2 }, { v: 3 }];
+
+  it('ROWS start=CURRENT_ROW end=UNBOUNDED_FOLLOWING', () => {
+    const frame = {
+      type: 'ROWS',
+      start: { type: 'CURRENT_ROW' },
+      end: { type: 'UNBOUNDED_FOLLOWING' },
+    } as WindowFrame;
+    const out = executeWindowFunction(rows, 'sum', ['v'], makeSpec({ frame }));
+    // row i sums [i..end] → 6, 5, 3
+    expect(out.map(r => r.sum)).toEqual([6, 5, 3]);
+  });
+
+  it('ROWS with an unrecognized start bound falls back to start=0', () => {
+    const frame = {
+      type: 'ROWS',
+      start: { type: 'INVALID' },
+      end: { type: 'UNBOUNDED_FOLLOWING' },
+    } as unknown as WindowFrame;
+    const out = executeWindowFunction(rows, 'sum', ['v'], makeSpec({ frame }));
+    // unknown start → default 0 → whole partition summed
+    expect(out.map(r => r.sum)).toEqual([6, 6, 6]);
+  });
+
+  it('RANGE with an unrecognized end bound falls back to end=currentIndex', () => {
+    const frame = {
+      type: 'RANGE',
+      start: { type: 'UNBOUNDED_PRECEDING' },
+      end: { type: 'INVALID' },
+    } as unknown as WindowFrame;
+    const out = executeWindowFunction(rows, 'sum', ['v'], makeSpec({ frame }));
+    // unknown end → currentIndex, so the frame grows [0..i] → running sum
+    expect(out.map(r => r.sum)).toEqual([1, 3, 6]);
+  });
+});

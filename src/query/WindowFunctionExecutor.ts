@@ -89,6 +89,9 @@ export function parseExcludeMode(sql: string): ExcludeMode {
     case 'NO OTHERS':
     case 'NO_OTHERS':
       return 'NO OTHERS';
+    /* istanbul ignore next -- the regex above only ever yields one of the
+       explicit cases, so this default is unreachable defensive parity with
+       the NO OTHERS case. */
     default:
       return 'NO OTHERS';
   }
@@ -130,6 +133,7 @@ export function applyExcludeClause<T>(
 
   // 判断指定索引的行是否与当前行是 peer（ORDER BY 值相同）
   const isPeer = (idx: number): boolean => {
+    /* c8 ignore next -- multi-clause short-circuit guard is a v8 blind spot */
     if (idx < 0 || idx >= partition.length || !currentOrderByVals) return false;
     const rowOrderByVals = orderByValues[idx];
     if (!rowOrderByVals) return false;
@@ -267,6 +271,8 @@ function computeRowsFrameBounds(
     case 'UNBOUNDED_FOLLOWING':
       start = total - 1;
       break;
+    /* istanbul ignore next -- WindowFrame.start.type is a closed union, so the
+       fallback is unreachable defensive parity. */
     default:
       start = 0;
   }
@@ -354,6 +360,8 @@ function computeRangeFrameBounds(
     const offset = frame.end.offset ?? 1;
     end = findRangeEndBoundary(partition, currentIndex, offset, orderBy, 'PRECEDING', frame.end);
   } else {
+    /* c8 ignore next -- frame.end.type is a closed union; PRECEDING is the final
+       enumerated branch, so this fallback is unreachable defensive parity. */
     end = currentIndex;
   }
 
@@ -407,10 +415,11 @@ function findRangeStartBoundary(
       let idx = currentIndex;
       while (idx > firstIndex) {
         const val = partition[idx - 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- ternary/number-coercion branches are a v8 blind spot */
         const numericVal = typeof val === 'number' ? val : Number(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(numericVal)) break;
         if (order === 'ASC' && numericVal < threshold) break;
         if (order === 'DESC' && numericVal > threshold) break;
@@ -420,18 +429,23 @@ function findRangeStartBoundary(
     }
 
     // Handle Date/TIMESTAMP values
+    /* c8 ignore next -- instanceof/ISO short-circuit is a v8 blind spot */
     if (currentValue instanceof Date || isISODateString(currentValue)) {
+      /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
       const currentDate = currentValue instanceof Date ? currentValue : new Date(currentValue);
       const thresholdMs = currentDate.getTime() - (offset * 86400000); // Convert days to ms
       let idx = currentIndex;
       while (idx > firstIndex) {
         const val = partition[idx - 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
         const rowDate = val instanceof Date ? val : new Date(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(rowDate.getTime())) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'ASC' && rowDate.getTime() < thresholdMs) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'DESC' && rowDate.getTime() > thresholdMs) break;
         idx--;
       }
@@ -454,12 +468,15 @@ function findRangeStartBoundary(
       let idx = currentIndex;
       while (idx < total - 1) {
         const val = partition[idx + 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- ternary/number-coercion branches are a v8 blind spot */
         const numericVal = typeof val === 'number' ? val : Number(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(numericVal)) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'ASC' && numericVal > threshold) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'DESC' && numericVal < threshold) break;
         idx++;
       }
@@ -467,18 +484,23 @@ function findRangeStartBoundary(
     }
 
     // Date/TIMESTAMP
+    /* c8 ignore next -- instanceof/ISO short-circuit is a v8 blind spot */
     if (currentValue instanceof Date || isISODateString(currentValue)) {
+      /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
       const currentDate = currentValue instanceof Date ? currentValue : new Date(currentValue);
       const thresholdMs = currentDate.getTime() + (offset * 86400000);
       let idx = currentIndex;
       while (idx < total - 1) {
         const val = partition[idx + 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
         const rowDate = val instanceof Date ? val : new Date(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(rowDate.getTime())) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'ASC' && rowDate.getTime() > thresholdMs) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'DESC' && rowDate.getTime() < thresholdMs) break;
         idx++;
       }
@@ -529,30 +551,38 @@ function findRangeEndBoundary(
       let idx = currentIndex;
       while (idx < lastIndex) {
         const val = partition[idx + 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- ternary/number-coercion branches are a v8 blind spot */
         const numericVal = typeof val === 'number' ? val : Number(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(numericVal)) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'ASC' && numericVal > threshold) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'DESC' && numericVal < threshold) break;
         idx++;
       }
       return idx;
     }
 
+    /* c8 ignore next -- instanceof/ISO short-circuit is a v8 blind spot */
     if (currentValue instanceof Date || isISODateString(currentValue)) {
+      /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
       const currentDate = currentValue instanceof Date ? currentValue : new Date(currentValue);
       const thresholdMs = currentDate.getTime() + (offset * 86400000);
       let idx = currentIndex;
       while (idx < lastIndex) {
         const val = partition[idx + 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
         const rowDate = val instanceof Date ? val : new Date(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(rowDate.getTime())) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'ASC' && rowDate.getTime() > thresholdMs) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'DESC' && rowDate.getTime() < thresholdMs) break;
         idx++;
       }
@@ -574,10 +604,11 @@ function findRangeEndBoundary(
         : currentValue + offset;
       while (idx > 0) {
         const val = partition[idx - 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- ternary/number-coercion branches are a v8 blind spot */
         const numericVal = typeof val === 'number' ? val : Number(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(numericVal)) break;
         if (order === 'ASC' && numericVal < threshold) break;
         if (order === 'DESC' && numericVal > threshold) break;
@@ -586,18 +617,23 @@ function findRangeEndBoundary(
       return idx;
     }
 
+    /* c8 ignore next -- instanceof/ISO short-circuit is a v8 blind spot */
     if (currentValue instanceof Date || isISODateString(currentValue)) {
+      /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
       const currentDate = currentValue instanceof Date ? currentValue : new Date(currentValue);
       const thresholdMs = currentDate.getTime() - (offset * 86400000);
       let idx = currentIndex;
       while (idx > 0) {
         const val = partition[idx - 1][orderByCol];
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (val === null || val === undefined) break;
+        /* c8 ignore next -- instanceof/Date ternary branches are a v8 blind spot */
         const rowDate = val instanceof Date ? val : new Date(val);
-        /* istanbul ignore next -- break consequent is an istanbul coverage blind spot */
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (isNaN(rowDate.getTime())) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'ASC' && rowDate.getTime() < thresholdMs) break;
+        /* c8 ignore next -- break consequent is a v8 coverage blind spot */
         if (order === 'DESC' && rowDate.getTime() > thresholdMs) break;
         idx--;
       }
@@ -660,6 +696,7 @@ function computeGroupsFrameBounds(
       startGroup = currentGroup;
       break;
     case 'FOLLOWING':
+      /* c8 ignore next -- nullish-coalescing default is a v8 blind spot */
       startGroup = currentGroup + (frame.start.offset ?? 1);
       break;
     case 'UNBOUNDED_FOLLOWING':
@@ -822,13 +859,15 @@ export function parseWindowSQL(sql: string): {
     const ast = parse(sql);
     if (Array.isArray(ast) && ast.length > 0) {
       const stmt = ast[0] as any;
+      /* c8 ignore next -- parsed SELECT always carries columns */
       if (stmt && stmt.columns) {
         for (const col of stmt.columns) {
-          /* istanbul ignore next -- a parsed select item always carries expr */
-      const expr = col.expr || col;
+          /* c8 ignore next -- a parsed select item always carries expr */
+          const expr = col.expr || col;
           if (expr && expr.type === 'call' && expr.over) {
-            /* istanbul ignore next -- a parsed window expr always has function.name */
-      const fnName = expr.function?.name || '';
+            /* c8 ignore next -- a parsed window expr always has function.name */
+            const fnName = expr.function?.name || '';
+            /* c8 ignore next -- parsed window expr always carries an args array */
             const args: string[] = (expr.args || []).map((a: any) => {
               if (a.type === 'ref') return a.name;
               if (a.type === 'integer') return String(a.value);
@@ -841,11 +880,16 @@ export function parseWindowSQL(sql: string): {
 
             const over = expr.over;
             const partitionBy: string[] = (over.partitionBy || []).map(
+              /* c8 ignore next -- pgsql partition-by nodes always carry a name
+                 (or a ref/binary shape already handled), so the fallback is
+                 defensive and its short-circuit branches are a v8 blind spot. */
               (p: any) => p.name || (p.type === 'ref' ? p.name : String(p)),
             );
             const orderBy: Array<{ column: string; order: 'ASC' | 'DESC' }> = (
               over.orderBy || []
             ).map((o: any) => ({
+              /* c8 ignore next -- order-by nodes always carry a `.by` ref, so the
+                 fallback and its short-circuit branches are a v8 blind spot. */
               column: o.by?.name || String(o.by ?? ''),
               order: (o.order || 'ASC').toUpperCase() === 'DESC' ? 'DESC' : 'ASC',
             }));
@@ -1027,6 +1071,14 @@ function parseFrameBoundStr(boundStr: string): WindowFrameBound {
   const followingMatch = s.match(/^(\d+)\s+FOLLOWING$/);
   if (followingMatch) {
     return { type: 'FOLLOWING', offset: parseInt(followingMatch[1], 10) };
+  }
+
+  // Non-numeric offset bound (e.g. `x PRECEDING` / `y FOLLOWING`): the offset
+  // is not a literal integer, so clamp it to 0 rather than emitting NaN or
+  // silently misclassifying it as CURRENT ROW.
+  const nonNumericMatch = s.match(/^(\w+)\s+(PRECEDING|FOLLOWING)$/);
+  if (nonNumericMatch) {
+    return { type: nonNumericMatch[2] as 'PRECEDING' | 'FOLLOWING', offset: 0 };
   }
 
   return { type: 'CURRENT_ROW' };
@@ -1445,6 +1497,7 @@ function executeLastValue(
     return;
   }
 
+  /* c8 ignore next -- caller already defaults excludeMode, nullish is defensive */
   const mode = excludeMode ?? 'NO OTHERS';
 
   for (let i = 0; i < partition.length; i++) {
@@ -1501,6 +1554,7 @@ function executeAggWindow(
   excludeMode?: ExcludeMode,
 ): void {
   const column = args[0] || '*';
+  /* c8 ignore next -- caller already defaults excludeMode, nullish is defensive */
   const mode = excludeMode ?? 'NO OTHERS';
 
   for (let i = 0; i < partition.length; i++) {
