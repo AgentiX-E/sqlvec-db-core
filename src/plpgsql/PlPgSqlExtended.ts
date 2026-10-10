@@ -107,7 +107,7 @@ export function extractWhileLoop(sql: string): { condition: string; body: string
   while ((match = loopRegex.exec(searchStr)) !== null) {
     if (match[0].toUpperCase() === 'LOOP') {
       depth++;
-    } else if (match[0].toUpperCase() === 'END LOOP' || match[0].toUpperCase().trim() === 'END' && searchStr.substring(match.index + 3).trim().toUpperCase().startsWith('LOOP')) {
+    } else {
       depth--;
       if (depth === 0) {
         endIdx = bodyStart + match.index;
