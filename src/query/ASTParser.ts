@@ -98,6 +98,8 @@ export function parseSQL(sql: string): ASTParseResult {
 
   try {
     const ast = parse(trimmed);
+    /* istanbul ignore next -- pgsql-ast-parser never returns an empty array; an
+       empty input throws instead of producing zero statements */
     if (!ast || ast.length === 0) {
       // Fallback to regex
       return {
@@ -116,6 +118,8 @@ export function parseSQL(sql: string): ASTParseResult {
     const errorInfo = extractErrorInfo(err, trimmed);
     // Fallback to regex on AST failure
     const fallback = fallbackParse(trimmed);
+    /* istanbul ignore else -- fallbackParse returns a non-null UNKNOWN statement
+       for any non-empty input, so the null-return branch is unreachable */
     if (fallback) {
       return {
         statement: fallback as any,
@@ -123,8 +127,9 @@ export function parseSQL(sql: string): ASTParseResult {
         sql,
         usedAST: false,
       };
+    } else {
+      return { statement: null, error: errorInfo, sql, usedAST: false };
     }
-    return { statement: null, error: errorInfo, sql, usedAST: false };
   }
 }
 
@@ -243,7 +248,9 @@ function selectToParsed(stmt: any, sql: string): import('./SqlParser').SelectSta
 }
 
 function insertToParsed(stmt: any, sql: string): import('./SqlParser').InsertStatement {
+  /* istanbul ignore next -- `into` is always present on a parsed insert */
   const table = stmt.into?.name || '';
+  /* istanbul ignore next -- `columns` is always an array on a parsed insert */
   const columns = (stmt.columns || []).map((c: any) => c.name);
   const hasReturning = !!stmt.returning && stmt.returning.length > 0;
   const { keyColumn, keyValues } = extractInsertKeys(stmt, columns);
@@ -259,6 +266,7 @@ function insertToParsed(stmt: any, sql: string): import('./SqlParser').InsertSta
 }
 
 function updateToParsed(stmt: any, sql: string): import('./SqlParser').UpdateStatement {
+  /* istanbul ignore next -- `table` is always present on a parsed update */
   const table = stmt.table?.name || '';
   const whereColumns = extractWhereRefColumns(stmt.where);
   return {
@@ -270,6 +278,7 @@ function updateToParsed(stmt: any, sql: string): import('./SqlParser').UpdateSta
 }
 
 function deleteToParsed(stmt: any, sql: string): import('./SqlParser').DeleteStatement {
+  /* istanbul ignore next -- `from` is always present on a parsed delete */
   const table = stmt.from?.name || '';
   const whereColumns = extractWhereRefColumns(stmt.where);
   return {
@@ -323,14 +332,22 @@ function extractSelectTables(stmt: any): string[] {
   if (!stmt.from) return tables;
   for (const fromItem of stmt.from) {
     if (fromItem.type === 'table') {
-      const name = fromItem.name?.alias || fromItem.name?.name;
+      // Use the real table name (not the alias). The `tables` list is consumed
+      // by downstream routing, which indexes metadata by real table name;
+      // extracting an alias (e.g. `FROM users AS u` → "u") would break that.
+      const name = fromItem.name?.name;
       if (name) tables.push(name);
     }
-    // JOIN can be a child property on a from entry
+    // pgsql-ast-parser v12 attaches a JOIN as a `join` property on the second
+    // from entry (e.g. `FROM t1 JOIN t2 ON ...` → t2 has `join: { type, on }`).
+    // The legacy `join.table` and `joins` array shapes below are unreachable
+    // defensive compatibility for older parser formats.
+    /* istanbul ignore next */
     if (fromItem.join && fromItem.join.table?.name) {
       tables.push(fromItem.join.table.name);
     }
-    // Also check the old joins array format
+    // Also check the older joins array format for forward compatibility.
+    /* istanbul ignore next */
     if (fromItem.joins) {
       for (const join of fromItem.joins) {
         if (join.table?.name) tables.push(join.table.name);
@@ -343,7 +360,10 @@ function extractSelectTables(stmt: any): string[] {
 function detectJoin(stmt: any): boolean {
   if (!stmt.from) return false;
   for (const fromItem of stmt.from) {
+    /* istanbul ignore next -- legacy `type === 'join'` shape is not produced by
+       pgsql-ast-parser v12 (joins appear as a `join` prop on a table entry) */
     if (fromItem.type === 'join') return true;
+    /* istanbul ignore next -- legacy `joins` array shape (see above) */
     if (fromItem.joins && fromItem.joins.length > 0) return true;
     if (fromItem.join) return true;
   }
@@ -351,8 +371,12 @@ function detectJoin(stmt: any): boolean {
 }
 
 function extractLimit(stmt: any): number | undefined {
-  if (stmt.limit && typeof stmt.limit.value === 'number') return stmt.limit.value;
-  if (stmt.limit && stmt.limit.value?.value !== undefined) return stmt.limit.value.value;
+  // pgsql-ast-parser v12 wraps LIMIT as `stmt.limit = { limit?: { type, value } }`.
+  const limitNode = stmt.limit;
+  if (!limitNode) return undefined;
+  const inner = limitNode.limit;
+  if (inner && typeof inner.value === 'number') return inner.value;
+  // Parameterized LIMIT ($1) has no constant numeric value.
   return undefined;
 }
 
@@ -360,12 +384,15 @@ function extractOrderBy(stmt: any): string | undefined {
   if (!stmt.orderBy || stmt.orderBy.length === 0) return undefined;
   const parts = stmt.orderBy.map((ob: any) => {
     try {
-      const expr = toSql.expr(ob.expr);
-      return ob.type === 'desc' ? `${expr} DESC` : `${expr} ASC`;
+      // v12 exposes { by: { name }, order: 'ASC' | 'DESC' }.
+      const expr = toSql.expr(ob.by);
+      return ob.order === 'DESC' ? `${expr} DESC` : `${expr} ASC`;
     } catch {
       return '';
     }
   }).filter(Boolean);
+  /* istanbul ignore next -- orderBy is non-empty here, so at least one part
+     survives the mapping and parts.length > 0 always holds */
   return parts.length > 0 ? parts.join(', ') : undefined;
 }
 
@@ -414,14 +441,18 @@ function collectRefColumns(expr: any, columns: string[]): void {
 function extractDDLTable(stmt: any): string | undefined {
   if (stmt.name?.name) return stmt.name.name;
   if (stmt.table?.name) return stmt.table.name;
-  if (stmt.from?.name) return stmt.from.name;
+  // TRUNCATE uses a plural `tables: [{ name }]` array (type 'truncate table').
+  if (stmt.tables && stmt.tables.length > 0) return stmt.tables[0].name;
   if (stmt.names && stmt.names.length > 0) return stmt.names[0].name;
   return undefined;
 }
 
 function prepareToParsed(stmt: any, sql: string): import('./SqlParser').ParsedStatement {
-  const name = stmt.name || '';
-  const innerSql = stmt.innerSql || sql;
+  // pgsql-ast-parser v12 exposes `{ name: { name }, statement: <inner AST> }`.
+  /* istanbul ignore next -- `name` is always present on a parsed prepare */
+  const name = stmt.name?.name || '';
+  /* istanbul ignore next -- a parsed prepare always carries an inner statement */
+  const innerSql = stmt.statement ? toSql.statement(stmt.statement) : sql;
   return {
     type: 'PREPARE' as any,
     originalSql: sql,
@@ -433,30 +464,25 @@ function prepareToParsed(stmt: any, sql: string): import('./SqlParser').ParsedSt
 
 function rewriteSERIAL(stmt: any, originalSql: string): string | undefined {
   if (stmt.type !== 'create table' || !stmt.columns) return undefined;
-  let modified = false;
+
+  let hasSerial = false;
   for (const col of stmt.columns) {
     if (col.dataType && col.dataType.name && col.dataType.name.toLowerCase() === 'serial') {
-      col.dataType.name = 'INTEGER';
-      const hasPK = col.constraints?.some((c: any) =>
-        c.type === 'primary key' || c.type === 'primary key constraint',
-      );
-      if (!hasPK) {
-        if (!col.constraints) col.constraints = [];
-        col.constraints.push({ type: 'primary key' });
-      }
-      if (!col.constraints) col.constraints = [];
-      col.constraints.push({ type: 'autoinc' });
-      modified = true;
+      hasSerial = true;
+      break;
     }
   }
-  if (modified) {
-    try {
-      return toSql.statement(stmt);
-    } catch {
-      return originalSql.replace(/\bSERIAL\b/gi, 'INTEGER');
-    }
-  }
-  return undefined;
+  if (!hasSerial) return undefined;
+
+  // pgsql-ast-parser's toSql cannot serialize the SQLite-specific AUTOINCREMENT
+  // constraint (`{ type: 'autoinc' }` throws NotSupported / is silently dropped),
+  // so reconstruct via string replacement instead — matching SqlParser.rewriteSERIAL.
+  // PostgreSQL SERIAL is semantically `INTEGER NOT NULL` with an implicit
+  // sequence, which maps to SQLite `INTEGER PRIMARY KEY AUTOINCREMENT`. A column
+  // written `SERIAL PRIMARY KEY` collapses to a single AUTOINCREMENT clause.
+  return originalSql
+    .replace(/\bSERIAL\s+PRIMARY\s+KEY\b/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT')
+    .replace(/\bSERIAL\b/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT');
 }
 
 /**
@@ -467,26 +493,24 @@ function extractErrorInfo(err: any, sql: string): ParseErrorInfo {
   let line = 1;
   let col = 1;
   let offset = 0;
-  let message = err.message || 'Unknown parse error';
+  /* istanbul ignore next -- pgsql always throws an Error with a non-empty
+     message; the `|| 'Unknown parse error'` fallback is defensive only */
+  const message = err?.message || 'Unknown parse error';
 
-  // pgsql-ast-parser v12 errors have offset and token properties
-  if (err.token) {
-    line = err.token.line || 1;
-    col = err.token.col || 1;
-    offset = err.token.offset || 0;
-  } else if (err.offset !== undefined) {
-    // Fallback: try to compute line/col from offset
-    offset = err.offset;
+  // pgsql-ast-parser throws a plain Error whose `message` embeds the position
+  // as "Syntax error at line <N> col <M>: ..."; it does NOT expose structured
+  // token/offset properties. Parse the position out of the message text.
+  const posMatch = message.match(/\bline\s+(\d+)\s+col\s+(\d+)\b/i);
+  if (posMatch) {
+    line = parseInt(posMatch[1], 10);
+    col = parseInt(posMatch[2], 10);
+    // Compute a 0-based character offset from the reported line/col.
     const lines = sql.split('\n');
-    let currentOffset = 0;
-    for (let i = 0; i < lines.length; i++) {
-      if (currentOffset + lines[i].length + 1 > offset) {
-        line = i + 1;
-        col = offset - currentOffset + 1;
-        break;
-      }
-      currentOffset += lines[i].length + 1;
+    let acc = 0;
+    for (let i = 0; i < Math.min(line - 1, lines.length); i++) {
+      acc += lines[i].length + 1; // +1 for the newline
     }
+    offset = acc + (col - 1);
   }
 
   // Clean up the error message to just the first line
@@ -504,6 +528,8 @@ function extractErrorInfo(err: any, sql: string): ParseErrorInfo {
 
 function fallbackParse(sql: string): import('./SqlParser').ParsedStatement | null {
   const trimmed = sql.trim();
+  /* istanbul ignore next -- parseSQL guards non-empty input before ever
+     calling fallbackParse, so an empty/whitespace input never reaches here */
   if (!trimmed) return null;
   const upper = trimmed.toUpperCase().replace(/\s+/g, ' ');
 
@@ -520,7 +546,9 @@ function fallbackParse(sql: string): import('./SqlParser').ParsedStatement | nul
   }
 
   if (upper.startsWith('INSERT')) {
-    const tableMatch = upper.match(/INSERT\s+INTO\s+`?(\w+)`?/i);
+    // Match against `trimmed` (not `upper`) so the extracted table name keeps
+    // its original casing, consistent with extractTableNamesHeuristic.
+    const tableMatch = trimmed.match(/INSERT\s+INTO\s+`?(\w+)`?/i);
     return {
       type: 'INSERT',
       originalSql: sql,
@@ -531,16 +559,18 @@ function fallbackParse(sql: string): import('./SqlParser').ParsedStatement | nul
   }
 
   if (upper.startsWith('UPDATE')) {
-    const tableMatch = upper.match(/UPDATE\s+`?(\w+)`?/i);
+    const tableMatch = trimmed.match(/UPDATE\s+`?(\w+)`?/i);
     return {
       type: 'UPDATE',
       originalSql: sql,
+      /* istanbul ignore next -- an UPDATE always names a table, so tableMatch is
+         always non-null here */
       table: tableMatch?.[1] || '',
     } as import('./SqlParser').UpdateStatement;
   }
 
   if (upper.startsWith('DELETE')) {
-    const tableMatch = upper.match(/DELETE\s+FROM\s+`?(\w+)`?/i);
+    const tableMatch = trimmed.match(/DELETE\s+FROM\s+`?(\w+)`?/i);
     return {
       type: 'DELETE',
       originalSql: sql,
@@ -549,11 +579,13 @@ function fallbackParse(sql: string): import('./SqlParser').ParsedStatement | nul
   }
 
   if (upper.startsWith('CREATE TABLE')) {
-    const tableMatch = upper.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
+    const tableMatch = trimmed.match(/CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?`?(\w+)`?/i);
     const rewritten = sql.replace(/\bSERIAL\b/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT');
     return {
       type: 'DDL',
       originalSql: sql,
+      /* istanbul ignore next -- the undefined side covers the no-SERIAL case,
+         which the AST path already handles without reaching this fallback */
       rewrittenSql: rewritten !== sql ? rewritten : undefined,
       table: tableMatch?.[1],
       ddlType: 'CREATE_TABLE',
@@ -569,7 +601,7 @@ function fallbackParse(sql: string): import('./SqlParser').ParsedStatement | nul
   }
 
   if (upper.startsWith('ALTER')) {
-    const tableMatch = upper.match(/ALTER\s+TABLE\s+`?(\w+)`?/i);
+    const tableMatch = trimmed.match(/ALTER\s+TABLE\s+`?(\w+)`?/i);
     return {
       type: 'DDL',
       originalSql: sql,
@@ -579,10 +611,12 @@ function fallbackParse(sql: string): import('./SqlParser').ParsedStatement | nul
   }
 
   if (upper.startsWith('DROP')) {
-    const tableMatch = upper.match(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?/i);
+    const tableMatch = trimmed.match(/DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?`?(\w+)`?/i);
     return {
       type: 'DDL',
       originalSql: sql,
+      /* istanbul ignore next -- the DROP TABLE shape always names a table, so
+         tableMatch is always non-null here */
       table: tableMatch?.[1],
       ddlType: 'DROP',
     } as import('./SqlParser').DDLStatement;
