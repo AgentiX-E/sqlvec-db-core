@@ -569,6 +569,7 @@ export class QueryPlanner {
       const subqueryStart = trimmed.indexOf('SELECT', inMatch.index! + 1);
       // Find matching paren for the IN subquery
       const inOpenParen = trimmed.indexOf('(', inMatch.index!);
+        /* c8 ignore next -- IN regex guarantees an opening paren follows */
       if (inOpenParen < 0) return null;
       const closingParen = findMatchingParen(trimmed, inOpenParen);
       const subqueryBody = subqueryStart >= 0 && closingParen > subqueryStart
@@ -705,7 +706,9 @@ export class QueryPlanner {
 
       // Build correlation WHERE clause snippets from the original subquery
       const correlationClauses = correlationColumns.map(c => {
+        /* c8 ignore next -- correlation columns are always bare (regex captures (\w+)) */
         const pCol = c.parent.includes('.') ? c.parent : `${parentTable}.${c.parent}`;
+        /* c8 ignore next -- correlation columns are always bare (regex captures (\w+)) */
         const sCol = c.subquery.includes('.') ? c.subquery : `${subqueryTable}.${c.subquery}`;
         return `${pCol} = ${sCol}`;
       });
@@ -724,7 +727,9 @@ export class QueryPlanner {
     if (type === 'EXISTS_SUBQUERY') {
       // Build the join columns from correlation info
       const joinClauses = correlationColumns.map(c => {
+        /* c8 ignore next -- correlation columns are always bare (regex captures (\w+)) */
         const pCol = c.parent.includes('.') ? c.parent : `${parentTable}.${c.parent}`;
+        /* c8 ignore next -- correlation columns are always bare (regex captures (\w+)) */
         const sCol = c.subquery.includes('.') ? c.subquery : `${subqueryTable}.${c.subquery}`;
         return `${sCol} = ${pCol}`;
       });
@@ -740,6 +745,7 @@ export class QueryPlanner {
         /WHERE\s+EXISTS\s*\([^)]*\)/i,
         `/* UNNEST: ${type} → SEMI JOIN ${subqueryTable} ON ${joinCondition} */ ` +
         `INNER JOIN (SELECT DISTINCT ${correlationColumns.map(c =>
+        /* c8 ignore next -- correlation columns are always bare (regex captures (\w+)) */
           c.subquery.includes('.') ? c.subquery : `${subqueryTable}.${c.subquery}`
         ).join(', ')} FROM ${subqueryTable}) AS _unnest_sq ON ${joinCondition.replace(
           new RegExp(`${escapeRegex(subqueryTable)}\\.`, 'g'),
@@ -824,16 +830,6 @@ export class QueryPlanner {
     if (!fromClauseMatch) return trimmed;
 
     const fromClause = fromClauseMatch[0];
-    const restAfterFrom = afterFrom.substring(fromClauseMatch.index! + fromClauseMatch[0].length);
-
-    // Find the first JOIN and collect all join clauses
-    const joins: string[] = [];
-    let remaining = restAfterFrom;
-    const joinPat = /(?:\s+(?:INNER|LEFT|RIGHT|CROSS|FULL\s+OUTER)?\s*JOIN\s+\w+(?:\s+(?:AS\s+)?\w+)?(?:\s+ON\s+[^)]+)?)/gi;
-    let jMatch;
-    while ((jMatch = joinPat.exec(restAfterFrom)) !== null) {
-      joins.push(jMatch[1].trim());
-    }
 
     // Reorder the tables: rebuild FROM clause with optimized order
     const tableAliases: Map<string, string> = new Map();
