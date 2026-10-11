@@ -356,6 +356,7 @@ export class ColumnEncryption {
     const results: Array<{ tableName: string; columnName: string; keyName: string }> = [];
     for (const [key, keyName] of this.columnKeyMap) {
       const dotIdx = key.indexOf('.');
+      /* c8 ignore next -- columnKeyMap keys are always `${table}.${column}`, so a dot is always present */
       if (dotIdx >= 0) {
         results.push({
           tableName: key.substring(0, dotIdx),
