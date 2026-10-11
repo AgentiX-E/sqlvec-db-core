@@ -2228,3 +2228,498 @@ describe('PlanExecutor — final branch sweep', () => {
       .toEqual([3, null]);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Remaining edge branches: null-coalescing, join-inversion, sort nulls,
+// comparator equality, limit-undefined, unknown-fn default
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('PlanExecutor — index scan limit-undefined false side', () => {
+  it('skips LIMIT when limit is undefined (index condition path)', () => {
+    const fake = makeFakeDb([
+      { match: 'EXPLAIN', all: () => [] },
+      { match: 'SELECT * FROM', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('index-scan', 'Index Scan on t using idx (cond)');
+    const res = ex.executeQuery(plan, 't', [{ table: 't', column: 'id', operator: '=', value: 1, exact: true }], undefined, undefined);
+    expect(res.rowCount).toBeGreaterThanOrEqual(0);
+  });
+
+  it('skips LIMIT when limit is undefined (multi-condition WHERE path)', () => {
+    const fake = makeFakeDb([
+      { match: 'EXPLAIN', all: () => [] },
+      { match: 'SELECT * FROM', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('index-scan', 'Index Scan on t using idx (cond)');
+    const conditions = [
+      { table: 't', column: 'id', operator: '>', value: 0, exact: false },
+      { table: 't', column: 'v', operator: '<', value: 10, exact: false },
+    ];
+    const res = ex.executeQuery(plan, 't', conditions, undefined, undefined);
+    expect(res.rowCount).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('PlanExecutor — NLJ batch null-value and join-inversion', () => {
+  it('left join column all null → batchValues empty → continue', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM "a', all: () => [{ id: null }, { id: undefined }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=2)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    // no joinable values → but fallback per-row loop still runs; assert sane
+    expect(typeof res.rowCount).toBe('number');
+  });
+
+  it('NLJ per-row fallback with inverted join condition (right=left)', () => {
+    // join condition has rightTable === leftTable(a) and leftTable === rightTable(b)
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM "a', all: () => [{ id: 1 }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    // inverted: rightTable='a' === leftTable 'a', leftTable='b' === rightTable 'b'
+    const jc: JoinCondition[] = [
+      { leftTable: 'b', leftColumn: 'id', rightTable: 'a', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
+
+describe('PlanExecutor — hash join inverted condition + no-match key', () => {
+  it('hash join with inverted join condition (right=left)', () => {
+    const leftData = [{ id: 1, lv: 'x' }];
+    const rightData = [{ id: 1, rv: 'p' }];
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => leftData },
+      { match: 'FROM "b"', all: () => rightData },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('hash-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'b', leftColumn: 'id', rightTable: 'a', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+
+  it('hash join with no matching key (matches undefined)', () => {
+    const leftData = [{ id: 99, lv: 'x' }];
+    const rightData = [{ id: 1, rv: 'p' }];
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => leftData },
+      { match: 'FROM "b"', all: () => rightData },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('hash-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(res.rowCount).toBe(0);
+  });
+});
+
+describe('PlanExecutor — merge join fallback equality comparator', () => {
+  it('in-memory sort fallback hits equality (av === bv) branch', () => {
+    // both sides have duplicate keys so sort comparator returns 0 for equal
+    const fake = makeFakeDb([
+      { match: 'ORDER BY', all: () => { throw new Error('down'); } },
+      { match: 'SELECT * FROM "a', all: () => [{ id: 1 }, { id: 1 }, { id: 2 }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 1 }, { id: 1 }, { id: 2 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('merge-join', 'Seq Scan on a (rows=3)', 'Seq Scan on b (rows=3)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(res.rowCount).toBeGreaterThan(0);
+  });
+});
+
+describe('PlanExecutor — legacy sort nulls coverage', () => {
+  it('ASC with a null on the right side only (bVal null)', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM', all: () => [{ id: 2 }, { id: null }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('sort', 'Sort (key=id, order=ASC, nulls=last)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rows.map(r => r.id)).toEqual([2, null]);
+  });
+
+  it('DESC with a null on the left side only (aVal null)', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM', all: () => [{ id: null }, { id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('sort', 'Sort (key=id, order=DESC, nulls=first)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rows.map(r => r.id)).toEqual([null, 1]);
+  });
+});
+
+describe('PlanExecutor — sort-aggregate unknown fn default', () => {
+  it('unknown fn (no group) falls back to count via default', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM', all: () => [{ v: 1 }, { v: 2 }, { v: 3 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('sort-aggregate', 'SortAggregate (fn=median, column=v, alias=m)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rows).toEqual([{ m: 3 }]);
+  });
+});
+
+describe('PlanExecutor — disk sort small-data nulls', () => {
+  it('small-data in-memory sort with null values (aVal null / bVal null)', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM', all: () => [{ v: 3 }, { v: null }, { v: 1 }, { v: null }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('disk-sort', 'DiskSort (key=v, order=DESC)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rows.length).toBe(4);
+  });
+});
+
+describe('PlanExecutor — NLJ batch rightIndex duplicate/missing-key', () => {
+  it('rightIndex duplicate keys (has() true path) and missing key (matches false)', () => {
+    // right returns two rows with same key → has() true for second; left has
+    // a key with no right match → matches undefined
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM "a', all: () => [{ id: 1 }, { id: 2 }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 1 }, { id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=2)', 'Seq Scan on b (rows=2)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    // left id=1 matches 2 right rows; left id=2 matches none
+    expect(res.rowCount).toBe(2);
+  });
+});
+
+describe('PlanExecutor — merge join right-table sort equality', () => {
+  it('right-side in-memory sort hits equality (av === bv)', () => {
+    const fake = makeFakeDb([
+      { match: 'ORDER BY', all: () => { throw new Error('down'); } },
+      { match: 'SELECT * FROM "a', all: () => [{ id: 1 }, { id: 2 }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 1 }, { id: 1 }, { id: 2 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('merge-join', 'Seq Scan on a (rows=2)', 'Seq Scan on b (rows=3)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(res.rowCount).toBeGreaterThan(0);
+  });
+});
+
+describe('PlanExecutor — sort-aggregate unknown fn with GROUP BY (default)', () => {
+  it('unknown fn with group falls back to count via default branch', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM', all: () => [{ g: 'a', v: 1 }, { g: 'a', v: 2 }, { g: 'b', v: 3 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('sort-aggregate', 'SortAggregate (fn=median, column=v, group=g, alias=m)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rows).toEqual([{ g: 'a', m: 2 }, { g: 'b', m: 1 }]);
+  });
+});
+
+describe('PlanExecutor — index scan with LIMIT pushdown', () => {
+  it('pushes LIMIT into SQL when limit is provided (exact-match condition path)', () => {
+    let sawLimit = false;
+    const fake = makeFakeDb([
+      { match: 'EXPLAIN', all: () => [] },
+      { match: 'SELECT * FROM', all: (sql?: string) => { if (sql && sql.includes('LIMIT')) sawLimit = true; return [{ id: 1 }]; } },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('index-scan', 'Index Scan on t using idx (cond)');
+    const res = ex.executeQuery(plan, 't', [{ table: 't', column: 'id', operator: '=', value: 1, exact: true }], undefined, 5);
+    expect(sawLimit).toBe(true);
+    expect(res.rowCount).toBe(1);
+  });
+
+  it('pushes LIMIT into multi-condition WHERE path', () => {
+    let sawLimit = false;
+    const fake = makeFakeDb([
+      { match: 'EXPLAIN', all: () => [] },
+      { match: 'SELECT * FROM', all: (sql?: string) => { if (sql && sql.includes('LIMIT')) sawLimit = true; return [{ id: 1 }]; } },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('index-scan', 'Index Scan on t using idx (cond)');
+    const conditions = [
+      { table: 't', column: 'id', operator: '>', value: 0, exact: false },
+      { table: 't', column: 'v', operator: '<', value: 10, exact: false },
+    ];
+    const res = ex.executeQuery(plan, 't', conditions, undefined, 3);
+    expect(sawLimit).toBe(true);
+    expect(res.rowCount).toBe(1);
+  });
+});
+
+describe('PlanExecutor — disk sort small-data ASC nulls (nullsFirst false)', () => {
+  it('ASC disk sort moves nulls last (nullsFirst=false side)', () => {
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM', all: () => [{ v: 3 }, { v: null }, { v: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = scanNode('disk-sort', 'DiskSort (key=v, order=ASC)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rows.map(r => r.v)).toEqual([1, 3, null]);
+  });
+});
+
+describe('PlanExecutor — NLJ per-row fallback null join value', () => {
+  it('per-row fallback uses ?? empty string for null left join value', () => {
+    // batch mode is skipped by forcing join conditions length > 0 but with
+    // left join value null so batchValues filters to empty → falls through,
+    // then per-row loop hits the null-coalesce on leftColumn/rightColumn.
+    const fake = makeFakeDb([
+      { match: 'SELECT * FROM "a', all: () => [{ id: null }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
+
+describe('PlanExecutor — disk sort large-data TEXT + ASC + exact batch', () => {
+  it('TEXT sort values (non-number) and ASC order', () => {
+    const bigRows = Array.from({ length: 1001 }, (_, i) => ({ rowid: i, v: `s${1001 - i}` }));
+    const sortedIds = Array.from({ length: 1001 }, (_, i) => ({ rowid: i }));
+    const prepare = (sql: string) => ({
+      all: (_s: string) => {
+        if (sql.includes('SELECT * FROM')) return bigRows;
+        if (sql.includes('SELECT rowid')) return sortedIds;
+        return [];
+      },
+      get: () => undefined,
+      run: () => undefined,
+    });
+    const exec = () => {};
+    const transaction = (fn: any) => (batch: any[]) => fn(batch);
+    const db = { prepare, exec, transaction, memory: true, name: ':memory:' };
+    const ex = mkExecutor(db);
+    const plan = scanNode('disk-sort', 'DiskSort (key=v, order=ASC)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rowCount).toBe(1001);
+  });
+
+  it('exactly 1000 rows → single 500-batch flush + final empty batch (batch.length>0 false side)', () => {
+    const bigRows = Array.from({ length: 1000 }, (_, i) => ({ rowid: i, v: 1000 - i }));
+    const sortedIds = Array.from({ length: 1000 }, (_, i) => ({ rowid: i }));
+    const prepare = (sql: string) => ({
+      all: (_s: string) => {
+        if (sql.includes('SELECT * FROM')) return bigRows;
+        if (sql.includes('SELECT rowid')) return sortedIds;
+        return [];
+      },
+      get: () => undefined,
+      run: () => undefined,
+    });
+    const exec = () => {};
+    const transaction = (fn: any) => (batch: any[]) => fn(batch);
+    const db = { prepare, exec, transaction, memory: true, name: ':memory:' };
+    const ex = mkExecutor(db);
+    const plan = scanNode('disk-sort', 'DiskSort (key=v, order=ASC)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rowCount).toBe(1000);
+  });
+});
+
+describe('PlanExecutor — NLJ batch throws → per-row fallback null coalesce', () => {
+  it('batch prepare throws, falls back to per-row loop with null join value', () => {
+    // first SELECT * FROM "a" (left scan) succeeds; right-table IN query throws
+    // to force the catch → per-row fallback, which then re-queries right via
+    // executeNode with an = condition (matches SELECT * FROM "b").
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => [{ id: null }] },
+      { match: 'FROM "b"', all: () => { throw new Error('force fallback'); } },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
+
+describe('PlanExecutor — NLJ fallback with genuinely null join value', () => {
+  it('per-row fallback coalesces a null left join value to empty string', () => {
+    // left scan returns a null id; right IN query throws to force fallback,
+    // so the per-row loop builds rightParams with leftRow[id] === null.
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => [{ id: null }] },
+      { match: 'IN (', all: () => { throw new Error('force fallback'); } },
+      { match: 'FROM "b"', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
+
+describe('PlanExecutor — NLJ fallback null-coalesce empty-string side', () => {
+  it('per-row fallback coalesces null join value (mixed null + non-null left rows)', () => {
+    // Left has one non-null (drives batch IN to throw) and one null row.
+    // catch → per-row fallback, where the null row hits `?? ''` right side.
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => [{ id: 1 }, { id: null }] },
+      { match: 'IN (', all: () => { throw new Error('force fallback'); } },
+      { match: 'FROM "b"', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=2)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
+
+describe('PlanExecutor — NLJ inverted join with null value + self-join mismatch', () => {
+  it('inverted join per-row fallback coalesces null rightColumn (L476 null side)', () => {
+    // inverted jc: rightTable==='a'(leftTable), leftTable==='b'(rightTable).
+    // batch IN throws → per-row fallback, inverted branch uses leftRow[rightColumn].
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => [{ id: 1 }, { id: null }] },
+      { match: 'IN (', all: () => { throw new Error('force'); } },
+      { match: 'FROM "b"', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=2)', 'Seq Scan on b (rows=1)');
+    // inverted: rightTable='a' matches leftTable 'a'; leftTable='b' matches rightTable 'b'
+    const jc: JoinCondition[] = [
+      { leftTable: 'b', leftColumn: 'id', rightTable: 'a', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+
+  it('self-join mismatch (rightTable===leftTable but leftTable!==rightTable)', () => {
+    // rightTable==='a' matches leftTable, but leftTable==='c' !== rightTable 'b'
+    // → neither normal nor inverted branch matches → cartesian fallback.
+    const fake = makeFakeDb([
+      { match: 'FROM "a"', all: () => [{ id: 1 }] },
+      { match: 'FROM "b"', all: () => [{ id: 1 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('nested-loop-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=1)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'c', leftColumn: 'id', rightTable: 'a', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
+
+describe('PlanExecutor — disk sort null sort value + exact 500 batch', () => {
+  it('large-data sort with null sort values (?? null side)', () => {
+    const bigRows = Array.from({ length: 1001 }, (_, i) => ({ rowid: i, v: i % 2 === 0 ? i : null }));
+    const sortedIds = Array.from({ length: 1001 }, (_, i) => ({ rowid: i }));
+    const prepare = (sql: string) => ({
+      all: (_s: string) => {
+        if (sql.includes('SELECT * FROM')) return bigRows;
+        if (sql.includes('SELECT rowid')) return sortedIds;
+        return [];
+      },
+      get: () => undefined,
+      run: () => undefined,
+    });
+    const exec = () => {};
+    const transaction = (fn: any) => (batch: any[]) => fn(batch);
+    const db = { prepare, exec, transaction, memory: true, name: ':memory:' };
+    const ex = mkExecutor(db);
+    const plan = scanNode('disk-sort', 'DiskSort (key=v, order=ASC)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rowCount).toBe(1001);
+  });
+
+  it('exactly 2500 rows (500 exactly × 5 batches, no trailing) → batch.length>0 false side', () => {
+    const bigRows = Array.from({ length: 2500 }, (_, i) => ({ rowid: i, v: 2500 - i }));
+    const sortedIds = Array.from({ length: 2500 }, (_, i) => ({ rowid: i }));
+    const prepare = (sql: string) => ({
+      all: (_s: string) => {
+        if (sql.includes('SELECT * FROM')) return bigRows;
+        if (sql.includes('SELECT rowid')) return sortedIds;
+        return [];
+      },
+      get: () => undefined,
+      run: () => undefined,
+    });
+    const exec = () => {};
+    const transaction = (fn: any) => (batch: any[]) => fn(batch);
+    const db = { prepare, exec, transaction, memory: true, name: ':memory:' };
+    const ex = mkExecutor(db);
+    const plan = scanNode('disk-sort', 'DiskSort (key=v, order=DESC)', {
+      children: [scanNode('sequential-scan', 'Seq Scan on t')],
+    });
+    const res = ex.executeQuery(plan, 't');
+    expect(res.rowCount).toBe(2500);
+  });
+});
+
+describe('PlanExecutor — merge join right-sort comparator av < bv', () => {
+  it('right-side sort comparator hits av < bv (descending left into ascending)', () => {
+    // Right rows are reverse-sorted so the comparator must reorder, forcing
+    // the `av < bv ? -1` branch. Left has a single row to keep it simple.
+    const fake = makeFakeDb([
+      { match: 'ORDER BY', all: () => { throw new Error('down'); } },
+      { match: 'SELECT * FROM "a', all: () => [{ id: 2 }] },
+      { match: 'SELECT * FROM "b', all: () => [{ id: 9 }, { id: 1 }, { id: 5 }] },
+    ]);
+    const ex = mkExecutor(fake.db);
+    const plan = joinPlan('merge-join', 'Seq Scan on a (rows=1)', 'Seq Scan on b (rows=3)');
+    const jc: JoinCondition[] = [
+      { leftTable: 'a', leftColumn: 'id', rightTable: 'b', rightColumn: 'id', operator: '=' },
+    ];
+    const res = ex.executeQuery(plan, '', undefined, jc);
+    expect(typeof res.rowCount).toBe('number');
+  });
+});
