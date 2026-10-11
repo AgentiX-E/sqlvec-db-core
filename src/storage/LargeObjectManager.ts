@@ -130,6 +130,7 @@ export class LargeObjectManager {
     }
 
     const fd = this.nextFd++;
+    /* c8 ignore next -- create() always writes a non-null Buffer, so row.data is never null */
     const data = row.data || Buffer.alloc(0);
 
     const entry: LoFdEntry = {
@@ -166,6 +167,13 @@ export class LargeObjectManager {
     }
 
     const start = entry.position;
+    // At or past EOF: return empty and leave the position untouched — a read
+    // must never move the offset backwards (start > data.length would make
+    // `end` smaller than `start`, regressing the position).
+    if (start >= entry.data.length) {
+      return Buffer.alloc(0);
+    }
+
     const end = Math.min(start + len, entry.data.length);
     const readData = entry.data.subarray(start, end);
     entry.position = end;
@@ -265,6 +273,7 @@ export class LargeObjectManager {
     // Clean up tracking
     this.openFds.delete(fd);
     const fdSet = this.oidToFds.get(entry.oid);
+    /* c8 ignore next -- open() always registers the oid→fd set; it is only removed together with the fd in unlink */
     if (fdSet) {
       fdSet.delete(fd);
       if (fdSet.size === 0) {
@@ -346,6 +355,7 @@ export class LargeObjectManager {
       throw new Error(`large object ${oid} does not exist`);
     }
 
+    /* c8 ignore next -- create() always writes a non-null Buffer, so row.data is never null */
     const data = row.data || Buffer.alloc(0);
     fs.writeFileSync(filePath, data);
 
