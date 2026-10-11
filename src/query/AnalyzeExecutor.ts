@@ -83,6 +83,7 @@ export function analyzeTable(
   const countRow = db.prepare(
     `SELECT COUNT(*) AS cnt FROM "${tableName.replace(/"/g, '""')}"`,
   ).get() as { cnt: number };
+  /* c8 ignore next -- COUNT(*) always returns exactly one row, so countRow?.cnt ?? 0 is defensive */
   const totalRows = Number(countRow?.cnt ?? 0);
 
   // 4) 删除旧统计
@@ -113,7 +114,7 @@ export function analyzeTable(
           WITH indexed AS (
             SELECT
               "${safeCol}" AS val,
-              ROW_NUMBER() OVER (ORDER BY "${safeCol}") AS rank
+              ROW_NUMBER() OVER (ORDER BY rowid) AS rank
             FROM "${tableName.replace(/"/g, '""')}"
             WHERE "${safeCol}" IS NOT NULL
           ),
@@ -125,22 +126,23 @@ export function analyzeTable(
             FROM indexed
           )
           SELECT
-            CASE WHEN s.n * (SUM(r.rank * CAST(r.val AS REAL)) - s.n * s.avg_rank * s.avg_val) != 0
-                 AND (s.n * SUM(r.rank * r.rank) - s.n * s.avg_rank * s.avg_rank) > 0
-                 AND (s.n * SUM(CAST(r.val AS REAL) * CAST(r.val AS REAL)) - s.n * s.avg_val * s.avg_val) > 0
+            CASE WHEN (SUM(r.rank * CAST(r.val AS REAL)) - s.n * s.avg_rank * s.avg_val) != 0
+                 AND (SUM(r.rank * r.rank) - s.n * s.avg_rank * s.avg_rank) > 0
+                 AND (SUM(CAST(r.val AS REAL) * CAST(r.val AS REAL)) - s.n * s.avg_val * s.avg_val) > 0
             THEN (
-              (s.n * SUM(r.rank * CAST(r.val AS REAL)) - s.n * s.avg_rank * s.avg_val)
+              (SUM(r.rank * CAST(r.val AS REAL)) - s.n * s.avg_rank * s.avg_val)
               /
               SQRT(
-                (s.n * SUM(r.rank * r.rank) - s.n * s.avg_rank * s.avg_rank)
+                (SUM(r.rank * r.rank) - s.n * s.avg_rank * s.avg_rank)
                 *
-                (s.n * SUM(CAST(r.val AS REAL) * CAST(r.val AS REAL)) - s.n * s.avg_val * s.avg_val)
+                (SUM(CAST(r.val AS REAL) * CAST(r.val AS REAL)) - s.n * s.avg_val * s.avg_val)
               )
             )
             ELSE 0.0 END AS corr
           FROM indexed r, stats s
         `).get() as { corr: number } | undefined;
 
+        /* c8 ignore next -- the CASE ELSE 0.0 guarantees a finite number, so this guard is always true */
         if (corrRow && typeof corrRow.corr === 'number' && !isNaN(corrRow.corr)) {
           correlation = corrRow.corr;
         }
@@ -150,7 +152,9 @@ export function analyzeTable(
       }
     }
 
+    /* c8 ignore next -- aggregate SELECT always returns a row; ?? 0 is defensive */
     const nullCount = Number(row?.null_count ?? 0);
+    /* c8 ignore next -- aggregate SELECT always returns a row; ?? 0 is defensive */
     const nDistinct = Number(row?.n_distinct ?? 0);
 
     db.prepare(`
@@ -187,6 +191,7 @@ export function getTableStats(
   db: Database.Database,
   tableName: string,
 ): ColumnStats[] {
+  db.exec(CREATE_STATS_SQL);
   return db.prepare(`
     SELECT * FROM "${STATS_PREFIX}" WHERE table_name = ?
     ORDER BY column_name
@@ -201,6 +206,7 @@ export function needsAnalyze(
   tableName: string,
   maxAgeSeconds: number = 3600,
 ): boolean {
+  db.exec(CREATE_STATS_SQL);
   const row = db.prepare(`
     SELECT COUNT(*) AS cnt,
            MAX(analyzed_at) AS latest
@@ -209,6 +215,7 @@ export function needsAnalyze(
   `).get(tableName) as { cnt: number; latest: number | null };
 
   if (!row || row.cnt === 0) return true;
+  /* c8 ignore next -- analyzed_at is NOT NULL, so latest is never null when cnt > 0 */
   if (row.latest == null) return true;
   return (Date.now() / 1000) - row.latest > maxAgeSeconds;
 }
@@ -222,6 +229,7 @@ export function getColumnCorrelation(
   tableName: string,
   columnName: string,
 ): number {
+  db.exec(CREATE_STATS_SQL);
   const row = db.prepare(`
     SELECT correlation FROM "${STATS_PREFIX}"
     WHERE table_name = ? AND column_name = ?
@@ -238,6 +246,7 @@ export function getColumnDistinctCount(
   tableName: string,
   columnName: string,
 ): number {
+  db.exec(CREATE_STATS_SQL);
   const row = db.prepare(`
     SELECT n_distinct FROM "${STATS_PREFIX}"
     WHERE table_name = ? AND column_name = ?
