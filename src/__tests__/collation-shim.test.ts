@@ -70,5 +70,22 @@ describe('CollationShim', () => {
       expect(hasCollate('SELECT 1')).toBe(false);
       expect(hasCollate(sql)).toBe(true);
     });
+
+    // BUG: hasCollate must shield literals/comments (agree with stripCollate).
+    it('does not report COLLATE inside a string literal', () => {
+      expect(hasCollate("SELECT 'x COLLATE \"C\" y' AS lit")).toBe(false);
+    });
+
+    it('does not report COLLATE inside a single-line comment', () => {
+      expect(hasCollate('-- x COLLATE "C"\nSELECT 1')).toBe(false);
+    });
+
+    it('does not report COLLATE inside a quoted identifier', () => {
+      expect(hasCollate('SELECT "col COLLATE C" FROM t')).toBe(false);
+    });
+
+    it('reports COLLATE that precedes the DESC/ASC keyword', () => {
+      expect(hasCollate('ORDER BY name COLLATE "C" DESC')).toBe(true);
+    });
   });
 });

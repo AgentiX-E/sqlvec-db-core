@@ -50,11 +50,17 @@ export function stripCollate(sql: string): string {
 /**
  * Check if a SQL string contains a COLLATE clause.
  *
+ * The SQL is shielded by `protectSQL` first so a COLLATE keyword that appears
+ * inside a string literal, quoted identifier, or comment is NOT reported — this
+ * mirrors the behavior of `stripCollate()` (which also protects first). Without
+ * this, `hasCollate` and `stripCollate` would disagree on the same input.
+ *
  * Uses a fresh (non-shared) regex instance on each call so `lastIndex` state from
  * a previous `test()` never leaks across invocations (a shared `/g` RegExp would
  * return different results for the same input depending on call order — the same
  * trap documented in MacAddrShim and LiteralProtectionLayer).
  */
 export function hasCollate(sql: string): boolean {
-  return new RegExp(COLLATE_PATTERN_SOURCE, 'gi').test(sql);
+  const { protectedSql } = protectSQL(sql);
+  return new RegExp(COLLATE_PATTERN_SOURCE, 'gi').test(protectedSql);
 }
