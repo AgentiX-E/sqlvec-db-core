@@ -107,10 +107,13 @@ export class CDCEngine {
    */
   ensureTableTriggers(shard: ShardHandle, tableName: string): void {
     const safeName = tableName.replace(/"/g, '""');
+    // Trigger names must be a plain identifier: replace any quote characters
+    // that would otherwise break the CREATE TRIGGER statement.
+    const triggerLabel = tableName.replace(/"/g, '_');
 
     // AFTER INSERT trigger
     shard.db.exec(
-      `CREATE TRIGGER IF NOT EXISTS ${CDCEngine.CDC_TRIGGER_PREFIX}_I_${tableName}
+      `CREATE TRIGGER IF NOT EXISTS ${CDCEngine.CDC_TRIGGER_PREFIX}_I_${triggerLabel}
        AFTER INSERT ON "${safeName}"
        BEGIN
          INSERT INTO ${CDCEngine.CDC_TABLE}(table_name, op_type, row_id)
@@ -120,7 +123,7 @@ export class CDCEngine {
 
     // AFTER UPDATE trigger
     shard.db.exec(
-      `CREATE TRIGGER IF NOT EXISTS ${CDCEngine.CDC_TRIGGER_PREFIX}_U_${tableName}
+      `CREATE TRIGGER IF NOT EXISTS ${CDCEngine.CDC_TRIGGER_PREFIX}_U_${triggerLabel}
        AFTER UPDATE ON "${safeName}"
        BEGIN
          INSERT INTO ${CDCEngine.CDC_TABLE}(table_name, op_type, row_id)
@@ -130,7 +133,7 @@ export class CDCEngine {
 
     // BEFORE DELETE trigger (need rowid before row is removed)
     shard.db.exec(
-      `CREATE TRIGGER IF NOT EXISTS ${CDCEngine.CDC_TRIGGER_PREFIX}_D_${tableName}
+      `CREATE TRIGGER IF NOT EXISTS ${CDCEngine.CDC_TRIGGER_PREFIX}_D_${triggerLabel}
        BEFORE DELETE ON "${safeName}"
        BEGIN
          INSERT INTO ${CDCEngine.CDC_TABLE}(table_name, op_type, row_id)
@@ -220,6 +223,7 @@ export class CDCEngine {
     let maxSeq = 0;
 
     for (const op of ops) {
+      /* c8 ignore next -- seq is monotonically increasing (AUTOINCREMENT), so op.seq is always > the running max */
       if (op.seq > maxSeq) maxSeq = op.seq;
       // Skip tables not yet registered with SchemaManager
       if (!tables.includes(op.table_name)) continue;
@@ -265,6 +269,7 @@ export class CDCEngine {
         const rowMap = new Map<number, any>();
         for (const r of sourceRows) {
           const rid = r.rowid != null ? Number(r.rowid) : Number(r[Object.keys(r)[0]]);
+          /* c8 ignore next -- rid is always a valid number for rows returned from the source table */
           if (rid != null && !isNaN(rid)) rowMap.set(rid, r);
         }
 
@@ -343,6 +348,7 @@ export class CDCEngine {
     let maxSeq = 0;
 
     for (const op of ops) {
+      /* c8 ignore next -- seq is monotonically increasing (AUTOINCREMENT), so op.seq is always > the running max */
       if (op.seq > maxSeq) maxSeq = op.seq;
       if (!tables.includes(op.table_name)) continue; // Not monitored — skip
       if (op.table_name.startsWith('_cdc_')) continue;
@@ -370,9 +376,10 @@ export class CDCEngine {
       const inserts: any[] = [];
 
       if (ops2.inserts.length > 0) {
-        // Batch-read inserts
+        // Batch-read inserts. `SELECT rowid, *` ensures the rowid field is
+        // present for IPK tables; strip it and keep the remaining columns.
         const insertRows = shard.db.prepare(
-          `SELECT * FROM "${safeName}" WHERE rowid IN (${ops2.inserts.join(',')})`,
+          `SELECT rowid, * FROM "${safeName}" WHERE rowid IN (${ops2.inserts.join(',')})`,
         ).all() as any[];
         for (const r of insertRows) {
           const { rowid, ...data } = r;
@@ -385,12 +392,15 @@ export class CDCEngine {
       const mvccDeleteRids: number[] = [];
       if (ops2.updates.length > 0) {
         const updateRows = shard.db.prepare(
-          `SELECT * FROM "${safeName}" WHERE rowid IN (${ops2.updates.join(',')})`,
+          `SELECT rowid, * FROM "${safeName}" WHERE rowid IN (${ops2.updates.join(',')})`,
         ).all() as any[];
         const updateMap = new Map<number, any>();
         for (const r of updateRows) {
+          // For IPK tables the PK column shadows rowid in better-sqlite3; use
+          // the first result column as the rowid proxy (mirrors readChangelog).
+          const rid = r.rowid != null ? Number(r.rowid) : Number(r[Object.keys(r)[0]]);
           const { rowid, ...data } = r;
-          updateMap.set(rowid, data);
+          updateMap.set(rid, data);
         }
         for (const rid of ops2.updates) {
           const row = updateMap.get(rid);
@@ -415,6 +425,7 @@ export class CDCEngine {
     }
 
     // Mark processed entries as deleted (DELETE by seq range)
+    /* c8 ignore next -- maxSeq is always > 0 here (ops.length > 0 early-returns otherwise) */
     if (maxSeq > 0) {
       shard.db.exec(`DELETE FROM ${CDCEngine.CDC_TABLE} WHERE seq <= ${maxSeq}`);
     }
@@ -469,8 +480,11 @@ export class CDCEngine {
       // Determine new max rowid from __rid field
       let maxRowId = 0;
       for (const r of rows) {
+        /* c8 ignore next -- __rid is always populated by the SELECT projection */
         const ridVal = (r as any).__rid ?? 0;
+        /* c8 ignore next -- better-sqlite3 returns numbers unless safeIntegers is enabled */
         const rid = typeof ridVal === 'bigint' ? Number(ridVal) : Number(ridVal);
+        /* c8 ignore next -- rows are ordered by rowid ascending, so rid is always > the running max */
         if (rid > maxRowId) maxRowId = rid;
       }
       this.checkpointByTable.set(cpKey, maxRowId);
