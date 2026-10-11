@@ -181,6 +181,10 @@ export class ToastStorage {
       .prepare('SELECT chunk_index, data FROM __toast WHERE oid = ? ORDER BY chunk_index')
       .all(oid) as Array<{ chunk_index: number; data: Buffer }>;
 
+    // A dangling pointer (e.g. after GC removed the OID) must not silently
+    // return an empty value; treat it as a missing TOAST payload.
+    if (rows.length === 0) return null;
+
     const chunks = rows.map((r) => r.data);
 
     // Reassemble.
