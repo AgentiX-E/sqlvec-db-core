@@ -38,6 +38,7 @@ describe('DropTableShim', () => {
       expect(detectMultiTableDrop(undefined as unknown as string)).toBe(false);
       expect(detectMultiTableDrop('')).toBe(false);
       expect(detectMultiTableDrop('   ')).toBe(false);
+      expect(detectMultiTableDrop(42 as unknown as string)).toBe(false);
     });
   });
 
@@ -83,6 +84,17 @@ describe('DropTableShim', () => {
     it('returns null for non-string or empty input', () => {
       expect(rewriteMultiTableDrop(undefined as unknown as string)).toEqual({ sql: null, rewritten: false });
       expect(rewriteMultiTableDrop('')).toEqual({ sql: null, rewritten: false });
+      expect(rewriteMultiTableDrop(42 as unknown as string)).toEqual({ sql: null, rewritten: false });
+    });
+
+    it('handles case-insensitive keywords', () => {
+      expect(rewriteMultiTableDrop('drop table t1, t2'))
+        .toEqual({ sql: 'DROP TABLE t1; DROP TABLE t2', rewritten: true });
+    });
+
+    it('filters empty table names from stray commas', () => {
+      expect(rewriteMultiTableDrop('DROP TABLE t1, , t3'))
+        .toEqual({ sql: 'DROP TABLE t1; DROP TABLE t3', rewritten: true });
     });
 
     it('handles whitespace and newlines between tokens', () => {
