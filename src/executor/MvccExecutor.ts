@@ -31,6 +31,35 @@ interface TableSchema {
 
 const logger = PinoLogger.forComponent('MvccExecutor');
 
+/**
+ * Split a SQL `SET` clause body on top-level commas only. Commas inside a
+ * quoted literal (`'...'`, `"..."`, or backtick-quoted) are preserved, so a
+ * value such as `name = 'a,b'` is kept intact instead of being split in two.
+ */
+function splitTopLevel(clause: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  for (let i = 0; i < clause.length; i++) {
+    const ch = clause[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"' || ch === '`') {
+      quote = ch;
+      current += ch;
+    } else if (ch === ',') {
+      parts.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  current = current.trim();
+  if (current) parts.push(current);
+  return parts;
+}
+
 export class MvccExecutor {
   private db: Database.Database;
   private schemaCache: Map<string, TableSchema> = new Map();
@@ -51,8 +80,12 @@ export class MvccExecutor {
    * Fetch column info for a table using PRAGMA table_info.
    */
   getSchema(tableName: string): TableSchema {
-    // Clean table name (remove schema prefix, quotes)
-    const cleanName = tableName.replace(/[."`\[\]]/g, '').replace(/^public\./i, '');
+    // Clean table name: strip surrounding quotes/brackets and drop any
+    // `schema.` qualifier. The previous blanket `replace(/[."`\[\]]/g, '')`
+    // corrupted `schema.table` into `schematable` — see the regression test.
+    const cleanName = tableName
+      .replace(/^["'`\[]+|["'`\]]+$/g, '')
+      .replace(/^[\w"'`]+\./i, '');
     const key = cleanName.toLowerCase();
 
     let cached = this.schemaCache.get(key);
@@ -67,6 +100,9 @@ export class MvccExecutor {
       this.schemaCache.set(key, schema);
       return schema;
     } catch (e) {
+      // PRAGMA table_info does not throw for an unknown/malformed table name —
+      // it returns an empty result set. This catch is a defensive guard only.
+      /* c8 ignore next */
       return { name: cleanName, columns: [], hasMvccColumns: false };
     }
   }
@@ -114,7 +150,9 @@ export class MvccExecutor {
 
     // 2. Parse SET clause to get new values
     // SET a = 10, b = 'hello' → { a: 10, b: 'hello' }
-    const setPairs = setClause.split(',').map(s => s.trim());
+    // Split on top-level commas only, so a string literal containing a comma
+    // (e.g. SET name = 'a,b') is not torn apart — see the regression test.
+    const setPairs = splitTopLevel(setClause);
     const newValues: Record<string, any> = {};
     for (const pair of setPairs) {
       const eqIdx = pair.indexOf('=');
