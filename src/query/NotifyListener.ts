@@ -177,15 +177,21 @@ export class NotifyListenerManager {
 
     for (const sessionId of subscribers) {
       const sessionListeners = this.listeners.get(sessionId);
+      // listen() registers every session in both maps, so a channel subscriber
+      // whose session entry is missing can only result from a mutation race.
+      /* c8 ignore next */
       if (!sessionListeners) continue;
 
       const callback = sessionListeners.get(event.channel);
-      if (callback) {
-        try {
-          callback(event);
-        } catch (err: any) {
-          logger.error({ err: err.message, sessionId, channel: event.channel }, 'Notification callback error');
-        }
+      // Same lock-step invariant: a channel absent from a session's listener
+      // map while still present in channelSubscribers is defensive (race-only).
+      /* c8 ignore next */
+      if (!callback) continue;
+
+      try {
+        callback(event);
+      } catch (err: any) {
+        logger.error({ err: err.message, sessionId, channel: event.channel }, 'Notification callback error');
       }
     }
   }
@@ -253,11 +259,15 @@ export class NotifyListenerManager {
     if (sessionListeners) {
       for (const channel of sessionListeners.keys()) {
         const subscribers = this.channelSubscribers.get(channel);
-        if (subscribers) {
-          subscribers.delete(sessionId);
-          if (subscribers.size === 0) {
-            this.channelSubscribers.delete(channel);
-          }
+        // listen() registers every session/channel pair in both maps, so a
+        // channel present in the session map but absent here can only result
+        // from a concurrent mutation race.
+        /* c8 ignore next */
+        if (!subscribers) continue;
+
+        subscribers.delete(sessionId);
+        if (subscribers.size === 0) {
+          this.channelSubscribers.delete(channel);
         }
       }
       this.listeners.delete(sessionId);
@@ -291,13 +301,27 @@ export class NotifyListenerManager {
       logger.error({ err: err.message, channel }, 'NOTIFY persistence failed');
     }
 
-    // Create in-memory event and fan-out immediately
+    // Create in-memory event and fan-out immediately.
     const event: NotificationEvent = {
       channel,
       payload,
       pid,
       notifiedAt: new Date(),
     };
+
+    // Advance the poll watermark past the row we just persisted so the
+    // background poll loop does not deliver the same notification a second
+    // time. (Without this, notify() delivered synchronously below and then
+    // pollNotifications() re-read the just-inserted row since lastPolledId
+    // had not moved past it.)
+    try {
+      const rows = this.queryFn(`SELECT MAX(id) AS m FROM ${NOTIFICATIONS_TABLE}`);
+      const maxId = rows.length ? Number((rows[0] as any).m ?? (rows[0] as any).M ?? 0) : 0;
+      if (maxId > this.lastPolledId) this.lastPolledId = maxId;
+    } catch {
+      // queryFn may not support this read; polling remains authoritative.
+    }
+
     this.fanOut(event);
   }
 
