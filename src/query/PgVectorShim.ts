@@ -58,12 +58,12 @@ const L2_DISTANCE_OP = /(SELECT\s+.+?\s+ORDER\s+BY\s+)(\w+(?:\.\w+)?)\s*<->\s*'\
 /**
  * Matches ORDER BY <column> <=> '<vector>' — cosine distance operator.
  */
-const COSINE_DISTANCE_OP = /(SELECT\s+.+?\s+ORDER\s+BY\s+)(\w+(?:\.\w+)?)\s*<=>\s*'\[([^\]]+)\]'/i;
+const COSINE_DISTANCE_OP = /(SELECT\s+.+?\s+ORDER\s+BY\s+)(\w+(?:\.\w+)?)\s*<=>\s*'\[([^\]]*)\]'/i;
 
 /**
  * Matches ORDER BY <column> <#> '<vector>' — inner product operator.
  */
-const INNER_PRODUCT_OP = /(SELECT\s+.+?\s+ORDER\s+BY\s+)(\w+(?:\.\w+)?)\s*<#>\s*'\[([^\]]+)\]'/i;
+const INNER_PRODUCT_OP = /(SELECT\s+.+?\s+ORDER\s+BY\s+)(\w+(?:\.\w+)?)\s*<#>\s*'\[([^\]]*)\]'/i;
 
 /**
  * Matches CREATE INDEX ... USING hnsw/ivfflat with pgvector operator classes.
@@ -150,6 +150,8 @@ export function parseVectorLiteral(literal: string): number[] {
  * Calculate L2 distance SQL expression.
  */
 export function l2DistanceSql(column: string, vec: number[]): string {
+  // Empty vector has no dimensions: the distance is zero, not `SQRT()`.
+  if (vec.length === 0) return '0';
   const terms = vec.map((v, i) => `(${column}_${i} - ${v}) * (${column}_${i} - ${v})`);
   return `SQRT(${terms.join(' + ')})`;
 }
@@ -159,6 +161,8 @@ export function l2DistanceSql(column: string, vec: number[]): string {
  * cosine_distance(a,b) = 1 - (a·b) / (||a|| * ||b||)
  */
 export function cosineDistanceSql(column: string, vec: number[]): string {
+  // Empty vector has no norm; avoid a `0/0` division (was `(1 - () / (SQRT() * 0))`).
+  if (vec.length === 0) return '0';
   const dotTerms = vec.map((v, i) => `${column}_${i} * ${v}`);
   const dot = dotTerms.join(' + ');
   const normATerms = vec.map((v, i) => `${column}_${i} * ${column}_${i}`);
@@ -172,6 +176,8 @@ export function cosineDistanceSql(column: string, vec: number[]): string {
  * inner_product(a,b) = a·b (dot product, negated for pgvector compatibility)
  */
 export function innerProductSql(column: string, vec: number[]): string {
+  // Empty vector: dot product is zero, not a dangling `()`.
+  if (vec.length === 0) return '0';
   const terms = vec.map((v, i) => `${column}_${i} * ${v}`);
   return `(${terms.join(' + ')})`;
 }
@@ -265,6 +271,7 @@ export function rewriteIndexOpclass(sql: string): PgVectorShimResult {
     vector_cosine_ops: 'cosine',
     vector_ip_ops: 'ip',
   };
+  /* c8 ignore next -- opclass is constrained to the three enum keys by INDEX_OPCLASS */
   const metric = metricMap[opclass] || 'l2';
 
   // Parse WITH params
@@ -323,6 +330,7 @@ export function rewriteVectorFunctions(sql: string): PgVectorShimResult {
     return `__pgvector_${fnName}(`;
   });
 
+  /* c8 ignore next -- hasVectorFunctions() above guarantees the replacer fires at least once */
   if (!found) {
     return { sql, rewritten: false };
   }
