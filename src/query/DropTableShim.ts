@@ -29,19 +29,25 @@ const logger = PinoLogger.forComponent('DropTableShim');
  * Captures:
  *   Group 1: "IF EXISTS " (or empty string)
  *   Group 2: The first table name (including optional schema qualifier)
- *   Group 3: The remaining comma-separated table names
+ *   Group 3: The remaining comma-separated table names (with any trailing
+ *            CASCADE/RESTRICT modifier already stripped — see below)
+ *
+ * The trailing `(?:\s+(?:CASCADE|RESTRICT))?` matches (and discards) the
+ * PostgreSQL CASCADE/RESTRICT modifier, which SQLite does not support, so it
+ * never leaks into the rewritten table list.
  *
  * Examples that match:
  *   DROP TABLE t1, t2;
  *   DROP TABLE IF EXISTS t1, t2, t3, t4;
  *   DROP TABLE "pgbench_accounts", "pgbench_branches";
+ *   DROP TABLE t1, t2 CASCADE;
  *
  * Non-matching (pass-through):
  *   DROP TABLE t1;                         — single table
  *   DROP TABLE IF EXISTS t1;               — single table with IF EXISTS
  *   DROP VIEW t1;                          — not a TABLE
  */
-const DROP_TABLE_MULTI = /^\s*DROP\s+TABLE\s+(IF\s+EXISTS\s+)?([`"']?\w+[`"']?(?:\s*\.\s*[`"']?\w+[`"']?)?)\s*,\s*([^;]+);?\s*$/i;
+const DROP_TABLE_MULTI = /^\s*DROP\s+TABLE\s+(IF\s+EXISTS\s+)?([`"']?\w+[`"']?(?:\s*\.\s*[`"']?\w+[`"']?)?)\s*,\s*([^;]+?)\s*(?:[;\s]+(?:CASCADE|RESTRICT))?\s*;?\s*$/i;
 
 // ──────────────────────────────────────────────
 //  Public API
