@@ -137,7 +137,11 @@ export class CheckpointManager {
         { err: err.message, tableKey, failures: this.checkpointWriteFailures },
         '[CheckpointManager] Checkpoint write failed',
       );
-      if (this.checkpointWriteFailures >= 10) {
+      // The >5 guard above aborts before any further write is attempted, so
+      // `checkpointWriteFailures` saturates at 6. Emit the disabling notice at
+      // the moment the circuit breaker trips (was previously guarded by an
+      // unreachable `>= 10` that could never fire).
+      if (this.checkpointWriteFailures === 6) {
         logger.warn('[CheckpointManager] Too many failures — disabling checkpoint persistence');
       }
     }
