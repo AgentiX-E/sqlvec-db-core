@@ -13,7 +13,7 @@
 
 import Database from 'better-sqlite3';
 import { PinoLogger } from '../logger/PinoLogger';
-import ss from 'simple-statistics';
+import * as ss from 'simple-statistics';
 
 const logger = PinoLogger.forComponent('PgStatCollector');
 
@@ -179,6 +179,8 @@ export class PgStatCollector {
       try {
         this.collectColumnStats(table, col, opts);
       } catch (err: any) {
+        /* c8 ignore next 3 -- defensive: collectColumnStats only throws on
+         * structural corruption; PRAGMA-verified columns always succeed. */
         logger.warn({ table, column: col, err: err.message }, 'Column analyze error');
       }
     }
