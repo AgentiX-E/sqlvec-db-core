@@ -345,7 +345,12 @@ export class PgRewindShim {
       success: true,
       entriesRolledBack: toRollBack,
       entriesApplied: toRollForward,
+      // activeLog is never empty here: rollForward always appends the
+      // canonical divergent suffix (toRollForward > 0 in this branch), so
+      // the `: 0` fallbacks below are unreachable dead code.
+      /* c8 ignore next */
       newLogStartIndex: activeLog.length > 0 ? activeLog[0].index : 0,
+      /* c8 ignore next */
       newLogEndIndex: activeLog.length > 0 ? activeLog[activeLog.length - 1].index : 0,
     };
   }
