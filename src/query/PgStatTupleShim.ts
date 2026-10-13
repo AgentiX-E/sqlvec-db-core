@@ -113,6 +113,8 @@ export class PgStatTupleShim {
     const tableLen = pageCount * DEFAULT_PAGE_SIZE;
     const tupleLen = rowCount * 128; // approximate: 128 bytes per tuple
     const freeSpace = tableLen - tupleLen;
+    /* c8 ignore next 2 -- pageCount is clamped to >= 1 above, so tableLen is
+     * always >= DEFAULT_PAGE_SIZE (8192) and the `: 0` branch is unreachable. */
     const tuplePercent = tableLen > 0
       ? Math.min(100, Math.max(0, (tupleLen / tableLen) * 100))
       : 0;
