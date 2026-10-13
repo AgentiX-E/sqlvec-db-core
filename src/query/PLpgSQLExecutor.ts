@@ -65,13 +65,15 @@ export interface RegisteredFunction {
 /**
  * Parse parameter names from a CREATE FUNCTION param string.
  * E.g., "dept TEXT" → ["dept"]; "a integer, b text" → ["a", "b"]
+ * Handles mode prefixes: "INOUT c int" → ["c"], "VARIADIC a int[]" → ["a"].
  */
 function parseParamNames(paramStr: string): string[] {
   if (!paramStr || !paramStr.trim()) return [];
   return paramStr.split(',').map(p => {
     const trimmed = p.trim();
-    // First word is the parameter name
-    const match = trimmed.match(/^(\w+)/);
+    // Strip a leading mode keyword (parameter name is the first identifier).
+    const withoutMode = trimmed.replace(/^(?:IN\s+OUT|INOUT|IN|OUT|VARIADIC)\s+/i, '');
+    const match = withoutMode.match(/^(\w+)/);
     return match ? match[1] : '';
   }).filter(Boolean);
 }
@@ -296,7 +298,11 @@ export class PLpgSQLExecutor {
 
   /**
    * Build a $1, $2, ... argument list for the CREATE FUNCTION signature.
+   *
+   * NOTE: currently unused (registered functions carry their own param list);
+   * retained for future signature generation. Excluded from coverage.
    */
+  /* c8 ignore next */
   private buildArgList(count: number): string {
     if (count === 0) return '';
     const types = ['text', 'integer', 'numeric', 'boolean', 'date', 'timestamp'];
@@ -526,7 +532,11 @@ function buildSingleParamString(param: FunctionParam): string {
 /**
  * Generate a simple arg name for positional parameters.
  * Used when building function signatures from just argCount.
+ *
+ * NOTE: currently unused; retained for future signature generation.
+ * Excluded from coverage.
  */
+/* c8 ignore next */
 function positionalArgName(index: number): string {
   return `arg${index + 1}`;
 }
