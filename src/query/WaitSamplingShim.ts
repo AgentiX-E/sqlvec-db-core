@@ -120,6 +120,26 @@ export class WaitSamplingShim {
   }
 
   /**
+   * Merge a wait state into an activity entry, preserving any other fields
+   * (e.g. query, query_start) that may already be tracked for the PID.
+   *
+   * Unlike {@link recordLockWait}, this does not replace the whole entry, so a
+   * session that was already recorded as active does not lose its query when a
+   * lock wait is later detected.
+   */
+  private updateWaitState(pid: number, type: WaitEventType, event: string | null): void {
+    const existing = this.activities.get(pid) || {};
+    this.activities.set(pid, {
+      ...existing,
+      pid,
+      wait_event_type: type,
+      wait_event: event,
+      state: 'active',
+      wait_start: existing.wait_start ?? Date.now(),
+    });
+  }
+
+  /**
    * Clear wait state for a PID (resolved wait).
    */
   clearWait(pid: number): void {
@@ -157,10 +177,9 @@ export class WaitSamplingShim {
             const pid = parseInt(sessionId.replace(/\D/g, ''), 10) || 0;
             if (pid > 0) {
               seenPids.add(pid);
-              // Record if not already tracked or if resolving an existing record
-              if (!this.activities.has(pid)) {
-                this.recordLockWait(pid, 'tuple');
-              }
+              // Always reflect the lock wait, but preserve any existing fields
+              // (query, query_start) via a merge instead of overwriting.
+              this.updateWaitState(pid, 'Lock', 'tuple');
             }
           }
         }
@@ -171,9 +190,7 @@ export class WaitSamplingShim {
             const pid = parseInt(wi.sessionId.replace(/\D/g, ''), 10) || 0;
             if (pid > 0 && !seenPids.has(pid)) {
               seenPids.add(pid);
-              if (!this.activities.has(pid)) {
-                this.recordLockWait(pid, wi.lockKey || 'tuple');
-              }
+              this.updateWaitState(pid, 'Lock', wi.lockKey || 'tuple');
             }
           }
         }
@@ -187,7 +204,7 @@ export class WaitSamplingShim {
             if (!li.granted) {
               const pid = parseInt(li.sessionId.replace(/\D/g, ''), 10) || 0;
               if (pid > 0) {
-                this.recordLockWait(pid, li.mode?.toLowerCase() || 'tuple');
+                this.updateWaitState(pid, 'Lock', li.mode?.toLowerCase() || 'tuple');
                 seenPids.add(pid);
               }
             }
