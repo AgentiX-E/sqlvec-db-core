@@ -107,9 +107,9 @@ export class PgStatReplicationShim {
       const secondsSinceHeartbeat = millisSinceHeartbeat / 1000;
 
       // Estimate lag from heartbeat delta
-      const writeLag = secondsSinceHeartbeat;
-      const flushLag = secondsSinceHeartbeat + 0.05; // slight additional delay
-      const replayLag = secondsSinceHeartbeat + 0.1;  // replay always trails
+      let writeLag = secondsSinceHeartbeat;
+      let flushLag = secondsSinceHeartbeat + 0.05; // slight additional delay
+      let replayLag = secondsSinceHeartbeat + 0.1;  // replay always trails
 
       // Determine sync_state from SyncReplicationManager if available
       let syncState: 'sync' | 'async' | 'quorum' | 'potential' = 'async';
@@ -146,7 +146,9 @@ export class PgStatReplicationShim {
             const realLagSec = realLagMs / 1000;
             // Only override if the real lag looks reasonable
             if (realLagMs >= 0 && realLagMs < 3600000) { // < 1h
-              Object.assign(rows.length > 0 ? rows[rows.length - 1] : {}, {});
+              writeLag = realLagSec;
+              flushLag = realLagSec;
+              replayLag = realLagSec;
             }
           }
         }
