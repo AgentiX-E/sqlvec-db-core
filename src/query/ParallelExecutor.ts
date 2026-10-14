@@ -463,12 +463,17 @@ export class ParallelExecutor {
       }
 
       // Worker threw an unhandled exception (e.g. Piscina internal error)
+      const reason = result.reason;
+      const reasonMessage =
+        typeof reason === 'object' && reason !== null && typeof reason.message === 'string'
+          ? reason.message
+          : undefined;
       return {
         rows: [],
         rowCount: 0,
         shardId: task.shardId,
         queryTimeMs: 0,
-        error: result.reason?.message || String(result.reason || 'Unknown worker error'),
+        error: reasonMessage || (typeof reason === 'string' ? reason : 'Unknown worker error'),
       };
     });
 
