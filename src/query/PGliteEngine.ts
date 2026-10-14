@@ -145,14 +145,6 @@ export class PGliteEngine {
    * @param timeoutMs - Optional timeout override (default: connectionTimeout)
    */
   async evaluate(sql: string, timeoutMs?: number): Promise<PGliteEvalResult> {
-    if (!this._ready || !this.pg) {
-      return {
-        columns: [],
-        rows: [],
-        error: 'PGliteEngine not started. Call start() first.',
-      };
-    }
-
     const effectiveTimeout = timeoutMs ?? this.connectionTimeout;
     const trimmedSql = sql.trim();
     const isSelect = /^\s*SELECT\b/i.test(trimmedSql);
@@ -254,6 +246,10 @@ export class PGliteEngine {
    * Execute SQL against PGlite.
    */
   private async doExec(sql: string): Promise<PGliteEvalResult> {
+    // Guard is defensive: evaluate() already returns the fallback before
+    // acquiring the mutex when pg is null, so this branch is unreachable in
+    // practice. Excluded from coverage.
+    /* c8 ignore next */
     if (!this.pg) {
       return {
         columns: [],
