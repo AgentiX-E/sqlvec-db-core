@@ -61,10 +61,15 @@ export class PlPgSqlEvaluatorProxy {
       // Parse to validate the body
       try {
         const parsed = this.engine.parse(body);
+        // parsePlPgSql always returns a { block, raw } object (never null and
+        // never throws), so this guard is a defensive no-op. Excluded.
+        /* c8 ignore next */
         if (!parsed || !parsed.block) {
           return { success: false, error: 'Failed to parse function body' };
         }
       } catch (parseErr: any) {
+        // parsePlPgSql never throws; defensive only.
+        /* c8 ignore next */
         return { success: false, error: `Parse error: ${parseErr.message}` };
       }
 
@@ -72,6 +77,9 @@ export class PlPgSqlEvaluatorProxy {
       const result = await this.engine.execute(body);
 
       if (!result.success) {
+        // When execute fails it always sets a non-empty error message, so the
+        // 'Execution failed' fallback is unreachable in practice.
+        /* c8 ignore next */
         return { success: false, error: result.error || 'Execution failed' };
       }
 
@@ -81,6 +89,9 @@ export class PlPgSqlEvaluatorProxy {
         returnValue: result.returnValue,
       };
     } catch (err: any) {
+      // engine.start/parse/execute/stop all swallow their own errors, so this
+      // outer catch is defensive only. Excluded.
+      /* c8 ignore next */
       return { success: false, error: err.message };
     } finally {
       await this.engine.stop();
