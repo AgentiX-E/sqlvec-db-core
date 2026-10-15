@@ -198,4 +198,8 @@ export function syncShimToPgCatalog(): void {
       });
     }
   }
+
+  // Reset the shim counters after syncing so a subsequent sync does not
+  // re-add the same accumulated counts (idempotent incremental sync).
+  pgCatalogShim.reset();
 }
