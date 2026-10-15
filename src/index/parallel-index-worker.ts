@@ -138,13 +138,17 @@ export default function buildSubIndexWorker(task: IndexWorkerTask): IndexWorkerR
     const rowCount = insertInTransaction();
 
     // ── Step 5: Create a SQLite index on the part table for fast lookups ──
-    const partIdxName = `__idx_${indexName}__part_${workerId}_idx`;
-    const uniqueKeyword = unique ? 'UNIQUE' : '';
-    const indexCols = dedupColumns.map((c) => `[${c}]`).join(', ');
+    // Skip when there are no non-rowid columns (all requested columns were
+    // rowid aliases), avoiding an invalid empty-column index statement.
+    if (dedupColumns.length > 0) {
+      const partIdxName = `__idx_${indexName}__part_${workerId}_idx`;
+      const uniqueKeyword = unique ? 'UNIQUE' : '';
+      const indexCols = dedupColumns.map((c) => `[${c}]`).join(', ');
 
-    db.exec(
-      `CREATE ${uniqueKeyword} INDEX IF NOT EXISTS [${partIdxName}] ON [${partTableName}] (${indexCols})`,
-    );
+      db.exec(
+        `CREATE ${uniqueKeyword} INDEX IF NOT EXISTS [${partIdxName}] ON [${partTableName}] (${indexCols})`,
+      );
+    }
 
     const timeMs = performance.now() - start;
 
