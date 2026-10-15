@@ -91,8 +91,14 @@ export default function buildSubIndexWorker(task: IndexWorkerTask): IndexWorkerR
     }
 
     // ── Step 3: Generate column name list with deduplication ──────────
-    // Ensure rowid is always present (for the PK)
-    const dedupColumns = Array.from(new Set(columns));
+    // Ensure rowid is always present (for the PK), while excluding any
+    // explicit rowid alias (`rowid` / `_rowid_` / `oid`) from the indexed
+    // columns so the generated table does not declare a duplicate column
+    // (which SQLite rejects with "duplicate column name").
+    const ROWID_ALIASES = new Set(['rowid', '_rowid_', 'oid']);
+    const dedupColumns = Array.from(new Set(columns)).filter(
+      (col) => !ROWID_ALIASES.has(col.toLowerCase()),
+    );
     const subIndexColumns = ['rowid', ...dedupColumns];
 
     // Build the CREATE TABLE statement with proper types
@@ -156,6 +162,7 @@ export default function buildSubIndexWorker(task: IndexWorkerTask): IndexWorkerR
       success: false,
       workerId,
       rowCount: 0,
+      /* c8 ignore next -- String(err) is defensive: every throwable here is an Error with a .message */
       error: err.message || String(err),
       timeMs,
     };
