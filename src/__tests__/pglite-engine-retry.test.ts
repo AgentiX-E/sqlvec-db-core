@@ -1,10 +1,12 @@
 import { describe, it, expect, vi } from 'vitest';
 
-// Mock PGlite to throw on construction (and ready rejection), exercising the
-// start() retry / backoff / exhaustion paths without real WASM.
+// Mock PGlite to throw on construction, exercising the start() retry /
+// backoff / exhaustion paths without real WASM. The `ready` field is omitted:
+// construction throws before it could ever be read, and a `ready =
+// Promise.reject(...)` class field would emit an unhandled rejection that fails
+// the run under --pool=forks.
 vi.mock('@electric-sql/pglite', () => ({
   PGlite: class {
-    ready = Promise.reject(new Error('ready rejected'));
     constructor() {
       throw new Error('cannot init pglite');
     }
