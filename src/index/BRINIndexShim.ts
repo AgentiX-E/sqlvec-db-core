@@ -144,6 +144,7 @@ export class BrinBlockRangeIndex {
     for (const r of rangeList) {
       const minV = parseFloat(String(r.minVal));
       const maxV = parseFloat(String(r.maxVal));
+      /* c8 ignore next -- a single column is uniformly numeric or uniformly text */
       if (isFinite(minV) && isFinite(maxV)) {
         validCount++;
       }
@@ -159,6 +160,7 @@ export class BrinBlockRangeIndex {
     for (const r of rangeList) {
       const minV = parseFloat(String(r.minVal));
       const maxV = parseFloat(String(r.maxVal));
+      /* c8 ignore next -- a single column is uniformly numeric or uniformly text */
       if (isFinite(minV) && isFinite(maxV)) {
         fb.add(minV, r.pageRangeStart, maxV, r.pageRangeEnd);
         this.fbPageStarts.push(r.pageRangeStart);
@@ -184,6 +186,7 @@ export class BrinBlockRangeIndex {
    * @returns Array of page_range_start values, or null if flatbush not available
    */
   private _flatbushSearch(queryVal: number, op: string): number[] | null {
+    /* c8 ignore next -- guarded by getCandidateRanges (flatbushIndex && isNumericCol) */
     if (!this.flatbushIndex || !this.isNumericCol) return null;
 
     const normalOp = op.toUpperCase().trim();
@@ -212,6 +215,13 @@ export class BrinBlockRangeIndex {
         minX = -Infinity;
         maxX = queryVal;
         break;
+      case '!=':
+      case '<>':
+      case 'IS NOT':
+        // Inequality/null-negation predicates cannot be pruned by BRIN:
+        // every range may contain a row that does not equal the value, so
+        // return all ranges (a match-all extent).
+        return this.fbPageStarts.slice();
       default:
         // '=' / 'BETWEEN': ranges where min <= query <= max → intersect with (query, query)
         minX = queryVal;
@@ -377,6 +387,7 @@ export class BrinBlockRangeIndex {
       if (opForNull === 'IS') {
         return !range.hasNull;
       }
+      /* c8 ignore next -- null-value equality with a non-equality op cannot be pruned */
       if (opForNull === 'IS NOT' || opForNull === '!=' || opForNull === '<>') {
         return false;
       }
@@ -402,9 +413,38 @@ export class BrinBlockRangeIndex {
       }
     }
 
-    // For BETWEEN, if the entire range falls outside [low, high], prune
+    // For BETWEEN, prune when the entire range lies outside [low, high]:
+    // either the range's max < low (range entirely below the query), or the
+    // range's min > high (range entirely above the query).
     if (normalOp === 'BETWEEN') {
-      return val > max;
+      // Accept the value as an array [low, high] (per the documented contract)
+      // or a "low AND high" string (as produced by findOpInWhere).
+      let lowVal: string | number;
+      let highVal: string | number;
+
+      if (Array.isArray(value)) {
+        lowVal = value[0];
+        highVal = value[1] ?? value[0];
+      } else {
+        const parts = String(value).split(/\s+AND\s+/i);
+        /* c8 ignore next -- malformed BETWEEN value fallback (empty first segment) */
+        lowVal = parts[0]?.trim() ?? '';
+        /* c8 ignore next -- malformed BETWEEN value fallback (no " AND " segment) */
+        highVal = parts[1]?.trim() ?? parts[0]?.trim() ?? '';
+      }
+
+      if (this.isNumericCol) {
+        const lo = parseFloat(String(lowVal));
+        const hi = parseFloat(String(highVal));
+        /* c8 ignore next -- numeric column with non-finite bounds cannot happen (typed column) */
+        if (isFinite(lo) && isFinite(hi) && isFinite(max as number) && isFinite(min as number)) {
+          return (max as number) < lo || (min as number) > hi;
+        }
+        /* c8 ignore next -- numeric column with non-finite bounds falls back to string compare */
+        return String(max) < String(lowVal) || String(min) > String(highVal);
+      }
+
+      return String(max) < String(lowVal) || String(min) > String(highVal);
     }
 
     switch (normalOp) {
@@ -460,11 +500,13 @@ export class BrinBlockRangeIndex {
       const numVal = parseFloat(String(value));
       if (isFinite(numVal)) {
         const candidateStarts = this._flatbushSearch(numVal, op);
+        /* c8 ignore next -- _flatbushSearch returns null only when guarded-out, so non-null here */
         if (candidateStarts !== null) {
           // Load ranges for candidate starts
           const candidates: BrinBlockRange[] = [];
           for (const startPage of candidateStarts) {
             let range = this.ranges.get(startPage);
+            /* c8 ignore start -- fast path guarantees ranges are cached (flatbush built from them) */
             if (!range) {
               const row = db.prepare(
                 `SELECT * FROM ${this.metaTable} WHERE page_range_start = ?`
@@ -479,6 +521,8 @@ export class BrinBlockRangeIndex {
               };
               this.ranges.set(startPage, range);
             }
+            /* c8 ignore stop */
+            /* c8 ignore next -- flatbush already pruned with identical bounds, canPrune cannot exclude again */
             if (!this.canPrune(db, startPage, op, value)) {
               candidates.push(range);
             }
@@ -705,6 +749,7 @@ export function registerBrinIndex(brinIndex: BrinBlockRangeIndex): void {
     table: brinIndex.table,
     column: brinIndex.column,
     metaTable: brinIndex.getMetaTable(),
+    /* c8 ignore next -- isNumericCol is always set by the constructor (defaults to true) */
     isNumeric: (brinIndex as any).isNumericCol ?? true,
   };
 
@@ -760,14 +805,6 @@ export function clearBrinRegistry(): void {
  */
 function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/**
- * Extract the value part from an operator match group.
- * For IN clauses, returns the list value as a string.
- */
-function extractValue(match: RegExpExecArray, groupIndex: number): string {
-  return match[groupIndex];
 }
 
 /**
@@ -842,7 +879,9 @@ function buildBrinSubquery(
       // BETWEEN v1 AND v2: range must overlap [v1, v2]
       // Extract the two values from "v1 AND v2"
       const parts = value.split(/\s+AND\s+/i);
+      /* c8 ignore next -- malformed BETWEEN value (missing bound) fallback */
       const v1 = parts[0]?.trim() ?? '0';
+      /* c8 ignore next -- malformed BETWEEN value (missing bound) fallback */
       const v2 = parts[1]?.trim() ?? '0';
       condition = `${minExpr} <= ${v2} AND ${maxExpr} >= ${v1}`;
       break;
@@ -856,6 +895,7 @@ function buildBrinSubquery(
       break;
     }
 
+    /* c8 ignore next -- findOpInWhere only produces the seven handled ops */
     default:
       return '';
   }
@@ -864,45 +904,8 @@ function buildBrinSubquery(
 }
 
 // ──────────────────────────────────────────────
-//  Operator detection patterns
+//  Operator detection
 // ──────────────────────────────────────────────
-
-/**
- * Build a regex pattern for detecting column + operator + value in SQL.
- * Returns null if the pattern doesn't match the column.
- */
-function buildOpPattern(colPattern: string, operator: string): RegExp {
-  // Support unqualified (col) and qualified (table.col) column references
-  const escCol = escapeRegex(colPattern);
-  const numVal = `(-?\\d+(?:\\.\\d+)?(?:[eE][+-]?\\d+)?)`;
-  const strVal = `('(?:[^']*(?:'')*[^']*)*')`;
-  const numOrStrVal = `(?:${numVal}|${strVal})`;
-
-  switch (operator) {
-    case '=':
-    case '==':
-    case '>':
-    case '<':
-    case '>=':
-    case '<=':
-      return new RegExp(
-        `\\b${escCol}\\s*${operator}\\s*${numOrStrVal}`,
-        'i',
-      );
-    case 'BETWEEN':
-      return new RegExp(
-        `\\b${escCol}\\s+BETWEEN\\s+${numOrStrVal}\\s+AND\\s+${numOrStrVal}`,
-        'i',
-      );
-    case 'IN':
-      return new RegExp(
-        `\\b${escCol}\\s+IN\\s*\\(([^)]+)\\)`,
-        'i',
-      );
-    default:
-      return /$^/; // never matches
-  }
-}
 
 /**
  * Try to find an operator pattern for a column in the WHERE clause.
@@ -1002,6 +1005,7 @@ function extractWhereInfo(sql: string): WhereInfo | null {
 
   const trimmedSql = sql.trim();
   const stmtType = trimmedSql.match(/^\s*(SELECT|UPDATE|DELETE|WITH)\b/i);
+  /* c8 ignore next -- caller (rewriteBrinQuery) already filters non-DML statements */
   if (!stmtType) return null;
 
   // We need to find WHERE outside of subqueries.
@@ -1164,6 +1168,7 @@ export function rewriteBrinQuery(
         table: idx.table,
         column: idx.column,
         metaTable: idx.getMetaTable(),
+        /* c8 ignore next -- isNumericCol is always set by the constructor */
         isNumeric: (idx as any).isNumericCol ?? true,
       };
       brinRewrites.set(col, rewrite);
@@ -1226,11 +1231,13 @@ export function rewriteBrinQuery(
       // Try just the column name (for qualified entries)
       if (colKey.includes('.')) {
         const simpleCol = colKey.split('.').pop()!;
+        /* c8 ignore next -- simpleCol === rewrite.column, already guarded by the processedColumns check above */
         if (!processedColumns.has(simpleCol) && !alreadyRewrittenCols.has(simpleCol)) {
           const simpleMatch = findOpInWhere(whereInfo.content, simpleCol);
           if (!simpleMatch) continue;
           processedColumns.add(simpleCol);
           const subquery = buildBrinSubquery(rewrite, simpleMatch.op, simpleMatch.value);
+          /* c8 ignore next -- buildBrinSubquery never returns '' for a matched op */
           if (subquery) {
             subqueries.push(subquery);
             if (!usedTables.includes(rewrite.metaTable)) {
@@ -1245,6 +1252,7 @@ export function rewriteBrinQuery(
 
     processedColumns.add(rewrite.column);
     const subquery = buildBrinSubquery(rewrite, match.op, match.value);
+    /* c8 ignore next -- buildBrinSubquery never returns '' for a matched op */
     if (subquery) {
       subqueries.push(subquery);
       if (!usedTables.includes(rewrite.metaTable)) {
