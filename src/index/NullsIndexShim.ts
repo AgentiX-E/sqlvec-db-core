@@ -87,8 +87,9 @@ function stripNullsClauses(sql: string): string {
   // Pass 1: `DESC NULLS FIRST` → `DESC`  /  `ASC NULLS LAST` → `ASC`
   let result = sql.replace(SORT_AND_NULLS_PATTERN, '$1');
 
-  // Pass 2: Bare `NULLS FIRST` or `NULLS LAST` → empty string
-  result = result.replace(NULLS_CLAUSE_PATTERN, '');
+  // Pass 2: Bare `NULLS FIRST` or `NULLS LAST` → removed, consuming the
+  // preceding whitespace so we do not leave a dangling space (e.g. `col `).
+  result = result.replace(/\s+NULLS\s+(FIRST|LAST)\b/gi, '');
 
   // Clean up any double spaces left by removals
   return result.replace(/\s{2,}/g, ' ').trim();
