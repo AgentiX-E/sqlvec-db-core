@@ -230,23 +230,45 @@ export function extractDDLTag(sql: string): string {
 
   const prefix = match[1].trim().toUpperCase();
 
-  // Extract the object type (second word, or first two words)
+  // Normalize `CREATE OR REPLACE` to `CREATE` — OR REPLACE is a modifier, not
+  // part of the DDL command tag (the catalog maps `CREATE VIEW`, not
+  // `CREATE OR REPLACE VIEW`).
+  const normalizedPrefix = prefix.replace(/^CREATE\s+OR\s+REPLACE/, 'CREATE');
+
+  // Single-keyword commands (TRUNCATE, COMMENT, GRANT, REVOKE, RENAME,
+  // SECURITY, ANALYZE, VACUUM) carry their own tag; the word that follows is
+  // an object name, not an object type. Only CREATE/ALTER/DROP take a `<cmd>
+  // <objtype>` tag.
+  if (
+    normalizedPrefix !== 'CREATE' &&
+    normalizedPrefix !== 'ALTER' &&
+    normalizedPrefix !== 'DROP' &&
+    !normalizedPrefix.startsWith('CREATE ')
+  ) {
+    return normalizedPrefix;
+  }
+
+  // Extract the object type (second word)
   const rest = trimmed.slice(match[0].length).trim();
   const objectTypeMatch = rest.match(/^(\w+)/);
-  if (!objectTypeMatch) return prefix;
+  // The prefix regex already requires a trailing `\s+`, which is stripped by the
+  // outer `trim()`, so `rest` always begins with a word char for a matched DDL
+  // command; `objectTypeMatch` is never null here.
+  /* c8 ignore next */
+  if (!objectTypeMatch) return normalizedPrefix;
 
   const objectType = objectTypeMatch[1].toUpperCase();
 
   // Check for multi-word patterns like "CREATE TABLE AS"
-  if (prefix === 'CREATE') {
-    // Check for CREATE TABLE AS / CREATE VIEW AS
+  if (normalizedPrefix.startsWith('CREATE')) {
+    // Check for CREATE TABLE AS / CREATE VIEW AS (no explicit table name)
     const restAfterType = rest.slice(objectTypeMatch[0].length).trim();
     if (/^AS\s/i.test(restAfterType)) {
       return `CREATE ${objectType} AS`;
     }
   }
 
-  return `${prefix} ${objectType}`;
+  return `${normalizedPrefix} ${objectType}`;
 }
 
 /**
@@ -261,6 +283,9 @@ export function parseTagFilter(sql: string): string[] | undefined {
 
   // Extract individual quoted tags
   const tagMatches = match[1].match(/'([^']*)'/g);
+  // The WHEN TAG IN pattern requires at least one quoted tag, so `match[1]`
+  // always contains a quoted string and `tagMatches` is never null.
+  /* c8 ignore next */
   if (!tagMatches) return undefined;
 
   return tagMatches.map((t) => t.replace(/'/g, '').trim().toUpperCase());
@@ -352,6 +377,9 @@ export function extractDropTargets(sql: string): Array<{ schema: string; name: s
   // Split by comma for multi-object DROP
   const parts = afterType.split(/\s*,\s*/).map((p) => p.replace(/[();\s]+$/, '').trim()).filter(Boolean);
 
+  // A matched type prefix (`DROP TYPE\s+`) guarantees at least one trailing
+  // word char survives `trim()`, so `parts` is never empty here.
+  /* c8 ignore next */
   if (parts.length === 0) return [{ schema: 'public', name: 'unknown' }];
 
   return parts.map((part) => {
@@ -422,7 +450,9 @@ export class DDLTriggerManager {
     this.triggers.set(name, trigger);
 
     if (typeof callback === 'function') {
-      this.callbacks.set(name, callback);
+      // Key the callback map by the trigger's stored callback identifier
+      // (`function_${name}`) so firing by `trigger.callback` resolves it.
+      this.callbacks.set(trigger.callback, callback);
     }
 
     this.logger.info({ name, event, tags: trigger.tags }, 'DDL trigger created');
@@ -516,7 +546,7 @@ export class DDLTriggerManager {
 
       this.logger.info({ trigger: trigger.name, sql: sql.substring(0, 100) }, 'DDL trigger (before)');
 
-      const callback = this.callbacks.get(trigger.name);
+      const callback = this.callbacks.get(trigger.callback);
       if (callback) {
         try {
           callback(sql, 'ddl_command_start');
@@ -557,7 +587,7 @@ export class DDLTriggerManager {
         'DDL trigger (after)',
       );
 
-      const callback = this.callbacks.get(trigger.name);
+      const callback = this.callbacks.get(trigger.callback);
       if (callback) {
         try {
           callback(sql, 'ddl_command_end');
@@ -628,7 +658,7 @@ export class DDLTriggerManager {
 
       // Call with standard DDLTriggerCallback signature (sql, event)
       // Dropped objects accessible via pgEventTriggerDroppedObjects()
-      const callback = this.callbacks.get(trigger.name);
+      const callback = this.callbacks.get(trigger.callback);
       if (callback) {
         try {
           callback(sql, 'sql_drop');
