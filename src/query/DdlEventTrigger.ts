@@ -220,6 +220,9 @@ export class DdlEventTrigger {
     let tags: string[] | undefined;
     const tagMatch = trimmed.match(/WHEN\s+TAG\s+IN\s*\(\s*('[^']*'(?:\s*,\s*'[^']*')*)\s*\)/i);
     if (tagMatch) {
+      // tagMatch[1] always contains at least one quoted tag, so the `.map(...)`
+      // result is a non-empty array and the `|| undefined` fallback never applies.
+      /* c8 ignore next */
       tags = tagMatch[1].match(/'([^']*)'/g)?.map((t) => t.replace(/'/g, '')) || undefined;
     }
 
@@ -254,6 +257,9 @@ export class DdlEventTrigger {
 
     // Remove from event listeners
     const listeners = this.eventListeners.get(descriptor.event);
+    // createTrigger always adds the descriptor's functionName to the listener
+    // set for its event, so `listeners` is always present for a registered trigger.
+    /* c8 ignore next */
     if (listeners) {
       listeners.delete(descriptor.functionName);
       if (listeners.size === 0) {
@@ -537,6 +543,9 @@ export class DdlEventTrigger {
     for (const descriptor of this.triggers.values()) {
       if (descriptor.functionName === callbackName) return descriptor;
     }
+    // Listener names can only originate from createTrigger, which also registers
+    // the matching descriptor, so no match here is unreachable in normal flow.
+    /* c8 ignore next */
     return undefined;
   }
 
