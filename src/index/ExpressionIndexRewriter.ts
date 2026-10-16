@@ -208,6 +208,9 @@ function isArithmeticExpr(text: string): boolean {
  */
 function processColumn(col: string): string {
   const trimmed = col.trim();
+  // splitColumnList never emits an empty fragment (it trims and skips empties),
+  // so this guard is unreachable defensive hardening.
+  /* c8 ignore next */
   if (trimmed.length === 0) return trimmed;
 
   // ── Expression column detection ───────────────────────────────
@@ -233,6 +236,13 @@ function processColumn(col: string): string {
   expression = trimmed.substring(1, closeIdx).trim();
   remainder = trimmed.substring(closeIdx + 1);
 
+  // An empty parenthesised fragment (e.g. `()`) has no inner expression to
+  // unwrap; return it unchanged rather than collapsing it to an empty column,
+  // which would produce an invalid `CREATE INDEX ... ON t ()` statement.
+  if (expression.length === 0) {
+    return trimmed;
+  }
+
   // ── Enhanced: Detect if the inner expression is itself wrapped ─
   // If the inner expression also starts and ends with parens, it may be
   // a function call like `(json_extract(data, '$.key'))`. In that case
@@ -244,13 +254,20 @@ function processColumn(col: string): string {
   // E.g. `((lower(trim(col))))` — unwrap both layers.
   if (expression.startsWith('(')) {
     const innerClose = findMatchingParen(expression, 0);
+    // When the outer findMatchingParen succeeded, the second `(` (which makes
+    // `expression` start with `(`) is necessarily balanced by a `)` before the
+    // outer close, so `innerClose` can never be -1 here.
+    /* c8 ignore next */
     if (innerClose !== -1) {
       // Check if there's another layer.
       const innerContent = expression.substring(1, innerClose).trim();
       const afterInner = expression.substring(innerClose + 1).trim();
-      finalExpr = innerContent + (afterInner ? ' ' + afterInner : '');
-      // Recalculate remainder from the inner level.
-      innerRemainder = remainder ? afterInner + ' ' + remainder : afterInner;
+      // `afterInner` is trailing content between the inner `)` and the outer
+      // `)` (e.g. a modifier). Keep it out of `finalExpr` and instead fold it
+      // into the modifier tail — otherwise it would be emitted twice when the
+      // outer `remainder` is also present.
+      finalExpr = innerContent;
+      innerRemainder = [afterInner, remainder.trim()].filter(Boolean).join(' ');
     }
   }
 
@@ -373,7 +390,7 @@ export function rewriteExpressionIndex(sql: string): ExprIndexResult {
     return { sql, rewritten: false };
   }
 
-  const [fullMatch, prefix, columnList, suffix] = match;
+  const [, prefix, columnList, suffix] = match;
 
   // ── Parse columns ─────────────────────────────────────────
   const originalColumns = splitColumnList(columnList);
@@ -387,16 +404,16 @@ export function rewriteExpressionIndex(sql: string): ExprIndexResult {
   const rewrittenColumns = originalColumns.map((col) => processColumn(col));
 
   // ── Reconstruct SQL ───────────────────────────────────────
+  // The suffix capture group is `(?:\s*;)?\s*` — it can only contain an
+  // optional semicolon and trailing whitespace, never a leading `)`. The
+  // closing parenthesis after the column list is therefore always added here.
   const newColumns = rewrittenColumns.join(', ');
-  let resultSql: string;
-
-  if (suffix.startsWith(';') || suffix.startsWith(')')) {
-    resultSql = prefix + newColumns + ')' + suffix;
-  } else {
-    resultSql = prefix + newColumns + ')' + (suffix || '');
-  }
+  const resultSql = prefix + newColumns + ')' + suffix;
 
   // ── Sanity: emit a warning if output looks problematic ──
+  // processColumn now returns an empty fragment unchanged (never collapses to
+  // an empty column), so this guard is defensive hardening only.
+  /* c8 ignore next */
   if (rewrittenColumns.some((c) => c.length === 0)) {
     logger.warn(
       { original: sql, rewritten: resultSql },
