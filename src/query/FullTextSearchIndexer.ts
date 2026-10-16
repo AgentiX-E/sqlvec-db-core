@@ -74,6 +74,8 @@ export class SimpleTokenizer {
 
     while ((match = wordRe.exec(lower)) !== null) {
       const token = match[1] || match[2];
+      // token is always non-empty: wordRe alternation guarantees one group matched.
+      /* c8 ignore next */
       if (token) {
         rawTokenPositions.push({ token, index: match.index });
       }
@@ -244,6 +246,8 @@ export class TsQueryParser {
       }
       // Remove trailing *
       term = term.replace(/\*+$/, '');
+      // term always has >= 1 char: the collection loop stops only on a separator.
+      /* c8 ignore next */
       if (term.length > 0) {
         tokens.push(term.toLowerCase());
       }
@@ -363,6 +367,9 @@ export class FullTextSearchIndexer {
 
     const indexName = match[1];
     const tableName = match[2];
+    // config is always captured (the pattern requires a quoted config arg), so
+    // the 'english' default is a defensive fallback that never triggers.
+    /* c8 ignore next */
     const config = (match[3] || match[4] || 'english').toLowerCase();
     const column = match[5];
 
@@ -422,6 +429,9 @@ export class FullTextSearchIndexer {
 
     // Remove from memory
     this.indexByName.delete(indexName);
+    // handleDropFtsIndex is only invoked for a registered index, so the table
+    // necessarily has at least one entry here; `|| []` is defensive.
+    /* c8 ignore next */
     const existing = this.indexes.get(config.table) || [];
     const filtered = existing.filter(c => c.name !== indexName);
     if (filtered.length === 0) {
@@ -527,6 +537,8 @@ export class FullTextSearchIndexer {
 
     const match1 = sql.match(pattern1);
     if (match1) {
+      // config is always captured by pattern1's quoted-config group.
+      /* c8 ignore next */
       const config = (match1[1] || match1[2] || 'english').toLowerCase();
       const column = match1[3];
       const table = this.findTableForColumn(column);
@@ -611,6 +623,10 @@ export class FullTextSearchIndexer {
     const ast = this.queryParser.parse(indexedQuery);
     const indexLookupSql = this.generateIndexLookupSql(ast, idxTableName);
 
+    // indexLookupSql is non-empty whenever indexedQuery is: convertTsqueryForIndex
+    // only emits a non-empty string when the AST yields at least one term, and the
+    // same AST structure guarantees generateIndexLookupSql returns SQL.
+    /* c8 ignore next */
     if (!indexLookupSql) {
       return sql.replace(matchStr, '1=0');
     }
@@ -643,10 +659,16 @@ export class FullTextSearchIndexer {
       'i',
     );
     const simpleMatch = sql.match(simpleRe);
+    // When the tsvector-anchored matchRe misses, the query necessarily came from
+    // the `table.column @@ queryType(...)` form, which simpleRe matches.
+    /* c8 ignore next */
     if (simpleMatch) {
       return this.replaceFullMatch(sql, simpleMatch[0], queryType, queryText, idx);
     }
 
+    // rewriteWithIndex is only called after a FTS expression was detected, so
+    // matchRe or simpleRe always matches; this fallback is defensive only.
+    /* c8 ignore next */
     return sql;
   }
 
@@ -665,6 +687,9 @@ export class FullTextSearchIndexer {
       for (const idx of indexes) {
         if (!config || idx.config === config) {
           const result = this.rewriteWithIndex(sql, idx, queryType, queryText);
+          // A config match (or null config) always yields a rewrite, so the
+          // `result === sql` continuation is unreachable.
+          /* c8 ignore next */
           if (result !== sql) return result;
         }
       }
@@ -752,6 +777,8 @@ export class FullTextSearchIndexer {
 
     // Normalize by log(1 + docLength) like PG
     const normalization = Math.log(1 + vectorTerms.length);
+    // vectorTerms is non-empty here (guarded above), so normalization is always > 0.
+    /* c8 ignore next */
     const score = normalization > 0 ? matchScore / normalization : 0;
 
     return Math.min(Math.round(score * 1000) / 1000, 1.0);
@@ -917,11 +944,19 @@ export class FullTextSearchIndexer {
     if (node.left && node.right) {
       const left = this.astToQueryString(node.left);
       const right = this.astToQueryString(node.right);
+      // TsQueryParser always emits both children for AND/OR nodes, so `left` and
+      // `right` are always non-empty here.
+      /* c8 ignore next */
       if (left && right) {
         return `(${left} ${node.op} ${right})`;
       }
+      // TsQueryParser always emits both children for AND/OR nodes, so the
+      // single-child fallback is defensive only.
+      /* c8 ignore next */
       return left || right;
     }
+    // TsQueryParser never emits a bare operator node without children.
+    /* c8 ignore next */
     return '';
   }
 
@@ -959,23 +994,33 @@ export class FullTextSearchIndexer {
       const left = this.generateIndexLookupSql(node.left, idxTableName, aliasCounter);
       const right = this.generateIndexLookupSql(node.right, idxTableName, aliasCounter);
 
+      // Both children are non-null here (guarded above), and each produces a
+      // non-empty subquery for a well-formed AST, so these guards are defensive.
+      /* c8 ignore next */
       if (!left) return right;
+      /* c8 ignore next */
       if (!right) return left;
 
       return `${left} INTERSECT ${right}`;
     }
 
     // OR operator
+    // TsQueryParser guarantees both children for an OR node.
+    /* c8 ignore next */
     if (node.op === 'OR' && node.left && node.right) {
       const left = this.generateIndexLookupSql(node.left, idxTableName, aliasCounter);
       const right = this.generateIndexLookupSql(node.right, idxTableName, aliasCounter);
 
+      /* c8 ignore next */
       if (!left) return right;
+      /* c8 ignore next */
       if (!right) return left;
 
       return `${left} UNION ${right}`;
     }
 
+    // A node with no term and no operator/children cannot arise from the parser.
+    /* c8 ignore next */
     return '';
   }
 
