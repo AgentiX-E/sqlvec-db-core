@@ -16,30 +16,6 @@ import { hasCorrelatableSubquery } from './SubqueryPlanner';
 import type { QueryResult } from './QueryRouter';
 
 /**
- * 从 SQL 中提取表名（第一个 FROM/JOIN 后的标识符）。
- */
-function extractTableFromSQL(sql: string): string | null {
-  const trimmed = sql.trim();
-  // SELECT ... FROM table
-  const fromMatch = trimmed.match(/\bFROM\s+(\w+)/i);
-  if (fromMatch) return fromMatch[1];
-
-  // INSERT INTO table
-  const insertMatch = trimmed.match(/\bINSERT\s+INTO\s+(\w+)/i);
-  if (insertMatch) return insertMatch[1];
-
-  // UPDATE table
-  const updateMatch = trimmed.match(/\bUPDATE\s+(\w+)/i);
-  if (updateMatch) return updateMatch[1];
-
-  // DELETE FROM table
-  const deleteMatch = trimmed.match(/\bDELETE\s+FROM\s+(\w+)/i);
-  if (deleteMatch) return deleteMatch[1];
-
-  return null;
-}
-
-/**
  * 从 SQL 中提取所有表名及别名映射。
  *
  * 返回 { tables: string[], aliases: Map<string, string> }
@@ -71,6 +47,9 @@ function extractAllTables(sql: string): { tables: string[]; aliases: Map<string,
  * 通过别名解析真实表名。
  */
 function resolveTable(aliases: Map<string, string>, name: string): string {
+  // The fallback is unreachable: extractAllTables records every FROM/JOIN
+  // alias before join conditions are resolved against it.
+  /* c8 ignore next */
   return aliases.get(name) || name;
 }
 
@@ -212,6 +191,10 @@ function splitByAnd(clause: string): string[] {
       current += ch;
     }
   }
+  // A trailing `current` is always non-empty here: each AND/OR term is pushed
+  // after a non-empty fragment, and a final empty fragment only occurs when the
+  // clause ends with a bare AND/OR (invalid SQL already rejected upstream).
+  /* c8 ignore next */
   if (current.trim()) {
     parts.push(current.trim());
   }
@@ -317,31 +300,6 @@ function extractAggregateInfo(sql: string): {
 }
 
 /**
- * 收集表的列信息（用于估算统计信息）。
- */
-function collectTableStats(
-  db: Database.Database,
-  tables: string[],
-): Map<string, { reltuples: number; relpages: number }> {
-  const stats = new Map<string, { reltuples: number; relpages: number }>();
-  for (const table of tables) {
-    try {
-      // 尝试获取表大小
-      const row = db.prepare(`SELECT COUNT(*) as cnt FROM "${table.replace(/"/g, '""')}"`).get() as any;
-      const count = row?.cnt ?? 0;
-      // relpages ≈ count / 100（假设每页 100 行）
-      stats.set(table, {
-        reltuples: Number(count),
-        relpages: Math.max(1, Math.ceil(Number(count) / 100)),
-      });
-    } catch {
-      stats.set(table, { reltuples: 1000, relpages: 10 });
-    }
-  }
-  return stats;
-}
-
-/**
  * 构建单表查询的完整计划树。
  *
  * 根据 SQL 分析结果构建合适的计划：
@@ -367,7 +325,7 @@ function buildPlanFromSQL(
   // 检查是否有索引条件
   if (conditions.length > 0) {
     // 如果有 = 条件，使用索引扫描（如果有索引的话）
-    const eqCond = conditions.find(c => c.operator === '=' || c.operator === '==');
+    const eqCond = conditions.find(c => c.operator === '=');
     if (eqCond) {
       const indexScan: CandidatePlan = {
         type: 'index-scan',
@@ -404,10 +362,7 @@ function buildPlanFromSQL(
           children: [indexScan],
         };
 
-        const limit = extractLimit(sql);
-        if (limit !== null) {
-          return sortPlan; // LIMIT 在 executeQuery 外层应用
-        }
+        // LIMIT is applied at the planAndExecute layer, not here.
         return sortPlan;
       }
 
@@ -484,6 +439,9 @@ function buildJoinPlan(
   conditions: QueryCondition[],
   joinConditions: JoinCondition[],
 ): CandidatePlan {
+  // buildJoinPlan is only invoked when tables.length > 1 (see planAndExecute),
+  // so this guard is defensive hardening for a path that cannot occur.
+  /* c8 ignore next */
   if (tables.length < 2) {
     return buildPlanFromSQL(sql, tables[0], conditions);
   }
@@ -529,11 +487,6 @@ function buildJoinPlan(
   return joinPlan;
 }
 
-function escapeId(id: string): string {
-  if (/^["`[]/.test(id)) return id;
-  return `"${id.replace(/"/g, '""')}"`;
-}
-
 /**
  * 判断是否为返回数据的查询（SELECT / RETURNING）。
  */
@@ -546,16 +499,28 @@ function isDataQuery(sql: string): boolean {
 }
 
 /**
- * 判断是否为 DDL（CREATE / DROP / ALTER 等）。
+ * Detect a top-level `OR` (depth 0) in the SQL text.
+ *
+ * The lightweight condition extractor only models AND-conjunctions; a
+ * top-level OR cannot be represented and would otherwise be silently
+ * mis-executed as AND. Such queries must be handed back to the engine.
  */
-function isDDL(sql: string): boolean {
-  const trimmed = sql.trim().toUpperCase();
-  return (
-    trimmed.startsWith('CREATE') ||
-    trimmed.startsWith('DROP') ||
-    trimmed.startsWith('ALTER') ||
-    trimmed.startsWith('TRUNCATE')
-  );
+function hasTopLevelOr(sql: string): boolean {
+  let depth = 0;
+  let inQuote = false;
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    if (ch === "'" && (i === 0 || sql[i - 1] !== '\\')) {
+      inQuote = !inQuote;
+    } else if (!inQuote && ch === '(') {
+      depth++;
+    } else if (!inQuote && ch === ')') {
+      depth--;
+    } else if (!inQuote && depth === 0 && /^OR\b/i.test(sql.substring(i))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -584,6 +549,9 @@ function executeFallback(db: Database.Database, sql: string, params?: any[]): Qu
         : stmt.run();
       return {
         rows: [],
+        // better-sqlite3 always reports `changes` as a number for the run()
+        // path, so the `?? 0` null-coalescing fallback is defensive only.
+        /* c8 ignore next */
         rowCount: Number(info.changes ?? 0),
         queryTimeMs: Date.now() - start,
         engine: 'shard',
@@ -645,6 +613,16 @@ export function planAndExecute(
 
     // IN (list) 降级：exact+值条件的条件提取无法处理列表
     if (/IN\s*\([^)]*\)/i.test(sql) && !/IN\s*\(\s*SELECT\b/i.test(sql)) {
+      return executeFallback(db, sql, params);
+    }
+
+    // OR 降级：简化条件提取器只建模 AND 合取，顶层 OR 无法表示
+    if (hasTopLevelOr(sql)) {
+      return executeFallback(db, sql, params);
+    }
+
+    // 参数降级：绑定参数无法被条件提取器解析为字面值
+    if (params && params.length > 0) {
       return executeFallback(db, sql, params);
     }
 
@@ -757,119 +735,9 @@ export function chooseAggregateStrategy(
   return plan;
 }
 
-// ── E007: 子查询提升 ──
-
-/**
- * 检测并提升可转换的子查询。
- *
- * 检测模式：
- * - `WHERE col IN (SELECT ...)` → 替换为 JOIN
- * - `WHERE EXISTS (SELECT ...)` → SEMI JOIN
- *
- * @param sql  原始 SQL
- * @returns 提升后的 SQL 或原始 SQL（如果无法提升）
- */
-export function unnestSubquery(sql: string): string {
-  const trimmed = sql.trim();
-
-  // 只处理 SELECT 语句
-  if (!/^\s*SELECT\b/i.test(trimmed)) return trimmed;
-
-  // ── 模式 1: WHERE col IN (SELECT col2 FROM table2 ...) ──
-  // 检测 `= ANY (subquery)` 或 `IN (subquery)`
-  const inSubqueryPattern = /(\bWHERE\s+.+?)\s+IN\s*\(\s*SELECT\s+(.+?)\s+FROM\s+(\w+)(.*?)\)/i;
-
-  let match = inSubqueryPattern.exec(trimmed);
-  if (match) {
-    const wherePart = match[1].trim();
-    const selectExpr = match[2].trim();
-    const subTable = match[3];
-    const subRest = match[4].trim();
-
-    // 提取 IN 列
-    const inColMatch = wherePart.match(/(\w+)\s*$/);
-    if (inColMatch) {
-      const parentCol = inColMatch[1];
-      // 检查子查询 WHERE 中是否有外部引用（相关子查询）
-      const subWhere = subRest.match(/WHERE\s+(.+)/i);
-      const isCorrelated = subWhere
-        ? /\b(\w+)\.(\w+)\b/.test(subWhere[1])
-        : false;
-
-      if (!isCorrelated && subWhere === null) {
-        // 非相关: IN (SELECT col FROM table) → JOIN table ON parent.col = sub.col
-        const joinSql = trimmed.replace(
-          inSubqueryPattern,
-          `$1 JOIN ${subTable} ON ${parentCol} = ${selectExpr}`,
-        );
-        return joinSql;
-      }
-
-      // 相关子查询: col IN (SELECT col FROM table WHERE table.ref = outer.col)
-      // → 检查子查询 WHERE 条件中是否包含对父表的引用
-      if (isCorrelated && subWhere) {
-        const correlationRef = subWhere[1].match(/(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)/);
-        if (correlationRef) {
-          const outerRefTable = correlationRef[1];
-          const outerRefCol = correlationRef[2];
-          const innerRefTable = correlationRef[3];
-          const innerRefCol = correlationRef[4];
-
-          // 确认外部引用就是父表
-          const { tables } = extractAllTables(trimmed);
-          if (tables.includes(outerRefTable)) {
-            const joinSql = trimmed.replace(
-              inSubqueryPattern,
-              `$1 JOIN ${subTable} ON ${outerRefTable}.${outerRefCol} = ${innerRefTable}.${innerRefCol}`,
-            );
-            return joinSql;
-          }
-        }
-      }
-    }
-  }
-
-  // ── 模式 2: WHERE EXISTS (SELECT 1 FROM table2 ...) ──
-  const existsSubqueryPattern = /WHERE\s+EXISTS\s*\(\s*SELECT\s+.+?\s+FROM\s+(\w+)\s+(.*?)\)\s*$/i;
-  match = existsSubqueryPattern.exec(trimmed);
-  if (match) {
-    const subTable = match[1];
-    const subRest = match[2].trim();
-
-    // 提取关联条件
-    const correlationRef = subRest.match(/(\w+)\.(\w+)\s*=\s*(\w+)\.(\w+)/);
-    if (correlationRef) {
-      const outerTable = correlationRef[1];
-      const outerCol = correlationRef[2];
-      const innerTable = correlationRef[3];
-      const innerCol = correlationRef[4];
-
-      // SEMI JOIN 语义：替换为 LEFT JOIN ... WHERE right_col IS NOT NULL
-      // 但这需要确保不产生重复行，所以我们用 DISTINCT 修饰
-      const semiJoinSql = trimmed.replace(
-        /WHERE\s+EXISTS\s*\(\s*SELECT\s+.+?\s+FROM\s+\w+\s+(.*?)\)\s*$/i,
-        `WHERE ${outerTable}.${outerCol} IS NOT NULL JOIN ${subTable} ON ${outerTable}.${outerCol} = ${innerTable}.${innerCol}`,
-      );
-      return semiJoinSql;
-    }
-
-    // 非相关 EXISTS → 直接去掉 EXISTS 子查询
-    // 例如: WHERE EXISTS (SELECT 1 FROM users) → WHERE 1=1
-    return trimmed.replace(
-      /WHERE\s+EXISTS\s*\(\s*SELECT\s+.+?\s+FROM\s+\w+\s*(.*?)\)\s*$/i,
-      'WHERE 1=1',
-    );
-  }
-
-  return trimmed;
-}
-
-/**
- * 检查 SQL 中是否包含可提升的子查询。
- */
-export function hasUnnestableSubquery(sql: string): boolean {
-  if (!/^\s*SELECT\b/i.test(sql.trim())) return false;
-  if (/\bIN\s*\(\s*SELECT\b/i.test(sql)) return true;
-  if (/\bEXISTS\s*\(\s*SELECT\b/i.test(sql)) return true;
-  return false;
-}
+// NOTE: The E007 subquery-unnesting helpers (`unnestSubquery`,
+// `hasUnnestableSubquery`) were removed as dead code — they were never wired
+// into the execution path (correlatable subqueries are instead handed back to
+// SQLite via `executeFallback`), and their rewrite logic produced invalid SQL
+// (e.g. `WHERE id JOIN orders ON ...`). Subquery handling is delegated to the
+// SQLite engine.
