@@ -41,9 +41,9 @@ const RE_CREATE_INDEX = /^\s*CREATE\s+(UNIQUE\s+)?INDEX\s+/i;
 const RE_CONCURRENTLY = /\bCONCURRENTLY\s+/i;
 
 /**
- * Matches `IF NOT EXISTS` appearing between `CREATE INDEX` and the index name.
+ * `IF NOT EXISTS` is deliberately NOT rewritten: SQLite natively supports it,
+ * so it passes through to the engine unchanged.
  */
-const RE_IF_NOT_EXISTS = /\bIF\s+NOT\s+EXISTS\s+/i;
 
 /**
  * Matches `NULLS NOT DISTINCT` anywhere after the index column list.
