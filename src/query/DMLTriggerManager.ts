@@ -378,6 +378,9 @@ export class DMLTriggerManager {
       // If we can't parse, assume true
       return true;
     } catch {
+      // resolve/parseLiteral are total (optional chaining + Number/string guards),
+      // so the heuristic never throws; this is a defensive fallback.
+      /* c8 ignore next */
       return true;
     }
   }
@@ -482,17 +485,10 @@ export class DMLTriggerManager {
       }
 
       // STATEMENT-level BEFORE INSERT triggers
+      // (WHEN conditions are a ROW-level concept; statement-level triggers,
+      // matching every other fire* statement-level path here, ignore WHEN.)
       const statementTriggers = this.getTriggersFor(tableName, 'INSERT', 'BEFORE', 'STATEMENT');
       for (const trigger of statementTriggers) {
-        if (trigger.whenCondition) {
-          const conditionMet = await this.evaluateWhenCondition(
-            trigger.whenCondition,
-            undefined,
-            currentRow,
-          );
-          if (!conditionMet) continue;
-        }
-
         const ctx: DMLTriggerContext = {
           oldRow: undefined,
           newRow: currentRow,
@@ -965,7 +961,10 @@ export class DMLTriggerManager {
     if (!mainMatch) return null;
 
     const name = mainMatch[1];
-    const timing = mainMatch[2].toUpperCase().replace(/\s+OF$/, '') as DMLTriggerTiming;
+    // The alternation `INSTEAD\s+OF` already captures the full "INSTEAD OF"
+    // timing value; normalizing whitespace yields the canonical form that the
+    // firing methods match against.
+    const timing = mainMatch[2].toUpperCase().replace(/\s+/g, ' ') as DMLTriggerTiming;
     const event = mainMatch[3].toUpperCase() as DMLTriggerEvent;
     const tableName = mainMatch[4];
 
