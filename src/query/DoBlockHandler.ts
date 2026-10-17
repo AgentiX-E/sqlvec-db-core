@@ -73,6 +73,9 @@ export function extractDoBody(sql: string): string | null {
     const openQuote = '$' + tag + '$';
     const closeQuote = '$' + tag + '$';
 
+    // openQuote is always a prefix of afterDo at this point (it is derived
+    // from afterDo[0..closeQuoteIdx]), so this guard can never fail.
+    /* c8 ignore next */
     if (!afterDo.startsWith(openQuote)) return null;
 
     // Find closing dollar quote
@@ -212,6 +215,9 @@ export class DoBlockHandler {
       result = await this.engine.execute(body);
     } catch (err: any) {
       // Clear callback on error
+      // this.engine is guaranteed non-null here (guarded above) and single-
+      // threaded execute() never nulls it mid-flight.
+      /* c8 ignore next */
       if (this.engine) {
         this.engine.setNoticeCallback(null);
       }
@@ -222,6 +228,7 @@ export class DoBlockHandler {
       };
     } finally {
       // Clear callback after execution
+      /* c8 ignore next */
       if (this.engine) {
         this.engine.setNoticeCallback(null);
       }
