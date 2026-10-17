@@ -170,6 +170,9 @@ export function handlePartitionDDL(sql: string): PartitionResult {
   // ── 1. CREATE TABLE ... PARTITION BY RANGE/LIST/HASH ... ────
   const partitionByMatch = trimmed.match(CREATE_TABLE_PARTITION_BY_RE);
   if (partitionByMatch) {
+    // Group 1 is always a non-empty `CREATE TABLE ...` prefix when the regex
+    // matches, so the `?? ''` fallback is unreachable.
+    /* c8 ignore next */
     const rewrittenSql = (partitionByMatch[1] ?? '').trim() + ';';
     logger.debug(
       { original: trimmed, rewritten: rewrittenSql },
@@ -465,10 +468,14 @@ export function createShardTable(
       }
       ddl += ');';
     } else {
-      ddl = `CREATE TABLE IF NOT EXISTS "${partitionName}" ();`;
+      // No column definitions extractable — SQLite requires a column list, so
+      // fall back to a placeholder single-column table.
+      ddl = `CREATE TABLE IF NOT EXISTS "${partitionName}" (__placeholder INTEGER)`;
     }
   } else {
-    ddl = `CREATE TABLE IF NOT EXISTS "${partitionName}" ();`;
+    // No schema supplied — SQLite requires a column list, so fall back to a
+    // placeholder single-column table.
+    ddl = `CREATE TABLE IF NOT EXISTS "${partitionName}" (__placeholder INTEGER)`;
   }
 
   db.exec(ddl);
