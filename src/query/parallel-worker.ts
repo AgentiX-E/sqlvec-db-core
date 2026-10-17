@@ -187,6 +187,10 @@ export default function executeInWorker(task: WorkerTask): WorkerResult {
       rowCount: 0,
       shardId,
       queryTimeMs,
+      // err is always a better-sqlite3 SqliteError (carries a .message); the
+      // String(err) fallback guards against non-Error throwables, which cannot
+      // originate from the statements above.
+      /* c8 ignore next */
       error: err.message || String(err),
     };
   } finally {
