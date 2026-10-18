@@ -256,8 +256,11 @@ export function rewriteFdw(sql: string): FdwResult {
   if (CREATE_FOREIGN_TABLE_RE.test(trimmed)) {
     let rewritten = trimmed.replace(CREATE_FOREIGN_TABLE_RE, 'CREATE TABLE ');
 
-    // Strip column-level OPTIONS (...)
-    rewritten = rewritten.replace(COLUMN_OPTIONS_RE, ' ');
+    // Strip column-level OPTIONS (...). The leading `\s+` in
+    // COLUMN_OPTIONS_RE already consumes the whitespace before the OPTIONS
+    // keyword, so replacing with an empty string (rather than a single space)
+    // avoids leaving a stray trailing space before the closing `)` or `,`.
+    rewritten = rewritten.replace(COLUMN_OPTIONS_RE, '');
 
     // Strip trailing SERVER server_name [OPTIONS (...)]
     rewritten = rewritten.replace(SERVER_CLAUSE_RE, '');
@@ -275,6 +278,11 @@ export function rewriteFdw(sql: string): FdwResult {
 
   // DROP FOREIGN TABLE → DROP TABLE (strip FOREIGN keyword,
   // keep IF EXISTS, table names, CASCADE/RESTRICT)
+  // The false side of this final branch is unreachable: when detectFdw is
+  // true and none of the six preceding patterns matched, the statement must
+  // be a DROP FOREIGN TABLE (FDW_RE is their strict union), so this test is
+  // always true at this point. Kept as an explicit guard.
+  /* c8 ignore next */
   if (DROP_FOREIGN_TABLE_RE.test(trimmed)) {
     const rewritten = trimmed.replace(DROP_FOREIGN_TABLE_RE, 'DROP TABLE ');
 
@@ -289,10 +297,16 @@ export function rewriteFdw(sql: string): FdwResult {
   // ── Fallback ────────────────────────────────────────────────────
 
   // Should not normally reach here if detectFdw is correct; defensive
-  // pass-through ensures no statements are silently dropped.
+  // pass-through ensures no statements are silently dropped. The combined
+  // FDW_RE is a strict union of the seven individual patterns above, so if
+  // detectFdw returned true at least one of the preceding branches would have
+  // matched. This fallback is therefore unreachable and kept as a defensive
+  // guard only.
+  /* c8 ignore next 5 */
   logger.warn(
     { sql: trimmed },
     'detectFdw returned true but no FDW pattern matched — passing through unchanged',
   );
+  /* c8 ignore next */
   return { sql: trimmed, rewritten: false };
 }
