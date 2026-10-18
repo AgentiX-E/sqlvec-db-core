@@ -239,8 +239,10 @@ export function rewritePITR(sql: string): PITRResult {
   // ── Step 1: Check for pg_create_restore_point ─────────────────
 
   if (CREATE_RESTORE_POINT.test(trimmed)) {
-    // Extract the restore point name from the function call
+    // Extract the restore point name from the function call. The match cannot
+    // be null here: CREATE_RESTORE_POINT already guarantees a quoted argument.
     const nameMatch = trimmed.match(/pg_create_restore_point\s*\(\s*'([^']*)'\s*\)/i);
+    /* c8 ignore next */
     const pointName = nameMatch ? nameMatch[1] : 'restore_point';
     const lsn = wsm.createRestorePoint(pointName);
     logger.debug(
