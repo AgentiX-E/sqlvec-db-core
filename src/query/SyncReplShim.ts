@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * SyncReplShim — PostgreSQL synchronous replication compatibility shim for
  * SQLite.
