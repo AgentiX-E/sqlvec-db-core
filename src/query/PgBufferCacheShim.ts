@@ -71,7 +71,6 @@ export function getPgBufferCacheRows(
     const pageCount = db.pragma('page_count', { simple: true }) as number;
     const pageSize = db.pragma('page_size', { simple: true }) as number;
     const cacheSize = db.pragma('cache_size', { simple: true }) as number;
-  const cacheSpill = db.pragma('cache_spill', { simple: true }) as boolean;
 
   const rows: PgBufferCacheRow[] = [];
   const count = pageCount > 0 ? Math.min(pageCount, MAX_BUFFER_CACHE_ROWS) : 1;
@@ -187,6 +186,13 @@ export function rewritePgBufferCache(sql: string, rows?: PgBufferCacheRow[]): Bu
   );
 
   const rewritten = result !== sql;
+  // The false side of this guard is unreachable: reaching this fallback
+  // required `RE_PG_BUFFERCACHE.test(cleaned)` to be true, and `cleaned` only
+  // strips line comments, single-quoted strings and collapses whitespace —
+  // none of which can remove a real (non-comment, non-string) `pg_buffercache`
+  // identifier. The raw-sql `replace(/\bpg_buffercache\b/gi, …)` therefore
+  // always matches at least once, so `result !== sql` always holds here.
+  /* c8 ignore next */
   if (rewritten) {
     logger.debug({ original: sql, rewritten: result }, 'Rewrote pg_buffercache reference (fallback)');
   }
