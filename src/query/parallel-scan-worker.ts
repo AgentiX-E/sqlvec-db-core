@@ -110,8 +110,13 @@ export default function scanChunk(task: ScanWorkerTask): ScanWorkerResult {
     // Open a fresh connection — each worker gets its own
     db = new Database(dbPath, { readonly: true });
 
-    // Set WAL mode for concurrent read access across workers
-    db.pragma('journal_mode = WAL');
+    // NOTE: we must NOT set `journal_mode = WAL` here. WAL mode is a
+    // persistent property stored in the database header and is activated by
+    // the writing connection; switching journal mode requires a write lock,
+    // which a read-only connection cannot acquire (it would throw
+    // SQLITE_READONLY). Read-only connections automatically read whatever
+    // journal mode is currently in effect. The remaining pragmas below are
+    // connection-local and safe on a read-only handle.
     db.pragma('synchronous = NORMAL');
     db.pragma('busy_timeout = 5000');
 
@@ -145,6 +150,11 @@ export default function scanChunk(task: ScanWorkerTask): ScanWorkerResult {
       rows: [],
       rowCount: 0,
       success: false,
+      // The `|| String(err)` fallback is defensive-only: every throw site in
+      // this try block is a better-sqlite3 call, which always raises a
+      // SqliteError (an Error subclass with a non-empty message). Fallback is
+      // unreachable in practice.
+      /* c8 ignore next */
       error: err.message || String(err),
       timeMs,
     };

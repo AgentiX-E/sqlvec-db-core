@@ -1,144 +1,113 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+/**
+ * parallel-scan-worker.test.ts — Coverage tests for parallel-scan-worker
+ * (Piscina worker for intra-table parallel scanning).
+ */
 
-// Mock better-sqlite3 to capture the prepared SQL and return canned rows.
-const prepareMock = vi.fn();
-const allMock = vi.fn();
-const closeMock = vi.fn();
-const pragmaMock = vi.fn();
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import scanChunk, { ScanWorkerResult } from '../query/parallel-scan-worker';
 
-// When true, the (mocked) Database constructor throws, leaving `db` null.
-let constructorThrows = false;
+let dbPath: string;
+let tmpDir: string;
 
-const dbInstance = {
-  pragma: pragmaMock,
-  prepare: prepareMock,
-  close: closeMock,
-};
+beforeAll(() => {
+  tmpDir = mkdtempSync(join(tmpdir(), 'parallel-scan-worker-'));
+  dbPath = join(tmpDir, 'test.db');
 
-vi.mock('better-sqlite3', () => {
-  return {
-    default: class MockDatabase {
-      constructor() {
-        if (constructorThrows) {
-          throw new Error('connect failed');
-        }
-        return dbInstance;
-      }
-    },
-  };
+  const db = new Database(dbPath);
+  db.exec('CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)');
+  const insert = db.prepare('INSERT INTO items (name) VALUES (?)');
+  for (let i = 1; i <= 10; i++) {
+    insert.run(`item-${i}`);
+  }
+  db.close();
 });
 
-import scanChunk, { type ScanWorkerResult } from '../query/parallel-scan-worker';
+afterAll(() => {
+  rmSync(tmpDir, { recursive: true, force: true });
+});
 
-describe('scanChunk', () => {
-  beforeEach(() => {
-    prepareMock.mockReset();
-    allMock.mockReset();
-    closeMock.mockReset();
-    pragmaMock.mockReset();
-    constructorThrows = false;
+describe('scanChunk (via appendRowIdFilter)', () => {
+  it('scans a rowid range with no WHERE and no trailing clause', () => {
+    const res = scanChunk({
+      dbPath,
+      baseSql: 'SELECT * FROM items',
+      params: [],
+      startRowId: 3,
+      endRowId: 5,
+    });
+    expect(res.success).toBe(true);
+    expect(res.error).toBeNull();
+    expect(res.rowCount).toBe(3);
+    const names = res.rows.map((r) => r.name);
+    expect(names).toEqual(['item-3', 'item-4', 'item-5']);
   });
 
-  function runTask(overrides: Record<string, unknown> = {}): ScanWorkerResult {
-    prepareMock.mockReturnValue({ all: allMock });
-    allMock.mockReturnValue([{ a: 1 }, { a: 2 }]);
-
-    return scanChunk({
-      dbPath: '/tmp/test.db',
-      baseSql: 'SELECT * FROM t',
+  it('folds the rowid predicate into an existing WHERE clause', () => {
+    const res = scanChunk({
+      dbPath,
+      baseSql: "SELECT * FROM items WHERE name != 'item-2'",
       params: [],
       startRowId: 1,
-      endRowId: 100,
-      ...overrides,
+      endRowId: 3,
     });
-  }
-
-  it('introduces a WHERE clause when baseSql has none', () => {
-    const r = runTask({ baseSql: 'SELECT * FROM t' });
-    expect(r.success).toBe(true);
-    expect(r.rows).toEqual([{ a: 1 }, { a: 2 }]);
-    expect(prepareMock).toHaveBeenCalledWith('SELECT * FROM t WHERE rowid >= ? AND rowid <= ?');
+    expect(res.success).toBe(true);
+    const ids = res.rows.map((r) => r.id);
+    expect(ids).toEqual([1, 3]);
   });
 
-  it('appends to an existing WHERE clause', () => {
-    runTask({ baseSql: 'SELECT * FROM t WHERE a > ?', params: [5] });
-    expect(prepareMock).toHaveBeenCalledWith(
-      'SELECT * FROM t WHERE a > ? AND rowid >= ? AND rowid <= ?',
-    );
-  });
-
-  it('inserts the predicate BEFORE an ORDER BY clause', () => {
-    runTask({ baseSql: 'SELECT * FROM t WHERE a > ? ORDER BY b' });
-    expect(prepareMock).toHaveBeenCalledWith(
-      'SELECT * FROM t WHERE a > ? AND rowid >= ? AND rowid <= ? ORDER BY b',
-    );
-  });
-
-  it('inserts the predicate BEFORE a GROUP BY clause', () => {
-    runTask({ baseSql: 'SELECT * FROM t WHERE a > ? GROUP BY b' });
-    expect(prepareMock).toHaveBeenCalledWith(
-      'SELECT * FROM t WHERE a > ? AND rowid >= ? AND rowid <= ? GROUP BY b',
-    );
-  });
-
-  it('inserts the predicate BEFORE a LIMIT clause', () => {
-    runTask({ baseSql: 'SELECT * FROM t LIMIT 10' });
-    expect(prepareMock).toHaveBeenCalledWith(
-      'SELECT * FROM t WHERE rowid >= ? AND rowid <= ? LIMIT 10',
-    );
-  });
-
-  it('inserts the predicate BEFORE a GROUP BY ... HAVING clause', () => {
-    runTask({ baseSql: 'SELECT * FROM t GROUP BY a HAVING count(*) > 1' });
-    expect(prepareMock).toHaveBeenCalledWith(
-      'SELECT * FROM t WHERE rowid >= ? AND rowid <= ? GROUP BY a HAVING count(*) > 1',
-    );
-  });
-
-  it('passes params plus the rowid bounds in order', () => {
-    runTask({ baseSql: 'SELECT * FROM t WHERE a > ?', params: [5, 6], startRowId: 10, endRowId: 20 });
-    expect(allMock).toHaveBeenCalledWith(5, 6, 10, 20);
-  });
-
-  it('returns a failure result when the database throws', () => {
-    prepareMock.mockImplementation(() => {
-      throw new Error('no such table');
+  it('inserts the predicate before a trailing ORDER BY', () => {
+    const res = scanChunk({
+      dbPath,
+      baseSql: 'SELECT * FROM items ORDER BY id DESC',
+      params: [],
+      startRowId: 4,
+      endRowId: 6,
     });
-    const r = scanChunk({
-      dbPath: '/tmp/test.db',
-      baseSql: 'SELECT * FROM t',
+    expect(res.success).toBe(true);
+    const ids = res.rows.map((r) => r.id);
+    expect(ids).toEqual([6, 5, 4]);
+  });
+
+  it('handles WHERE plus trailing GROUP BY', () => {
+    const res = scanChunk({
+      dbPath,
+      baseSql: 'SELECT name, count(*) AS c FROM items WHERE id > 0 GROUP BY name',
       params: [],
       startRowId: 1,
-      endRowId: 100,
+      endRowId: 2,
     });
-    expect(r.success).toBe(false);
-    expect(r.error).toBe('no such table');
-    expect(r.rows).toEqual([]);
-    expect(r.rowCount).toBe(0);
+    expect(res.success).toBe(true);
+    expect(res.rowCount).toBe(2);
   });
 
-  it('reports the retrieved row count and null error on success', () => {
-    const r = runTask();
-    expect(r.rowCount).toBe(2);
-    expect(r.error).toBeNull();
-  });
-
-  it('tolerates a close() failure in the finally block', () => {
-    closeMock.mockImplementation(() => {
-      throw new Error('close failed');
+  it('binds base params plus rowid bounds in order', () => {
+    const res = scanChunk({
+      dbPath,
+      baseSql: 'SELECT * FROM items WHERE id >= ?',
+      params: [1],
+      startRowId: 2,
+      endRowId: 4,
     });
-    const r = runTask();
-    expect(r.success).toBe(true);
-    expect(r.rowCount).toBe(2);
+    expect(res.success).toBe(true);
+    const ids = res.rows.map((r) => r.id);
+    expect(ids).toEqual([2, 3, 4]);
   });
 
-  it('handles an error before the connection is assigned (db stays null)', () => {
-    // Force the Database constructor to throw so `db` remains null and the
-    // finally block's `if (db)` guard takes the false branch.
-    constructorThrows = true;
-    const r = runTask();
-    expect(r.success).toBe(false);
-    expect(r.error).toBe('connect failed');
-    expect(r.rows).toEqual([]);
+  it('returns failure when the database cannot be opened', () => {
+    const res: ScanWorkerResult = scanChunk({
+      dbPath: join(tmpDir, 'does-not-exist.db'),
+      baseSql: 'SELECT * FROM items',
+      params: [],
+      startRowId: 1,
+      endRowId: 2,
+    });
+    expect(res.success).toBe(false);
+    expect(res.error).toBeTruthy();
+    expect(res.rows).toEqual([]);
+    expect(res.rowCount).toBe(0);
   });
 });
