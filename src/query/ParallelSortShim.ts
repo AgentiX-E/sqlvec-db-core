@@ -96,7 +96,9 @@ function parseSetValue(value: string): number | boolean {
   if (lower === 'off') return false;
   if (lower === 'true') return true;
   if (lower === 'false') return false;
-  const num = Number(value);
+  // Parse the quote-stripped value so quoted numbers (`'4'`, `"7"`) are
+  // handled correctly — `Number("'4'")` is NaN while `Number("4")` is 4.
+  const num = Number(lower);
   if (!isNaN(num)) return num;
   return 0;
 }
