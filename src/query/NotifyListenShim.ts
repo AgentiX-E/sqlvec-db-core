@@ -134,32 +134,32 @@ export function getNotifyListenInitSql(): string[] {
  *   NOTIFY channel_name, 'payload text';
  *   NOTIFY "quoted-channel";
  */
-const NOTIFY_PATTERN = /^\s*NOTIFY\s+([A-Za-z_][A-Za-z0-9_"]*)(?:\s*,\s*('[^']*'|\$\$[^$]*\$\$|E'[^']*'))?\s*;?\s*$/i;
+const NOTIFY_PATTERN = /^\s*NOTIFY\s+([A-Za-z_][A-Za-z0-9_]*|"[^"]+")(?:\s*,\s*('[^']*'|\$\$[^$]*\$\$|E'[^']*'))?\s*;?\s*$/i;
 
 /**
  * Matches a top-level LISTEN statement.
  *
  * Group:
- *   1 – Channel name (identifier)
+ *   1 – Channel name (identifier or quoted identifier)
  *
  * Covers:
  *   LISTEN channel_name;
  *   LISTEN "quoted-channel";
  */
-const LISTEN_PATTERN = /^\s*LISTEN\s+([A-Za-z_][A-Za-z0-9_"]*)\s*;?\s*$/i;
+const LISTEN_PATTERN = /^\s*LISTEN\s+([A-Za-z_][A-Za-z0-9_]*|"[^"]+")\s*;?\s*$/i;
 
 /**
  * Matches a top-level UNLISTEN statement.
  *
  * Group:
- *   1 – Channel name (identifier) or asterisk (*)
+ *   1 – Channel name (identifier), quoted identifier, or asterisk (*)
  *
  * Covers:
  *   UNLISTEN channel_name;
  *   UNLISTEN *;
  *   UNLISTEN "quoted-channel";
  */
-const UNLISTEN_PATTERN = /^\s*UNLISTEN\s+(\*|[A-Za-z_][A-Za-z0-9_"]*)\s*;?\s*$/i;
+const UNLISTEN_PATTERN = /^\s*UNLISTEN\s+(\*|[A-Za-z_][A-Za-z0-9_]*|"[^"]+")\s*;?\s*$/i;
 
 /**
  * Combined detection pattern — matches any NOTIFY/LISTEN/UNLISTEN statement
@@ -182,8 +182,10 @@ function unquoteIdentifier(name: string): string {
 /**
  * Strip surrounding single quotes from a payload string if present.
  * E.g. `'hello world'` → `hello world`
+ *
+ * @internal Exported for unit testing only.
  */
-function unquotePayload(payload: string): string {
+export function _unquotePayload(payload: string): string {
   // Handle $$ delimiters (PostgreSQL dollar-quoting)
   if (payload.startsWith('$$') && payload.endsWith('$$') && payload.length >= 4) {
     return payload.slice(2, -2);
@@ -292,7 +294,7 @@ export function handleNotifyListen(
     const rawChannel = notifyMatch[1];
     const channel = unquoteIdentifier(rawChannel);
     const rawPayload = notifyMatch[2] ?? undefined;
-    const payload = rawPayload ? unquotePayload(rawPayload) : null;
+    const payload = rawPayload ? _unquotePayload(rawPayload) : null;
 
     // Build INSERT for notify queue
     const notifySql = payload
