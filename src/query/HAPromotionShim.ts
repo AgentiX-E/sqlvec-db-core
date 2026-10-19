@@ -138,12 +138,6 @@ const RE_ROTATE_LOGFILE = /\bpg_rotate_logfile\s*\(\s*\)/i;
  */
 const RE_SWITCH_WAL = /\bpg_switch_(?:wal|xlog)\s*\(\s*\)/i;
 
-/**
- * Generic HA function name pattern — matches any recognised HA
- * orchestration function call.
- */
-const RE_ANY_HA = /\b(?:pg_promote|pg_ctl_promote|pg_reload_conf|pg_rotate_logfile|pg_switch_wal|pg_switch_xlog)\s*\(/i;
-
 // ---- Public API -------------------------------------------------------
 
 /**
