@@ -341,6 +341,10 @@ export function extractLockTableNames(sql: string): string[] {
   // Extract the table name portion between LOCK [TABLE] and the optional
   // IN ... MODE / NOWAIT suffix
   const match = trimmed.match(LOCK_TABLE_NAMES);
+  // Defensive guard. When detectLockTable() is true, LOCK_TABLE_NAMES always
+  // matches and `(.+?)` always captures at least one character, so this branch
+  // is unreachable in practice. Kept as a safety net for future regex changes.
+  /* c8 ignore next */
   if (!match || !match[1]) {
     return [];
   }
@@ -354,6 +358,9 @@ export function extractLockTableNames(sql: string): string[] {
     .replace(/\s+NOWAIT\s*/i, '')
     .trim();
 
+  // Defensive guard. The regex already strips IN/NOWAIT, so `cleaned` is never
+  // empty when the previous match[1] is non-empty. Kept as a safety net.
+  /* c8 ignore next */
   if (cleaned.length === 0) {
     return [];
   }
