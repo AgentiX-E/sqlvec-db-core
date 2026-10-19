@@ -79,6 +79,9 @@ function resolveSafePath(filePath: string): string | null {
     }
     return resolved;
   } catch {
+    // Defensive: path.resolve never throws for string inputs, so this branch
+    // is unreachable in practice. Kept as a safety net for future hardening.
+    /* c8 ignore next */
     return null;
   }
 }
