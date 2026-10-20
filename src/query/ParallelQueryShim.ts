@@ -223,6 +223,7 @@ function getShowResponse(paramName: string, ctx: ParallelSessionContext): string
       return String(ctx.minParallelTableScanSize);
     case 'min_parallel_index_scan_size':
       return String(ctx.minParallelIndexScanSize);
+    /* c8 ignore next 2 */
     default:
       return '0';
   }
