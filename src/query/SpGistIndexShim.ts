@@ -149,6 +149,10 @@ export function rewriteSpGistIndex(sql: string): SpGistResult {
 
   // ── Step 3: Verify that something actually changed ─────────────
 
+  // Unreachable: detectSpGistIndex already confirmed a `USING spgist` match,
+  // so the replace is guaranteed to swap `spgist` → `btree` (a non-identity
+  // transformation). Kept as a defensive safety net.
+  /* c8 ignore next 6 */
   if (rewritten === trimmed) {
     // Should not happen given the detection guard, but be defensive
     return {
