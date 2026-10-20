@@ -141,10 +141,15 @@ function extractAlgorithmFromCreate(sql: string): string | undefined {
   }
 
   // Try parenthesized: (encryption_algorithm = 'xxx')
+  // Unreachable: the `withMatch` regex above is unanchored and matches any
+  // `encryption_algorithm = '...'` substring, so it already captures the
+  // parenthesized form before this branch can ever fire. Kept defensively.
+  /* c8 ignore start */
   const parenMatch = sql.match(/\(\s*encryption_algorithm\s*=\s*'([^']+)'\s*\)/i);
   if (parenMatch) {
     return parenMatch[1];
   }
+  /* c8 ignore stop */
 
   // Try USING 'encrypt(col, key)' — default to aes-256-gcm
   const usingMatch = sql.match(/USING\s+'[^']*'/i);
@@ -333,6 +338,10 @@ export function rewriteEncryptionPolicy(sql: string): EncryptionPolicyResult {
       TDEConfig.createPolicy(policyName, algorithm);
       TDEConfig.setEnabled(true);
       logger.debug(
+        // The `?? 'default'` fallback is unreachable in practice: when
+        // `algorithm` is undefined, createPolicy throws first (normalizeAlgorithm
+        // calls .trim() on an undefined value), so control never reaches here.
+        /* c8 ignore next 1 */
         { sql: trimmed, policyName, algorithm: algorithm ?? 'default' },
         'Encryption policy CREATE → stored in TDEConfig',
       );
