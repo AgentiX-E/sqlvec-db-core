@@ -243,8 +243,12 @@ export function rewriteSnapshot(sql: string): SnapshotResult {
   // Case C: BEGIN ISOLATION LEVEL REPEATABLE READ
   // Detected but NOT rewritten — SQLite supports REPEATABLE READ semantics
   // at the engine layer. Pass through with rewritten: false.
-  // The false branch is unreachable: detectSnapshot() returns true only for
-  // the three patterns checked above, so dispatch always matches one of them.
+  // This branch IS reachable: detectSnapshot() returns true for
+  // BEGIN ... REPEATABLE READ, and the two preceding dispatch checks
+  // (EXPORT_SNAPSHOT / SET_SNAPSHOT) do not match it.
+  // The FALSE side is provably unreachable: detectSnapshot() only returns
+  // true for the three patterns checked, and this is the last of them, so
+  // by elimination BEGIN_REPEATABLE_READ always matches here.
   /* c8 ignore next */
   if (BEGIN_REPEATABLE_READ.test(trimmed)) {
     logger.debug(
