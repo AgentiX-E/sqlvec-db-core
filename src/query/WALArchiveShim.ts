@@ -368,9 +368,15 @@ export function rewriteWALArchive(sql: string): WALArchiveResult {
   // ── Step 1: SET archive_mode = on/off ─────────────────────────
 
   if (SET_ARCHIVE_MODE.test(trimmed)) {
-    // Extract the value: accept = on, = off, TO on, TO off, also 'on', 'off' with quotes
-    const modeMatch = trimmed.match(/['"]?(on|off)['"]?/i);
-    const mode = modeMatch ? modeMatch[1].toLowerCase() as 'on' | 'off' : 'off';
+    // Extract the value. The outer regex accepts on|off|true|false|0|1, so
+    // normalize each synonym to its canonical boolean: on/true/1 -> 'on',
+    // off/false/0 -> 'off'. Without this, `SET archive_mode = 1` (valid PG
+    // shorthand for "on") fell through to the default 'off'.
+    const modeMatch = trimmed.match(/['"]?(on|off|true|false|0|1)['"]?/i);
+    /* c8 ignore next — modeMatch always matches once SET_ARCHIVE_MODE passed */
+    const raw = modeMatch ? modeMatch[1].toLowerCase() : 'off';
+    const mode: 'on' | 'off' =
+      raw === 'on' || raw === 'true' || raw === '1' ? 'on' : 'off';
     wsm.setArchiveMode(mode);
     logger.debug(
       { sql: trimmed, archiveMode: mode },
@@ -385,8 +391,11 @@ export function rewriteWALArchive(sql: string): WALArchiveResult {
   // ── Step 2: SET archive_command = '...' ───────────────────────
 
   if (SET_ARCHIVE_COMMAND.test(trimmed)) {
-    // Extract the command string from single quotes
+    // Extract the command string from single quotes. The outer regex already
+    // guarantees a single-quoted value, so the inner `'([^']*)'` always
+    // matches (the `false` arm of this ternary is unreachable).
     const cmdMatch = trimmed.match(/'([^']*)'/);
+    /* c8 ignore next */
     const cmd = cmdMatch ? cmdMatch[1] : '';
     wsm.setArchiveCommand(cmd);
     logger.debug(
@@ -402,8 +411,11 @@ export function rewriteWALArchive(sql: string): WALArchiveResult {
   // ── Step 3: SET archive_timeout = N ───────────────────────────
 
   if (SET_ARCHIVE_TIMEOUT.test(trimmed)) {
-    // Extract the integer timeout value
+    // Extract the integer timeout value. The outer regex guarantees at least
+    // one digit, so the inner `(\d+)` always matches (the `false` arm of this
+    // ternary is unreachable).
     const timeoutMatch = trimmed.match(/(\d+)/);
+    /* c8 ignore next */
     const timeout = timeoutMatch ? parseInt(timeoutMatch[1], 10) : 0;
     wsm.setArchiveTimeout(timeout);
     logger.debug(
