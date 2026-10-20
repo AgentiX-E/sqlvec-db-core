@@ -250,7 +250,9 @@ export function estimateSelectivity(
             if (bMin !== null && bMin >= value) relevant = false;
           } else if (operator === '>' || operator === '>=') {
             if (bMax !== null && bMax <= value) relevant = false;
-          } else if (operator === 'BETWEEN') {
+          } else {
+            // operator === 'BETWEEN' — guaranteed by the outer includes() check
+            // above, so this branch needs no redundant re-test.
             if (Array.isArray(value) && value.length === 2) {
               if (bMin !== null && bMin > value[1]) relevant = false;
               if (bMax !== null && bMax < value[0]) relevant = false;
