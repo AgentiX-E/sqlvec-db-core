@@ -237,7 +237,7 @@ function collectColumnStats(): ColumnStat[] {
             avg_width: avgWidth,
             n_distinct: nDistinct,
             most_common_vals: mcvVals,
-            correlation: null,
+            correlation,
           });
         }
       }
