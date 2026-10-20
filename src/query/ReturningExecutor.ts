@@ -288,7 +288,10 @@ function detectFunctionCall(expr: string): boolean {
  */
 function extractDmlBody(sql: string): string {
   const stripped = stripReturningClause(sql);
-  // 如果有 CTE，去掉 CTE 定义
+  // Strip a CTE prefix if present. Unreachable via shouldUseNativeReturning,
+  // which already rejects CTE statements before calling extractDmlBody; kept
+  // as a defensive safety net for future direct callers.
+  /* c8 ignore next 3 */
   if (CTE_PATTERN.test(stripped)) {
     return stripCteDefinitions(stripped);
   }
