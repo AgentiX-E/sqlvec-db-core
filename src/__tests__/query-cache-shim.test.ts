@@ -1,9 +1,11 @@
 /**
  * query-cache-shim.test.ts — Coverage tests for QueryCacheShim
- * (PG plan-cache / pg_prewarm shim + LRU query result cache).
+ * (PostgreSQL query-cache compatibility shim for SQLite).
  */
 
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { PGliteEvalResult } from '../query/PGliteEngine';
+import { PgCatalog } from '../system/PgCatalog';
 import {
   extractPgPrewarmOid,
   resolveOidToTable,
@@ -12,154 +14,228 @@ import {
   rewriteQueryCache,
   QueryCacheShim,
 } from '../query/QueryCacheShim';
-import { PgCatalog } from '../system/PgCatalog';
-import type { PGliteEvalResult } from '../query/PGliteEngine';
 
-function result(rows: number[][] = []): PGliteEvalResult {
-  return { columns: ['a'], rows };
+function result(rows: any[] = []): PGliteEvalResult {
+  return { columns: [], rows };
 }
+
+// ──────────────────────────────────────────────
+//  extractPgPrewarmOid
+// ──────────────────────────────────────────────
 
 describe('extractPgPrewarmOid', () => {
   it('extracts numeric oid', () => {
     expect(extractPgPrewarmOid('SELECT pg_prewarm(16384)')).toBe(16384);
-    expect(extractPgPrewarmOid('SELECT pg_prewarm(16384);')).toBe(16384);
   });
 
   it('extracts quoted numeric oid', () => {
     expect(extractPgPrewarmOid("SELECT pg_prewarm('16384')")).toBe(16384);
   });
 
+  it('extracts oid with second arg', () => {
+    expect(extractPgPrewarmOid("SELECT pg_prewarm(16384, 'buffer')")).toBe(16384);
+  });
+
+  it('extracts oid with trailing semicolon', () => {
+    expect(extractPgPrewarmOid('SELECT pg_prewarm(16384);')).toBe(16384);
+  });
+
   it('returns null for table name (non-numeric)', () => {
     expect(extractPgPrewarmOid("SELECT pg_prewarm('my_table')")).toBeNull();
+  });
+
+  it('returns null for table name with second arg', () => {
     expect(extractPgPrewarmOid("SELECT pg_prewarm('my_table', 'buffer')")).toBeNull();
   });
 
   it('returns null for non-prewarm SQL', () => {
     expect(extractPgPrewarmOid('SELECT 1')).toBeNull();
+    expect(extractPgPrewarmOid('')).toBeNull();
   });
 });
+
+// ──────────────────────────────────────────────
+//  resolveOidToTable
+// ──────────────────────────────────────────────
 
 describe('resolveOidToTable', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('resolves oid to a regular-table relname', () => {
+  it('resolves oid to table name (relkind r)', () => {
     vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([
-      { oid: 5, relname: 't1', relkind: 'r' },
-      { oid: 6, relname: 'v1', relkind: 'v' },
+      { oid: 16384, relname: 'users', relkind: 'r' },
+      { oid: 16385, relname: 'users_idx', relkind: 'i' },
     ]);
-    expect(resolveOidToTable(5)).toBe('t1');
+    expect(resolveOidToTable(16384)).toBe('users');
   });
 
-  it('returns null when oid is a non-table relkind', () => {
+  it('returns null for non-relkind-r (index)', () => {
     vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([
-      { oid: 6, relname: 'v1', relkind: 'v' },
+      { oid: 16385, relname: 'users_idx', relkind: 'i' },
     ]);
-    expect(resolveOidToTable(6)).toBeNull();
+    expect(resolveOidToTable(16385)).toBeNull();
   });
 
-  it('returns null when oid not found', () => {
+  it('returns null for oid not found', () => {
     vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([
-      { oid: 1, relname: 't1', relkind: 'r' },
+      { oid: 16384, relname: 'users', relkind: 'r' },
     ]);
-    expect(resolveOidToTable(999)).toBeNull();
+    expect(resolveOidToTable(99999)).toBeNull();
   });
 
   it('returns null when getClassRows throws', () => {
     vi.spyOn(PgCatalog, 'getClassRows').mockImplementation(() => {
-      throw new Error('boom');
+      throw new Error('catalog unavailable');
     });
-    expect(resolveOidToTable(1)).toBeNull();
+    expect(resolveOidToTable(16384)).toBeNull();
   });
 });
+
+// ──────────────────────────────────────────────
+//  extractPgPrewarmFirstArg
+// ──────────────────────────────────────────────
 
 describe('extractPgPrewarmFirstArg', () => {
   it('extracts quoted table name', () => {
     expect(extractPgPrewarmFirstArg("SELECT pg_prewarm('my_table')")).toBe('my_table');
-    expect(extractPgPrewarmFirstArg("SELECT pg_prewarm('my_table', 'buffer')")).toBe('my_table');
   });
 
-  it('extracts unquoted numeric arg', () => {
+  it('extracts quoted table name with second arg', () => {
+    expect(extractPgPrewarmFirstArg("SELECT pg_prewarm('my_table', 'buffer')")).toBe(
+      'my_table',
+    );
+  });
+
+  it('extracts numeric arg (unquoted)', () => {
     expect(extractPgPrewarmFirstArg('SELECT pg_prewarm(16384)')).toBe('16384');
   });
 
-  it('returns null for unknown form', () => {
+  it('returns null for non-prewarm SQL', () => {
     expect(extractPgPrewarmFirstArg('SELECT 1')).toBeNull();
-    expect(extractPgPrewarmFirstArg("SELECT pg_prewarm('weird name!')")).toBe('weird name!');
+    expect(extractPgPrewarmFirstArg('')).toBeNull();
   });
 });
 
+// ──────────────────────────────────────────────
+//  detectQueryCache
+// ──────────────────────────────────────────────
+
 describe('detectQueryCache', () => {
   it('returns false for non-string / empty', () => {
-    expect(detectQueryCache(undefined as unknown as string)).toBe(false);
+    expect(detectQueryCache(undefined as any)).toBe(false);
     expect(detectQueryCache('')).toBe(false);
     expect(detectQueryCache('   ')).toBe(false);
   });
 
-  it('detects SET enable_plan_cache (all variants)', () => {
-    expect(detectQueryCache('SET enable_plan_cache = on')).toBe(true);
-    expect(detectQueryCache('SET enable_plan_cache = off')).toBe(true);
-    expect(detectQueryCache('SET enable_plan_cache TO on')).toBe(true);
-    expect(detectQueryCache('SET SESSION enable_plan_cache = on')).toBe(true);
-    expect(detectQueryCache('SET LOCAL enable_plan_cache = off')).toBe(true);
+  it('returns false for non-cache SQL', () => {
+    expect(detectQueryCache('SELECT * FROM users')).toBe(false);
+    expect(detectQueryCache('CREATE TABLE t (id int)')).toBe(false);
+    expect(detectQueryCache('INSERT INTO t VALUES (1)')).toBe(false);
   });
 
-  it('detects SHOW plan_cache_mode', () => {
+  it.each([
+    'SET enable_plan_cache = on',
+    'SET enable_plan_cache = off',
+    'SET enable_plan_cache TO on',
+    'SET SESSION enable_plan_cache = on',
+    'SET LOCAL enable_plan_cache = off',
+  ])('returns true for SET plan cache: %s', (sql) => {
+    expect(detectQueryCache(sql)).toBe(true);
+  });
+
+  it('returns true for SHOW plan_cache_mode', () => {
     expect(detectQueryCache('SHOW plan_cache_mode')).toBe(true);
     expect(detectQueryCache('SHOW plan_cache_mode;')).toBe(true);
   });
 
-  it('detects SELECT pg_prewarm', () => {
-    expect(detectQueryCache("SELECT pg_prewarm('t')")).toBe(true);
-    expect(detectQueryCache("SELECT pg_catalog.pg_prewarm('t')")).toBe(true);
+  it.each([
+    "SELECT pg_prewarm('t')",
+    "SELECT pg_prewarm('my_table', 'buffer')",
+    'SELECT pg_catalog.pg_prewarm(16384)',
+    "select pg_prewarm('t')",
+  ])('returns true for pg_prewarm: %s', (sql) => {
+    expect(detectQueryCache(sql)).toBe(true);
   });
 
-  it('returns false for unrelated SQL', () => {
-    expect(detectQueryCache('SELECT 1')).toBe(false);
-    expect(detectQueryCache('CREATE TABLE t (id int)')).toBe(false);
+  it('returns false for SET without enable_plan_cache (fast path)', () => {
+    expect(detectQueryCache('SET search_path = public')).toBe(false);
   });
 
-  it('fast-path rejects keyword-only matches without full pattern', () => {
-    // Has SET prefix and enable_plan_cache, but not a complete valid statement
-    expect(detectQueryCache('SET enable_plan_cache = maybe')).toBe(false);
+  it('returns false for SELECT without pg_prewarm (fast path)', () => {
+    expect(detectQueryCache('SELECT now()')).toBe(false);
+  });
+
+  it('returns false when pg_prewarm is not the top-level function', () => {
+    // hasPrewarm fast-path matches the substring, but PG_PREWARM_PATTERN
+    // requires pg_prewarm to be the first function after SELECT.
+    expect(detectQueryCache('SELECT x.pg_prewarm(1)')).toBe(false);
+    expect(detectQueryCache('SELECT pg_prewarm(1) FROM t')).toBe(false);
   });
 });
+
+// ──────────────────────────────────────────────
+//  rewriteQueryCache
+// ──────────────────────────────────────────────
 
 describe('rewriteQueryCache', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('passes through non-string / empty with rewritten false', () => {
-    expect(rewriteQueryCache(undefined as unknown as string)).toEqual({
+  it('returns pass-through for non-string / empty', () => {
+    expect(rewriteQueryCache(undefined as any)).toEqual({
       sql: '',
       rewritten: false,
     });
     expect(rewriteQueryCache('')).toEqual({ sql: '', rewritten: false });
   });
 
-  it('rewrites SET enable_plan_cache → SELECT 1', () => {
-    expect(rewriteQueryCache('SET enable_plan_cache = on')).toEqual({
-      sql: 'SELECT 1',
-      rewritten: true,
-    });
+  it.each([
+    ['SET enable_plan_cache = on', 'SELECT 1'],
+    ['SET enable_plan_cache = off', 'SELECT 1'],
+    ['SET enable_plan_cache TO on', 'SELECT 1'],
+    ['SET SESSION enable_plan_cache = on', 'SELECT 1'],
+    ['SET LOCAL enable_plan_cache = off', 'SELECT 1'],
+  ])('rewrites SET plan cache: %s', (sql, expected) => {
+    expect(rewriteQueryCache(sql)).toEqual({ sql: expected, rewritten: true });
   });
 
-  it('rewrites SHOW plan_cache_mode → SELECT auto literal', () => {
+  it('rewrites SHOW plan_cache_mode', () => {
     expect(rewriteQueryCache('SHOW plan_cache_mode')).toEqual({
       sql: "SELECT 'auto' as plan_cache_mode",
       rewritten: true,
     });
   });
 
-  it('rewrites pg_prewarm with resolvable numeric oid → COUNT', () => {
+  it('rewrites pg_prewarm with oid → SELECT COUNT(*)', () => {
+    vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([
+      { oid: 16384, relname: 'users', relkind: 'r' },
+    ]);
+    expect(rewriteQueryCache('SELECT pg_prewarm(16384)')).toEqual({
+      sql: 'SELECT COUNT(*) FROM "users"',
+      rewritten: true,
+    });
+  });
+
+  it('rewrites pg_prewarm with quoted oid → SELECT COUNT(*)', () => {
     vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([
       { oid: 16384, relname: 'orders', relkind: 'r' },
     ]);
-    expect(rewriteQueryCache('SELECT pg_prewarm(16384)')).toEqual({
+    expect(rewriteQueryCache("SELECT pg_prewarm('16384')")).toEqual({
       sql: 'SELECT COUNT(*) FROM "orders"',
       rewritten: true,
     });
   });
 
-  it('rewrites pg_prewarm with unresolvable oid → SELECT 1', () => {
+  it('rewrites pg_prewarm with reserved-word table name (quoted)', () => {
+    vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([
+      { oid: 100, relname: 'order', relkind: 'r' },
+    ]);
+    expect(rewriteQueryCache('SELECT pg_prewarm(100)')).toEqual({
+      sql: 'SELECT COUNT(*) FROM "order"',
+      rewritten: true,
+    });
+  });
+
+  it('pg_prewarm oid not found → fallback SELECT 1', () => {
     vi.spyOn(PgCatalog, 'getClassRows').mockReturnValue([]);
     expect(rewriteQueryCache('SELECT pg_prewarm(99999)')).toEqual({
       sql: 'SELECT 1',
@@ -167,21 +243,29 @@ describe('rewriteQueryCache', () => {
     });
   });
 
-  it('rewrites pg_prewarm with valid table name → COUNT', () => {
-    expect(rewriteQueryCache("SELECT pg_prewarm('orders')")).toEqual({
-      sql: 'SELECT COUNT(*) FROM "orders"',
+  it('pg_prewarm table name (non-oid) → SELECT COUNT(*)', () => {
+    expect(rewriteQueryCache("SELECT pg_prewarm('users')")).toEqual({
+      sql: 'SELECT COUNT(*) FROM "users"',
       rewritten: true,
     });
   });
 
-  it('rewrites pg_prewarm with invalid table name → SELECT 1', () => {
-    expect(rewriteQueryCache("SELECT pg_prewarm('bad name!')")).toEqual({
+  it('pg_prewarm table name with second arg → SELECT COUNT(*)', () => {
+    expect(rewriteQueryCache("SELECT pg_prewarm('users', 'buffer')")).toEqual({
+      sql: 'SELECT COUNT(*) FROM "users"',
+      rewritten: true,
+    });
+  });
+
+  it('pg_prewarm with non-identifier table name → SELECT 1', () => {
+    // A table name with special chars fails the identifier regex.
+    expect(rewriteQueryCache("SELECT pg_prewarm('my table')")).toEqual({
       sql: 'SELECT 1',
       rewritten: true,
     });
   });
 
-  it('passes through unrelated SQL unchanged (no trailing handling)', () => {
+  it('passes through non-cache SQL', () => {
     expect(rewriteQueryCache('SELECT * FROM users')).toEqual({
       sql: 'SELECT * FROM users',
       rewritten: false,
@@ -189,141 +273,142 @@ describe('rewriteQueryCache', () => {
   });
 });
 
-describe('QueryCacheShim — LRU cache', () => {
-  it('constructs with default and custom max size', () => {
-    expect(new QueryCacheShim().getMaxSize()).toBe(100);
-    expect(new QueryCacheShim(5).getMaxSize()).toBe(5);
+// ──────────────────────────────────────────────
+//  QueryCacheShim class
+// ──────────────────────────────────────────────
+
+describe('QueryCacheShim', () => {
+  let cache: QueryCacheShim;
+  beforeEach(() => {
+    cache = new QueryCacheShim();
   });
 
-  it('enabled defaults true and can be disabled (clearing cache)', () => {
-    const c = new QueryCacheShim();
-    expect(c.enabled).toBe(true);
-    c.set('k', result());
-    expect(c.size()).toBe(1);
-    c.enabled = false;
-    expect(c.enabled).toBe(false);
-    expect(c.size()).toBe(0);
+  it('defaults to enabled with maxSize 100', () => {
+    expect(cache.enabled).toBe(true);
+    expect(cache.getMaxSize()).toBe(100);
+    expect(cache.size()).toBe(0);
   });
 
-  it('re-enabling does not clear cache (enabled setter truthy side)', () => {
-    const c = new QueryCacheShim();
-    c.enabled = false;
-    c.enabled = true;
-    expect(c.enabled).toBe(true);
-    c.set('k', result());
-    expect(c.size()).toBe(1);
+  it('constructor accepts custom maxSize', () => {
+    const c = new QueryCacheShim(3);
+    expect(c.getMaxSize()).toBe(3);
   });
 
-  it('set with maxSize 0 hits lruKey-undefined guard', () => {
-    // Constructor does not clamp maxSize, so 0 is legal: size(0) >= maxSize(0),
-    // and the LRU head is undefined on an empty map, exercising the false side.
-    const c = new QueryCacheShim(0);
-    c.set('a', result());
-    expect(c.size()).toBe(1);
+  it('enabled setter disables and clears cache', () => {
+    cache.set('k', result([[1]]));
+    expect(cache.size()).toBe(1);
+    cache.enabled = false;
+    expect(cache.enabled).toBe(false);
+    expect(cache.size()).toBe(0);
+    cache.enabled = true;
+    expect(cache.enabled).toBe(true);
   });
 
   it('get returns null when disabled', () => {
-    const c = new QueryCacheShim();
-    c.set('k', result());
-    c.enabled = false;
-    expect(c.get('k')).toBeNull();
+    cache.enabled = false;
+    cache.set('k', result());
+    expect(cache.get('k')).toBeNull();
   });
 
-  it('get returns null when not cached', () => {
-    const c = new QueryCacheShim();
-    expect(c.get('missing')).toBeNull();
+  it('set is a no-op when disabled', () => {
+    cache.enabled = false;
+    cache.set('k', result([[1]]));
+    expect(cache.size()).toBe(0);
   });
 
-  it('get returns cached result and refreshes LRU order', () => {
-    const c = new QueryCacheShim();
+  it('get returns null for missing key', () => {
+    expect(cache.get('missing')).toBeNull();
+  });
+
+  it('set + get round-trips result', () => {
+    const r = result([[1, 'a']]);
+    cache.set('k', r);
+    expect(cache.get('k')).toEqual(r);
+  });
+
+  it('get with TTL: expired entry returns null and deletes', () => {
     const r = result([[1]]);
-    c.set('k', r);
-    expect(c.get('k')).toEqual(r);
+    cache.set('k', r);
+    // Negative TTL → any elapsed time (>=0) is > ttlMs, so always expired.
+    expect(cache.get('k', -1)).toBeNull();
+    expect(cache.size()).toBe(0);
   });
 
-  it('get expires entry when TTL elapsed', () => {
-    const c = new QueryCacheShim();
-    c.set('k', result());
-    // Simulate stale entry by passing a negative TTL
-    expect(c.get('k', -1)).toBeNull();
-    expect(c.size()).toBe(0); // expired entry removed
+  it('get with future TTL returns cached entry', () => {
+    const r = result([[1]]);
+    cache.set('k', r);
+    expect(cache.get('k', 60_000)).toEqual(r);
   });
 
-  it('set no-op when disabled', () => {
-    const c = new QueryCacheShim();
-    c.enabled = false;
-    c.set('k', result());
-    expect(c.size()).toBe(0);
+  it('set with existing key re-inserts to tail (no duplicate)', () => {
+    cache.set('k', result([[1]]));
+    cache.set('k', result([[2]]));
+    expect(cache.size()).toBe(1);
+    expect(cache.get('k')).toEqual(result([[2]]));
   });
 
-  it('set evicts LRU entry when at capacity', () => {
+  it('LRU eviction at capacity', () => {
     const c = new QueryCacheShim(2);
-    c.set('a', result());
-    c.set('b', result());
-    c.set('c', result()); // evicts 'a'
+    c.set('a', result([[1]]));
+    c.set('b', result([[2]]));
+    c.set('c', result([[3]])); // evicts 'a' (LRU)
     expect(c.size()).toBe(2);
     expect(c.get('a')).toBeNull();
     expect(c.get('b')).not.toBeNull();
     expect(c.get('c')).not.toBeNull();
   });
 
-  it('set overwrites existing key by moving to tail', () => {
+  it('get re-orders entries (recently used survive eviction)', () => {
     const c = new QueryCacheShim(2);
     c.set('a', result([[1]]));
     c.set('b', result([[2]]));
-    // Overwrite 'a' — re-insert at tail
-    c.set('a', result([[3]]));
-    expect(c.get('a')).toEqual(result([[3]]));
+    c.get('a'); // 'a' now most recently used
+    c.set('c', result([[3]])); // evicts 'b' (now LRU)
+    expect(c.get('a')).not.toBeNull();
+    expect(c.get('b')).toBeNull();
   });
 
-  it('invalidate removes entries touching a table (case-insensitive)', () => {
-    const c = new QueryCacheShim();
-    c.set('k1', result(), ['Orders']);
-    c.set('k2', result(), ['Users']);
-    c.set('k3', result(), ['Orders', 'Users']);
-    c.invalidate('orders');
-    expect(c.size()).toBe(1); // only k2 (Users) remains
-    expect(c.get('k2')).not.toBeNull();
+  it('invalidate removes entries involving a table (case-insensitive)', () => {
+    cache.set('k1', result([[1]]), ['Users']);
+    cache.set('k2', result([[2]]), ['Orders']);
+    cache.set('k3', result([[3]]), ['Other']);
+    cache.invalidate('users');
+    expect(cache.get('k1')).toBeNull();
+    expect(cache.get('k2')).not.toBeNull();
+    expect(cache.get('k3')).not.toBeNull();
   });
 
-  it('invalidate no-op when no matching table', () => {
-    const c = new QueryCacheShim();
-    c.set('k1', result(), ['Users']);
-    c.invalidate('orders');
-    expect(c.size()).toBe(1);
+  it('invalidate with no matching table does nothing', () => {
+    cache.set('k1', result([[1]]), ['Users']);
+    cache.invalidate('nothing');
+    expect(cache.get('k1')).not.toBeNull();
   });
 
-  it('clear empties cache', () => {
-    const c = new QueryCacheShim();
-    c.set('a', result());
-    c.set('b', result());
-    c.clear();
-    expect(c.size()).toBe(0);
+  it('clear empties the cache', () => {
+    cache.set('a', result([[1]]));
+    cache.set('b', result([[2]]));
+    cache.clear();
+    expect(cache.size()).toBe(0);
   });
 
-  it('size returns entry count', () => {
-    const c = new QueryCacheShim();
-    expect(c.size()).toBe(0);
-    c.set('a', result());
-    c.set('b', result());
-    expect(c.size()).toBe(2);
-  });
-
-  it('setMaxSize clamps values below 1 to 1', () => {
-    const c = new QueryCacheShim();
-    c.setMaxSize(0);
-    expect(c.getMaxSize()).toBe(1);
-    c.setMaxSize(-5);
-    expect(c.getMaxSize()).toBe(1);
+  it('setMaxSize clamps below 1', () => {
+    cache.setMaxSize(0);
+    expect(cache.getMaxSize()).toBe(1);
   });
 
   it('setMaxSize evicts LRU entries when shrinking', () => {
-    const c = new QueryCacheShim();
-    c.set('a', result());
-    c.set('b', result());
-    c.set('c', result());
-    c.setMaxSize(1); // evict down to 1 (LRU first)
-    expect(c.size()).toBe(1);
-    expect(c.get('c')).not.toBeNull();
+    cache.set('a', result([[1]]));
+    cache.set('b', result([[2]]));
+    cache.set('c', result([[3]]));
+    cache.setMaxSize(2);
+    expect(cache.size()).toBe(2);
+    expect(cache.get('a')).toBeNull(); // LRU evicted first
+  });
+
+  it('setMaxSize grows without eviction', () => {
+    cache.set('a', result([[1]]));
+    cache.setMaxSize(200);
+    expect(cache.getMaxSize()).toBe(200);
+    expect(cache.size()).toBe(1);
   });
 });
