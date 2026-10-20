@@ -32,13 +32,13 @@ const COLUMN_DEF = '_xmin INTEGER DEFAULT 0, _xmax INTEGER DEFAULT 0, _cmin INTE
 
 /**
  * Matches the start of a `CREATE TABLE` (non-temp) statement, capturing
- * the table name and the column definition block.
+ * the full (possibly schema-qualified) table name and the column definitions.
  *
- * Group 1 — Table name (optional IF NOT EXISTS, schema-qualified, etc.)
+ * Group 1 — Full table name (with optional schema qualifier and quoting)
  * Group 2 — The column definitions block (everything between outer parens)
  */
 const CREATE_TABLE_REGEX =
-  /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:`?\w+`?\s*\.\s*)?(?:"([^"]+)"|`?(\w+)`?)\s*\(([\s\S]*)\)\s*$/i;
+  /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:`?\w+`?\s*\.\s*)?(?:"[^"]+"|`?\w+`?))\s*\(([\s\S]*)\)\s*$/i;
 
 /**
  * Matching `CREATE TEMP TABLE` (or TEMPORARY).
@@ -139,8 +139,8 @@ export class MvccSchemaShim {
       return sql;
     }
 
-    const tableName = match[1] || match[2];
-    const colDefs = match[3];
+    const tableName = match[1];
+    const colDefs = match[2];
 
     // Don't inject if already present
     if (hasRowVersionColumnsInDef(colDefs)) {
@@ -302,14 +302,32 @@ export class MvccSchemaShim {
         INSERT_COLUMNS,
         `INSERT INTO ${tableName} (${colList.trimEnd()}, _xmin, _xmax) ${keyword}`,
       );
-      // Find the SELECT ... part and add , xid, NULL to the SELECT list
+      // Append `, <xid> AS _xmin, NULL AS _xmax` to the SELECT list, i.e. after
+      // the SELECT/DISTINCT keyword but before the FROM clause (not after the
+      // whole statement, which would corrupt a WHERE/ORDER BY tail).
       const selectIdx = result.toUpperCase().indexOf('SELECT ');
+      // Unreachable false side: reaching this branch requires keyword ===
+      // 'SELECT' (VALUES is handled above), so the rewritten statement always
+      // contains a top-level `SELECT ` token.
+      /* c8 ignore next */
       if (selectIdx >= 0) {
-        const beforeSelect = result.substring(0, selectIdx + 7); // "SELECT "
-        const selectRest = result.substring(selectIdx + 7);
-        const rewritten = `${beforeSelect}${selectRest.trimStart()}, ${xid} AS _xmin, NULL AS _xmax`;
+        const selectEnd = selectIdx + 7; // length of "SELECT "
+        const selectRest = result.substring(selectEnd);
+        // Find the first top-level FROM keyword within the SELECT body
+        const fromMatch = selectRest.match(/\bFROM\b/i);
+        let rewritten: string;
+        if (fromMatch && fromMatch.index !== undefined) {
+          const insertAt = selectEnd + fromMatch.index;
+          rewritten =
+            result.substring(0, insertAt) +
+            `, ${xid} AS _xmin, NULL AS _xmax ` +
+            result.substring(insertAt);
+        } else {
+          rewritten = `${result}, ${xid} AS _xmin, NULL AS _xmax`;
+        }
         return [rewritten];
       }
+      /* c8 ignore next */
       return [result];
     }
 
