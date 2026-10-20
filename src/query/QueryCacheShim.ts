@@ -518,6 +518,9 @@ export class QueryCacheShim {
     // Evict LRU entries (from Map head) if over the new limit
     while (this.cache.size > this.maxSize) {
       const lruKey = this.cache.keys().next().value;
+      // Unreachable false side: `size > maxSize` with `maxSize >= 1` (clamped
+      // above) guarantees a non-empty map, so the LRU head key is always defined.
+      /* c8 ignore next */
       if (lruKey !== undefined) {
         this.cache.delete(lruKey);
       }
