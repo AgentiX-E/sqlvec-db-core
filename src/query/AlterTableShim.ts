@@ -213,11 +213,18 @@ const PG_SET_WITHOUT_CLUSTER = /SET\s+WITHOUT\s+CLUSTER\b/i;
 
 // ── Storage parameter variants ──────────────
 
-/** SET (storage_parameter[=value][, ...]) */
-const PG_SET_OPTIONS = /SET\s*\(/i;
+/**
+ * SET (storage_parameter[=value][, ...])
+ *
+ * The leading word boundary (\b) is required so that `RESET (` (which shares
+ * the trailing `SET` substring) is NOT mistaken for a `SET` action. Without it,
+ * `RESET (fillfactor)` would be misclassified as `SET (options)` and the
+ * RESET branch below would become unreachable.
+ */
+const PG_SET_OPTIONS = /\bSET\s*\(/i;
 
 /** RESET (storage_parameter[, ...]) */
-const PG_RESET_OPTIONS = /RESET\s*\(/i;
+const PG_RESET_OPTIONS = /\bRESET\s*\(/i;
 
 // ── Other PG-specific variants ───────────────
 
