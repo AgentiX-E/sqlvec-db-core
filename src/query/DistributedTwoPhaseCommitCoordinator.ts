@@ -791,6 +791,12 @@ export class DistributedTwoPhaseCommitCoordinator {
   private startSweepTimer(): void {
     if (this.sweepTimer) return;
     this.sweepTimer = setInterval(() => this.sweepTimedOutTransactions(), this.config.sweepIntervalMs);
+    // best-effort unref so an idle sweep timer does not hold the process open.
+    // The `typeof ... === 'function'` guard exists only for non-Node runtimes
+    // (browsers / React Native) whose timer handle lacks `.unref`; on Node and
+    // Vitest (real or fake timers) `.unref` is always a function, so the false
+    // branch is unreachable on every supported test/CI runtime.
+    /* c8 ignore next */
     if (this.sweepTimer && typeof (this.sweepTimer as any).unref === 'function') {
       (this.sweepTimer as any).unref();
     }
@@ -822,7 +828,12 @@ export class DistributedTwoPhaseCommitCoordinator {
         { txId, elapsedMs: Date.now() - record.updated_at },
         'Distributed transaction timed out — rolling back',
       );
-      this.rollback(txId).catch(err => {
+      this.rollback(txId).catch(
+        /* c8 ignore next */
+        err => {
+        // rollback() never rejects: every internal step is allSettled or a
+        // synchronous persist helper that catches its own errors. This handler
+        // is defensive only and is unreachable in practice.
         this.logger.error({ txId, err: err.message }, 'Rollback of timed-out tx failed');
       });
     }
