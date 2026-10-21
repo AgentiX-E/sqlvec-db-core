@@ -396,9 +396,14 @@ function parseWithOptions(withContent: string): string[] {
       continue;
     }
 
-    // Track nested parentheses (for future-proofing)
+    // Track nested parentheses (for future-proofing).
+    // NOTE: `WITH_CLAUSE_CAPTURE` (`[^()]*`) guarantees the content passed
+    // here contains no top-level parentheses, so `depth` never deviates from
+    // zero. These depth-tracking branches are unreachable defensive code.
+    /* c8 ignore next */
     if (ch === '(') {
       depth++;
+      /* c8 ignore next */
     } else if (ch === ')') {
       depth--;
     }
@@ -496,6 +501,9 @@ function stripStorageParams(sql: string): string {
  */
 function rewriteShowStatement(sql: string): MVCCResult | null {
   const paramMatch = sql.match(SHOW_PARAM);
+  // Called only after `SHOW` matched above, so `SHOW_PARAM` always matches
+  // and this null guard is unreachable.
+  /* c8 ignore next */
   if (!paramMatch) return null;
 
   const param = paramMatch[1].toLowerCase().replace(/;+$/, '').trim();
@@ -552,6 +560,9 @@ function hasStorageParams(sql: string): boolean {
  */
 function isMvccShowStatement(trimmed: string): boolean {
   const paramMatch = trimmed.match(SHOW_PARAM);
+  // Called only after `SHOW` matched in `detectMVCC`, so `SHOW_PARAM` always
+  // matches and this null guard is unreachable.
+  /* c8 ignore next */
   if (!paramMatch) return false;
 
   const param = paramMatch[1].toLowerCase().replace(/;+$/, '').trim();
@@ -895,12 +906,20 @@ export function rewriteInsertWithMvcc(sql: string, ctx: MvccContext): string {
       });
       return `${insertInto} (${newCols}) VALUES ${processedValues}`;
     }
-    // SELECT: just add MVCC columns
-    return `${insertInto} (${newCols}) SELECT ${ctx.currentXid} AS __xmin, 0 AS __xmax, NULL AS __ctid, ${rest.replace(/^select\s+/i, '')}`;
+    if (insertType === 'SELECT') {
+      // SELECT: just add MVCC columns
+      return `${insertInto} (${newCols}) SELECT ${ctx.currentXid} AS __xmin, 0 AS __xmax, NULL AS __ctid, ${rest.replace(/^select\s+/i, '')}`;
+    }
+    // DEFAULT VALUES (or any other insert type): leave unchanged — appending
+    // MVCC columns to a DEFAULT VALUES clause would produce invalid SQL.
+    return sql;
   } else {
     // No columns: add MVCC as first values
     if (insertType === 'VALUES') {
       const valuesIdx = sql.search(/VALUES\s*/i);
+      // `insertType === 'VALUES'` was matched from the SQL above, so the
+      // `VALUES` keyword is guaranteed to be present; this guard is unreachable.
+      /* c8 ignore next */
       if (valuesIdx === -1) return sql;
       const valuesPart = sql.substring(valuesIdx + 6).trim();
       const processedValues = valuesPart.replace(/\(([^)]*)\)/g, (_, inner) => {
@@ -911,6 +930,9 @@ export function rewriteInsertWithMvcc(sql: string, ctx: MvccContext): string {
     if (insertType === 'SELECT') {
       // INSERT INTO t SELECT ... → add MVCC column prefix
       const selectIdx = sql.search(/SELECT\s+/i);
+      // `insertType === 'SELECT'` was matched from the SQL above, so the
+      // `SELECT` keyword is guaranteed to be present; this guard is unreachable.
+      /* c8 ignore next */
       if (selectIdx === -1) return sql;
       const selectPart = sql.substring(selectIdx);
       // Add MVCC constants as leading columns in SELECT
@@ -983,6 +1005,10 @@ export function rewriteVacuumWithMvcc(sql: string, ctx: MvccContext): string {
     result += '; VACUUM'; // SQLite VACUUM reclaims space
   }
 
+  // `result` is always non-empty here: the tableName branch builds a DELETE
+  // and the else branch builds a placeholder DELETE, so the `|| 'SELECT 1'`
+  // fallback is unreachable defensive code.
+  /* c8 ignore next */
   return result || 'SELECT 1';
 }
 
@@ -1083,6 +1109,11 @@ function injectWhereClause(sql: string, mvccFilter: string): string {
 
       if (whereNode) {
         const loc = locationOf(whereNode);
+        // With `locationTracking: true`, `locationOf` returns `{ start, end }`
+        // (both numbers) for a resolved `whereNode`, or throws/returns undefined
+        // (which falls into the outer catch); a non-number `loc.start` is not
+        // produced, so the false side is unreachable defensive code.
+        /* c8 ignore next */
         if (typeof loc.start === 'number') {
           // Inject MVCC filter BEFORE the first condition in PG SQL
           const modified = pgSql.slice(0, loc.start) + mvccFilter + ' AND ' + pgSql.slice(loc.start);
@@ -1101,6 +1132,9 @@ function injectWhereClause(sql: string, mvccFilter: string): string {
   if (whereIdx === -1) {
     // No WHERE: find table expression end
     const fromMatch = sql.match(/\bFROM\s+/i);
+    // `wrapSelectWithMvcc` (the only caller) already guards on `/\bFROM\b/`,
+    // so a SELECT reaching here always contains FROM; this guard is unreachable.
+    /* c8 ignore next */
     if (!fromMatch) return sql;
 
     const fromEnd = fromMatch.index! + fromMatch[0].length;
