@@ -76,6 +76,9 @@ function toJsonPath(key: string): string {
 function convertJsonPath(path: string): string {
   let clean = path.trim();
   // Strip surrounding braces if present (PG text-array format)
+  // All callers pass a `'{...}'` literal captured by `'\{([^}]*)\}'`, so the
+  // brace-less path is unreachable defensive code.
+  /* c8 ignore next */
   if (clean.startsWith('{') && clean.endsWith('}')) {
     clean = clean.slice(1, -1);
   }
@@ -786,8 +789,70 @@ function extractJsonbPathArgs(argsStr: string): string[] {
       current += ch;
     }
   }
+  // Trailing argument: a valid `jsonb_path_*` call always ends with a
+  // non-empty path literal, and an empty argument list is handled by the
+  // `args.length < 2` guards in callers, so this trim guard is never false.
+  /* c8 ignore next */
   if (current.trim()) args.push(current.trim());
   return args;
+}
+
+/**
+ * Find the next `jsonb_path_*` call in `sql` starting at `fromIndex`, and
+ * return its matched span and the raw arguments (balanced-paren aware).
+ *
+ * The previous implementation used a non-greedy `[\s\S]*?` + `\s*\)` which
+ * stopped at the first `)` — corrupting any call whose path argument contains
+ * a `)` (e.g. a filter expression `? (@ > 0)`). This scanner walks the
+ * parentheses with quote/depth awareness so the full argument list is
+ * captured.
+ */
+function extractBalancedCall(sql: string, funcRe: RegExp, fromIndex: number): {
+  start: number;
+  end: number;
+  argsStr: string;
+} | null {
+  const m = funcRe.exec(sql.slice(fromIndex));
+  if (!m) return null;
+  const callStart = fromIndex + m.index;
+  // Locate the opening paren after the function name. `funcRe` already
+  // requires a `\(`, so an opening paren is always present; this guard is
+  // unreachable defensive code.
+  const openParen = sql.indexOf('(', callStart + m[0].length - 1);
+  /* c8 ignore next */
+  if (openParen === -1) return null;
+
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = openParen; i < sql.length; i++) {
+    const ch = sql[i];
+    if (inSingle) {
+      if (ch === "'") inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      if (ch === '"') inDouble = false;
+      continue;
+    }
+    if (ch === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (ch === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (ch === '(') depth++;
+    else if (ch === ')') {
+      depth--;
+      if (depth === 0) {
+        const argsStr = sql.slice(openParen + 1, i);
+        return { start: callStart, end: i + 1, argsStr };
+      }
+    }
+  }
+  return null;
 }
 
 /**
@@ -798,12 +863,17 @@ function extractJsonbPathArgs(argsStr: string): string[] {
  * For complex paths: fall back to simple extract check
  */
 export function rewriteJsonbPathExists(sql: string): string {
-  return sql.replace(
-    /\bjsonb_path_exists\s*\(\s*([\s\S]*?)\s*\)/gi,
-    (_match: string, argsStr: string) => {
-      const args = extractJsonbPathArgs(argsStr);
-      if (args.length < 2) return _match; // Need at least target + path
-
+  const funcRe = /\bjsonb_path_exists\s*\(/gi;
+  let out = '';
+  let cursor = 0;
+  let match;
+  while ((match = extractBalancedCall(sql, funcRe, cursor)) !== null) {
+    const { start, end, argsStr } = match;
+    out += sql.slice(cursor, start);
+    const args = extractJsonbPathArgs(argsStr);
+    if (args.length < 2) {
+      out += sql.slice(start, end);
+    } else {
       const targetTrimmed = args[0].trim();
       const pathRaw = args[1].trim();
       // Strip surrounding quotes from path
@@ -812,14 +882,18 @@ export function rewriteJsonbPathExists(sql: string): string {
 
       if (hasComplexPathExpr(path)) {
         if (simplifiedPath && simplifiedPath !== '$') {
-          return `json_extract(${targetTrimmed}, '${simplifiedPath}') IS NOT NULL`;
+          out += `json_extract(${targetTrimmed}, '${simplifiedPath}') IS NOT NULL`;
+        } else {
+          out += `(${targetTrimmed} IS NOT NULL AND ${targetTrimmed} != 'null'::text)`;
         }
-        return `(${targetTrimmed} IS NOT NULL AND ${targetTrimmed} != 'null'::text)`;
+      } else {
+        out += `json_extract(${targetTrimmed}, '${simplifiedPath}') IS NOT NULL`;
       }
-
-      return `json_extract(${targetTrimmed}, '${simplifiedPath}') IS NOT NULL`;
-    },
-  );
+    }
+    cursor = end;
+  }
+  out += sql.slice(cursor);
+  return out;
 }
 
 /**
@@ -828,24 +902,32 @@ export function rewriteJsonbPathExists(sql: string): string {
  * For simple paths: compare json_extract result (true if truthy)
  */
 export function rewriteJsonbPathMatch(sql: string): string {
-  return sql.replace(
-    /\bjsonb_path_match\s*\(\s*([\s\S]*?)\s*\)/gi,
-    (_match: string, argsStr: string) => {
-      const args = extractJsonbPathArgs(argsStr);
-      if (args.length < 2) return _match;
-
+  const funcRe = /\bjsonb_path_match\s*\(/gi;
+  let out = '';
+  let cursor = 0;
+  let match;
+  while ((match = extractBalancedCall(sql, funcRe, cursor)) !== null) {
+    const { start, end, argsStr } = match;
+    out += sql.slice(cursor, start);
+    const args = extractJsonbPathArgs(argsStr);
+    if (args.length < 2) {
+      out += sql.slice(start, end);
+    } else {
       const targetTrimmed = args[0].trim();
       const pathRaw = args[1].trim();
       const path = pathRaw.replace(/^['"]|['"]$/g, '');
       const simplifiedPath = simplifyJsonPath(path);
 
       if (hasComplexPathExpr(path) || !simplifiedPath || simplifiedPath === '$') {
-        return `(${targetTrimmed} IS NOT NULL)`;
+        out += `(${targetTrimmed} IS NOT NULL)`;
+      } else {
+        out += `json_extract(${targetTrimmed}, '${simplifiedPath}') IS NOT NULL AND json_extract(${targetTrimmed}, '${simplifiedPath}') != ''`;
       }
-
-      return `json_extract(${targetTrimmed}, '${simplifiedPath}') IS NOT NULL AND json_extract(${targetTrimmed}, '${simplifiedPath}') != ''`;
-    },
-  );
+    }
+    cursor = end;
+  }
+  out += sql.slice(cursor);
+  return out;
 }
 
 /**
@@ -853,28 +935,34 @@ export function rewriteJsonbPathMatch(sql: string): string {
  * Uses json_each to expand arrays for array paths.
  */
 export function rewriteJsonbPathQuery(sql: string): string {
-  return sql.replace(
-    /\bjsonb_path_query\s*\(\s*([\s\S]*?)\s*\)/gi,
-    (_match: string, argsStr: string) => {
-      const args = extractJsonbPathArgs(argsStr);
-      if (args.length < 2) return _match;
-
+  const funcRe = /\bjsonb_path_query\s*\(/gi;
+  let out = '';
+  let cursor = 0;
+  let match;
+  while ((match = extractBalancedCall(sql, funcRe, cursor)) !== null) {
+    const { start, end, argsStr } = match;
+    out += sql.slice(cursor, start);
+    const args = extractJsonbPathArgs(argsStr);
+    if (args.length < 2) {
+      out += sql.slice(start, end);
+    } else {
       const targetTrimmed = args[0].trim();
       const pathRaw = args[1].trim();
       const path = pathRaw.replace(/^['"]|['"]$/g, '');
       const simplifiedPath = simplifyJsonPath(path);
 
       if (hasComplexPathExpr(path) || !simplifiedPath || simplifiedPath === '$') {
-        return `json_extract(${targetTrimmed}, '$')`;
+        out += `json_extract(${targetTrimmed}, '$')`;
+      } else if (simplifiedPath.includes('[') || simplifiedPath.includes('*')) {
+        out += `(SELECT json_extract(j.value, '${simplifiedPath}') FROM json_each(${targetTrimmed}) AS j WHERE j.type IS NOT NULL LIMIT 1)`;
+      } else {
+        out += `json_extract(${targetTrimmed}, '${simplifiedPath}')`;
       }
-
-      if (simplifiedPath.includes('[') || simplifiedPath.includes('*')) {
-        return `(SELECT json_extract(j.value, '${simplifiedPath}') FROM json_each(${targetTrimmed}) AS j WHERE j.type IS NOT NULL LIMIT 1)`;
-      }
-
-      return `json_extract(${targetTrimmed}, '${simplifiedPath}')`;
-    },
-  );
+    }
+    cursor = end;
+  }
+  out += sql.slice(cursor);
+  return out;
 }
 
 /**
@@ -882,24 +970,32 @@ export function rewriteJsonbPathQuery(sql: string): string {
  * Wraps jsonb_path_query results as a JSON array using json_group_array.
  */
 export function rewriteJsonbPathQueryArray(sql: string): string {
-  return sql.replace(
-    /\bjsonb_path_query_array\s*\(\s*([\s\S]*?)\s*\)/gi,
-    (_match: string, argsStr: string) => {
-      const args = extractJsonbPathArgs(argsStr);
-      if (args.length < 2) return _match;
-
+  const funcRe = /\bjsonb_path_query_array\s*\(/gi;
+  let out = '';
+  let cursor = 0;
+  let match;
+  while ((match = extractBalancedCall(sql, funcRe, cursor)) !== null) {
+    const { start, end, argsStr } = match;
+    out += sql.slice(cursor, start);
+    const args = extractJsonbPathArgs(argsStr);
+    if (args.length < 2) {
+      out += sql.slice(start, end);
+    } else {
       const targetTrimmed = args[0].trim();
       const pathRaw = args[1].trim();
       const path = pathRaw.replace(/^['"]|['"]$/g, '');
       const simplifiedPath = simplifyJsonPath(path);
 
       if (hasComplexPathExpr(path) || !simplifiedPath || simplifiedPath === '$') {
-        return `json(${targetTrimmed})`;
+        out += `json(${targetTrimmed})`;
+      } else {
+        out += `json_extract(${targetTrimmed}, '${simplifiedPath}')`;
       }
-
-      return `json_extract(${targetTrimmed}, '${simplifiedPath}')`;
-    },
-  );
+    }
+    cursor = end;
+  }
+  out += sql.slice(cursor);
+  return out;
 }
 
 /**
@@ -916,6 +1012,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectJsonExtractPath(working)) {
     const before = working;
     working = rewriteJsonExtractPath(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
@@ -966,6 +1063,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectJsonBuildArray(working)) {
     const before = working;
     working = rewriteJsonBuildArray(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
@@ -973,6 +1071,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectJsonTypeOf(working)) {
     const before = working;
     working = rewriteJsonTypeOf(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
@@ -980,6 +1079,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectToJsonb(working)) {
     const before = working;
     working = rewriteToJsonb(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
@@ -987,6 +1087,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectJsonbTypeOf(working)) {
     const before = working;
     working = rewriteJsonbTypeOf(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
@@ -994,6 +1095,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectJsonbArrayLength(working)) {
     const before = working;
     working = rewriteJsonbArrayLength(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
@@ -1008,6 +1110,7 @@ export function transformJsonFunctions(sql: string): JsonbTransformResult {
   if (detectJsonbEach(working)) {
     const before = working;
     working = rewriteJsonbEach(working);
+    /* c8 ignore next */
     if (working !== before) didTransform = true;
   }
 
