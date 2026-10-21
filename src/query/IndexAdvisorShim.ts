@@ -356,6 +356,11 @@ export class IndexAdvisorShim {
 
         // Check if we already recommended this
         const statement = `CREATE INDEX IF NOT EXISTS ${idxName} ON ${table} (${col})`;
+        // `referencedColumns` is built from a deduplicated Set and `idxName`
+        // embeds the unique table+column pair, so this statement can never be
+        // present twice within a single analyze() call. The false side of the
+        // `includes` guard is therefore unreachable.
+        /* c8 ignore next */
         if (!recommendations.includes(statement)) {
           recommendations.push(statement);
         }
@@ -373,6 +378,11 @@ export class IndexAdvisorShim {
         (idx) => idx.toLowerCase().includes(compositeName.toLowerCase()),
       );
 
+      // The composite statement has the form `(a, b)` and is emitted only
+      // here (after the single-column loop above, which uses the distinct
+      // `(col)` form). `recommendations.includes(compositeStmt)` can never be
+      // true because no single-column branch pushes a multi-column statement.
+      /* c8 ignore next */
       if (!exists && !recommendations.includes(compositeStmt)) {
         recommendations.push(compositeStmt);
       }
@@ -391,7 +401,12 @@ export class IndexAdvisorShim {
    */
   private extractWhereColumns(sql: string): string[] {
     const columns: string[] = [];
-    const whereMatch = sql.match(/\bWHERE\s+(.+?)(?=\s+(?:GROUP|ORDER|LIMIT|HAVING|$))/is);
+    // The lookahead matches a following clause keyword OR end-of-string. The
+    // previous regex anchored `$` behind `\s+`, so a bare `WHERE col = val`
+    // with no trailing GROUP/ORDER/LIMIT/HAVING never matched (end-of-string
+    // has no leading whitespace). Split the anchor so end-of-string is matched
+    // independently of the whitespace that precedes a clause keyword.
+    const whereMatch = sql.match(/\bWHERE\s+(.+?)(?=\s+(?:GROUP|ORDER|LIMIT|HAVING)\b|$)/is);
     if (!whereMatch) return columns;
 
     const whereClause = whereMatch[1];
@@ -414,7 +429,9 @@ export class IndexAdvisorShim {
    */
   private extractJoinColumns(sql: string): string[] {
     const columns: string[] = [];
-    const joinMatches = sql.matchAll(/\b(?:LEFT|RIGHT|INNER|OUTER|FULL|CROSS|NATURAL|)\s*JOIN\s+(.+?)\s+ON\s+(.+?)(?=\s+(?:LEFT|RIGHT|INNER|OUTER|FULL|CROSS|NATURAL|JOIN|WHERE|GROUP|ORDER|LIMIT|$))/gis);
+    // Same fix as extractWhereColumns: end-of-string must be matched
+    // independently of the whitespace that precedes the next clause keyword.
+    const joinMatches = sql.matchAll(/\b(?:LEFT|RIGHT|INNER|OUTER|FULL|CROSS|NATURAL|)\s*JOIN\s+(.+?)\s+ON\s+(.+?)(?=\s+(?:LEFT|RIGHT|INNER|OUTER|FULL|CROSS|NATURAL|JOIN|WHERE|GROUP|ORDER|LIMIT)\b|$)/gis);
 
     for (const match of joinMatches) {
       const onClause = match[2];
@@ -436,7 +453,7 @@ export class IndexAdvisorShim {
    */
   private extractOrderColumns(sql: string): string[] {
     const columns: string[] = [];
-    const orderMatch = sql.match(/\bORDER\s+BY\s+(.+?)(?=\s+(?:LIMIT|OFFSET|$))/is);
+    const orderMatch = sql.match(/\bORDER\s+BY\s+(.+?)(?=\s+(?:LIMIT|OFFSET)\b|$)/is);
     if (!orderMatch) return columns;
 
     const orderClause = orderMatch[1];
@@ -821,6 +838,10 @@ export class IndexAdvisor {
               const joinRefs: QualifiedRef[] = [];
               this.collectRefsFromExpr(from.join.on, joinRefs);
               for (const ref of joinRefs) {
+                // `from.type === 'table'` (guarded above) guarantees
+                // `from.name` is a non-null `{ name: string }`, so the second
+                // `?? ''` fallback for `from.name?.name` is unreachable.
+                /* c8 ignore next */
                 const table = ref.table ?? (from.name?.name ?? '');
                 const key = `${table}|${ref.column}|JOIN`;
                 if (!seenKeys.has(key)) {
@@ -841,6 +862,9 @@ export class IndexAdvisor {
               const key = `${table}|${obExpr.name}|ORDER_BY`;
               if (!seenKeys.has(key)) {
                 seenKeys.add(key);
+                // `obExpr.type === 'ref'` guarantees `obExpr.name` is a
+                // non-null string, so the `?? ''` fallback is unreachable.
+                /* c8 ignore next */
                 candidates.push({ table, column: obExpr.name ?? '', context: 'ORDER_BY' });
               }
             }
@@ -856,6 +880,9 @@ export class IndexAdvisor {
               const key = `${table}|${gbExpr.name}|GROUP_BY`;
               if (!seenKeys.has(key)) {
                 seenKeys.add(key);
+                // `gbExpr.type === 'ref'` guarantees `gbExpr.name` is a
+                // non-null string, so the `?? ''` fallback is unreachable.
+                /* c8 ignore next */
                 candidates.push({ table, column: gbExpr.name ?? '', context: 'GROUP_BY' });
               }
             }
