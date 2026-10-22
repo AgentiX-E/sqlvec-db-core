@@ -8212,9 +8212,14 @@ export async function shutdownWAL(): Promise<void> {
  */
 export function shimsForCategory(category: QueryCategory): string[] {
   // Which shim categories to run for each query type
+  // NOTE: `security` is included in ddlShims because several security shims
+  // (UnloggedTableShim, RLS, ColumnGrant, CertMap) operate on DDL statements
+  // such as `CREATE UNLOGGED TABLE`, `ALTER TABLE ... ENABLE ROW LEVEL
+  // SECURITY`, and `GRANT ... ON COLUMN`. Without it, `CREATE UNLOGGED TABLE`
+  // reaches SQLite verbatim and fails with `near "UNLOGGED": syntax error`.
   const selectShims = ['from', 'join', 'index', 'general', 'security'];
   const dmlShims = ['from', 'join', 'index', 'general', 'security'];
-  const ddlShims = ['ddl', 'general'];
+  const ddlShims = ['ddl', 'general', 'security'];
   const configShims = ['config'];
   const maintenanceShims = ['maintenance'];
   const transactionShims = ['transaction'];

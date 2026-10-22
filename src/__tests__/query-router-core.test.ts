@@ -132,7 +132,9 @@ describe('shimsForCategory', () => {
   });
 
   it('returns ddl shims for CREATE/ALTER/DROP', () => {
-    const expected = ['ddl', 'general'];
+    // `security` is included so DDL security shims (CREATE UNLOGGED TABLE,
+    // ALTER TABLE ... RLS, GRANT ... ON COLUMN) can rewrite their statements.
+    const expected = ['ddl', 'general', 'security'];
     for (const c of ['CREATE', 'ALTER', 'DROP'] as const) {
       expect(shimsForCategory(c)).toEqual(expected);
     }

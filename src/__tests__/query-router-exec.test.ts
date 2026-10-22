@@ -479,3 +479,22 @@ describe('QueryRouter — INSERT RETURNING', () => {
     expect(r2.rows).toEqual([]);
   });
 });
+
+describe('QueryRouter — DDL security shims', () => {
+  it('strips UNLOGGED from CREATE UNLOGGED TABLE', async () => {
+    const { qr, db } = makeRouter();
+    const r = await qr.execute('CREATE UNLOGGED TABLE u1 (id INTEGER)');
+    expect(r.engine).toBe('shard');
+    // The table must actually exist (UNLOGGED keyword removed before SQLite).
+    const row = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='u1'").get();
+    expect(row).toEqual({ name: 'u1' });
+  });
+
+  it('rewrites ALTER TABLE ... ENABLE ROW LEVEL SECURITY as a no-op', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER)');
+    const r = await qr.execute('ALTER TABLE t ENABLE ROW LEVEL SECURITY');
+    expect(r.engine).toBe('shard');
+    expect(r.rowCount).toBeGreaterThanOrEqual(0);
+  });
+});
