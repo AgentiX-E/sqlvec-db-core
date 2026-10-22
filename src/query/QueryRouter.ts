@@ -5033,8 +5033,13 @@ export class QueryRouter {
 
         const shard = this.shardManager.getShard(targetShard);
         if (!shard) throw new Error(`No shard ${targetShard} available`);
-        shard.db.exec(sql);
-        const rowCount = (shard.db as any).changes ?? (shard.db as any).totalChanges ?? 1;
+        // Use prepare().run() so we can read the affected-row count from the
+        // statement result. `db.exec()` does not expose a change count, and
+        // `db.changes`/`db.totalChanges` are not properties of better-sqlite3's
+        // Database instance, so the previous fallback always reported 1 row
+        // even for multi-row `INSERT ... VALUES (...), (...)`.
+        const runResult = shard.db.prepare(sql).run();
+        const rowCount = Number.isFinite(runResult.changes) ? runResult.changes : 1;
 
         // MVCC: Record own write for SELECT visibility
         if (this.mvccExecutor && sessionId) {
@@ -5081,9 +5086,10 @@ export class QueryRouter {
                       // Hard-delete the soft-deleted row
                       const delResult = db0.prepare(`DELETE FROM "${conflictTable}" WHERE _xmax != 0 AND rowid IN (SELECT rowid FROM "${conflictTable}" WHERE "_xmax" != 0)`).run();
                       if ((delResult?.changes ?? 0) > 0) {
-                        // Retry the INSERT on the same shard
-                        db0.exec(sql);
-                        const rowCount = (db0 as any).changes ?? 1;
+                        // Retry the INSERT on the same shard and read the
+                        // affected-row count from the statement result.
+                        const retryResult = db0.prepare(sql).run();
+                        const rowCount = Number.isFinite(retryResult.changes) ? retryResult.changes : 1;
                         this.markRecentWrite(sessionId);
                         retried = true;
                         return {
