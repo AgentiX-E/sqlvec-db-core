@@ -368,9 +368,21 @@ export class FtsTranslator {
             const name = sql.slice(i, i + nameLen).toLowerCase();
             if (name === 'to_tsvector') {
               // `to_tsvector(...)` has no FTS5 equivalent at query time (FTS5
-              // tokenizes at index time). Replace it with NULL so the slot
-              // remains valid — `SELECT NULL FROM t` instead of an illegal
-              // `SELECT FROM t`.
+              // tokenizes at index time). When it is the left operand of `@@`,
+              // the MATCH column is its column argument — emit that column so
+              // the `@@` rewrite below produces `col MATCH '...'`. Otherwise
+              // (standalone to_tsvector) replace it with NULL so the slot stays
+              // valid — `SELECT NULL FROM t` instead of an illegal `SELECT FROM t`.
+              const after = this.skipWs(sql, close + 1);
+              if (sql[after] === '@' && sql[after + 1] === '@') {
+                const args = this.extractFunctionArgs(sql.slice(i, close + 1));
+                // to_tsvector(config, column) → column is the last argument.
+                const col = args[args.length - 1] || '';
+                out.push(col);
+                changed = true;
+                i = close + 1;
+                continue;
+              }
               out.push('NULL');
               changed = true;
               i = close + 1;
@@ -416,6 +428,12 @@ export class FtsTranslator {
 
   /** Read a left operand immediately before the `@@` at `at`, or null. */
   private findLeftOperand(sql: string, at: number): string | null {
+    // The left operand may be a `to_tsvector(config, col)` call (the canonical
+    // PostgreSQL full-text idiom). Unwrap it to its column argument so the
+    // `@@` rewrite produces `col MATCH '...'` instead of a dangling `)`.
+    const tsVector = this.findLeftToTsvector(sql, at);
+    if (tsVector !== null) return tsVector;
+
     let j = at - 1;
     while (j >= 0 && /\s/.test(sql[j])) j--;
     if (j < 0) return null;
@@ -423,6 +441,53 @@ export class FtsTranslator {
     while (j >= 0 && /[`"'\w.$]/.test(sql[j])) j--;
     const operand = sql.slice(j + 1, start + 1).trim();
     return operand.length > 0 ? operand : null;
+  }
+
+  /**
+   * If the text immediately before `@@` at `at` is a `to_tsvector(...)` call,
+   * return the column argument (the last argument). Otherwise return null.
+   */
+  private findLeftToTsvector(sql: string, at: number): string | null {
+    // Skip whitespace between the `@@` and the preceding operand.
+    let j = at - 1;
+    while (j >= 0 && /\s/.test(sql[j])) j--;
+    if (sql[j] !== ')') return null;
+
+    // Walk back to the matching open paren of the call.
+    const close = j;
+    const open = this.findOpenParen(sql, close);
+    if (open < 0) return null;
+
+    // Confirm the call name is `to_tsvector`.
+    const nameStart = this.findNameStart(sql, open);
+    const name = sql.slice(nameStart, open).trim().toLowerCase();
+    if (name !== 'to_tsvector') return null;
+
+    const args = this.extractFunctionArgs(sql.slice(nameStart, close + 1));
+    const col = args[args.length - 1] || '';
+    return col.length > 0 ? col : null;
+  }
+
+  /** Find the position of the `(` matching a `)` at `close`, or -1. */
+  private findOpenParen(sql: string, close: number): number {
+    let depth = 0;
+    for (let i = close; i >= 0; i--) {
+      if (sql[i] === ')') depth++;
+      else if (sql[i] === '(') {
+        depth--;
+        if (depth === 0) return i;
+      }
+    }
+    return -1;
+  }
+
+  /** Find the start of an identifier immediately before `open`, or 0. */
+  private findNameStart(sql: string, open: number): number {
+    let j = open - 1;
+    while (j >= 0 && /\s/.test(sql[j])) j--;
+    const end = j;
+    while (j >= 0 && /[A-Za-z0-9_$]/.test(sql[j])) j--;
+    return j + 1;
   }
 
   private skipWs(sql: string, i: number): number {

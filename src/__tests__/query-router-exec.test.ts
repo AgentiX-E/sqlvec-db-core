@@ -572,3 +572,32 @@ describe('QueryRouter — PL/pgSQL executor interop', () => {
     expect(r.engine).toBe('plpgsql');
   });
 });
+
+describe('QueryRouter — FTS full-text search (tsvector/tsquery @@ → FTS5 MATCH)', () => {
+  it('rewrites body @@ to_tsquery to FTS5 MATCH', async () => {
+    const { qr, db } = makeRouter();
+    db.exec("CREATE VIRTUAL TABLE ft USING fts5(body)");
+    db.exec("INSERT INTO ft (body) VALUES ('hello world'), ('moon rise')");
+    const r = await qr.execute("SELECT * FROM ft WHERE body @@ to_tsquery('hello')");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).body).toBe('hello world');
+  });
+
+  it('unwraps to_tsvector(config, col) @@ to_tsquery to col MATCH', async () => {
+    const { qr, db } = makeRouter();
+    db.exec("CREATE VIRTUAL TABLE ft USING fts5(body)");
+    db.exec("INSERT INTO ft (body) VALUES ('hello world'), ('moon rise')");
+    const r = await qr.execute("SELECT * FROM ft WHERE to_tsvector('english', body) @@ to_tsquery('moon')");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).body).toBe('moon rise');
+  });
+
+  it('translates tsquery & (AND) operators', async () => {
+    const { qr, db } = makeRouter();
+    db.exec("CREATE VIRTUAL TABLE ft USING fts5(body)");
+    db.exec("INSERT INTO ft (body) VALUES ('hello world'), ('hello moon')");
+    const r = await qr.execute("SELECT * FROM ft WHERE body @@ to_tsquery('hello & world')");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).body).toBe('hello world');
+  });
+});

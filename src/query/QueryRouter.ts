@@ -772,6 +772,9 @@ export class QueryRouter {
     // ── Initialize ForUpdateExecutor ─────────────────────────
     this.forUpdateExecutor = new ForUpdateExecutor(this.mvccExecutor as any);
 
+    // ── Initialize FTS translator (tsvector/tsquery → FTS5) ──
+    this.ftsTranslator = new FtsTranslator();
+
     // ── Register PG string/fuzzy/date functions on shard 0 database ─────
     if (shard0?.db) {
       registerStringFunctions(shard0.db);
@@ -5234,6 +5237,16 @@ export class QueryRouter {
       if (this.isVectorQuery(sql)) {
         const sqlQuery = this.buildSqlQuery(sql, QueryType.VECTOR_SEARCH);
         return this.executeVectorQuery(sqlQuery, undefined, start);
+      }
+      // ── FTS rewrite: tsvector/tsquery @@ → FTS5 MATCH ──
+      // PostgreSQL `@@` is not valid SQLite SQL; translate it here (parity with
+      // executeInternal's Step 2e) so a `col @@ to_tsquery(...)` SELECT reaches
+      // SQLite as `col MATCH '...'` instead of failing with `unrecognized "@"`.
+      if (this.ftsTranslator && detectFTSOperator(sql)) {
+        const ftsRewritten = this.ftsTranslator.rewriteSql(sql);
+        if (ftsRewritten !== sql) {
+          sql = ftsRewritten;
+        }
       }
       // ── Partition routing: rewrite SELECT to UNION ALL across shards ──
       {

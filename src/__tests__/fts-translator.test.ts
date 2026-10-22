@@ -174,6 +174,20 @@ describe('FtsTranslator.rewriteSql', () => {
     expect(f.rewriteSql('SELECT to_tsvector(body) FROM t')).toBe('SELECT NULL FROM t');
   });
 
+  it('unwraps to_tsvector(config, col) as a @@ left operand instead of NULL', () => {
+    // The canonical PostgreSQL full-text idiom is
+    //   `to_tsvector(config, col) @@ to_tsquery(...)`.
+    // The vector call has no FTS5 query-time equivalent, so the MATCH column
+    // must be the vector's column argument — not a literal NULL. Previously
+    // this produced `NULL @@ '...'` with a dangling `@@`.
+    expect(f.rewriteSql("SELECT * FROM t WHERE to_tsvector('english', body) @@ to_tsquery('hello')")).toBe(
+      "SELECT * FROM t WHERE body MATCH 'hello'",
+    );
+    expect(f.rewriteSql("SELECT * FROM t WHERE to_tsvector('simple', title) @@ phraseto_tsquery('hello world')")).toBe(
+      "SELECT * FROM t WHERE title MATCH '\"hello world\"'",
+    );
+  });
+
   it('replaces ts_rank with 1.0 and ts_headline with empty string', () => {
     expect(f.rewriteSql('SELECT ts_rank(tv, q) FROM t')).toBe('SELECT 1.0 FROM t');
     expect(f.rewriteSql('SELECT ts_headline(body, q) FROM t')).toBe("SELECT '' FROM t");
