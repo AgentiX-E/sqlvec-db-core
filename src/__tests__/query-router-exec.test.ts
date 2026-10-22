@@ -15,11 +15,13 @@ import { VectorMetric, VectorMode, VectorIndexType } from '../types/types-raw';
 interface RouterHarness {
   qr: QueryRouter;
   db: Database.Database;
+  rotateCalls: string[];
 }
 
 function makeRouter(): RouterHarness {
   const db = new Database(':memory:');
   const exec = (s: string) => db.exec(s);
+  const rotateCalls: string[] = [];
   const sm: any = {
     getAllShards: () => new Map([[0, { db, vectorIndex: null, readers: [] }] as any]),
     getShard: (n: number) => (n === 0 ? { db, vectorIndex: null, readers: [] } as any : undefined),
@@ -34,6 +36,10 @@ function makeRouter(): RouterHarness {
     getStats: () => [],
     execAllBatch: async (sqls: string[]) => exec(sqls.join(';\n')),
     execBatchOnShard: async (_n: number, sqls: string[]) => exec(sqls.join(';\n')),
+    rotateAllKeys: (key: string) => {
+      rotateCalls.push(key);
+      return [{ success: true }];
+    },
   };
   const config: any = {
     enabled: true,
@@ -44,7 +50,7 @@ function makeRouter(): RouterHarness {
     indexType: VectorIndexType.FLAT,
     indexParams: {},
   };
-  return { qr: new QueryRouter(sm, {} as any, config), db };
+  return { qr: new QueryRouter(sm, {} as any, config), db, rotateCalls };
 }
 
 describe('QueryRouter — real SQLite execution', () => {
@@ -496,5 +502,16 @@ describe('QueryRouter — DDL security shims', () => {
     const r = await qr.execute('ALTER TABLE t ENABLE ROW LEVEL SECURITY');
     expect(r.engine).toBe('shard');
     expect(r.rowCount).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('QueryRouter — ALTER SYSTEM SET encryption_key (TDE key rotation)', () => {
+  it('rotates the TDE key without reaching SQLite', async () => {
+    const { qr, rotateCalls } = makeRouter();
+    const r = await qr.execute("ALTER SYSTEM SET encryption_key = 'aGVsbG8='");
+    expect(r.engine).toBe('shard');
+    // rotateAllKeys must receive the original base64 key (recovered from the
+    // literal-protection placeholder), never the __LIT_N__ placeholder itself.
+    expect(rotateCalls).toEqual(['aGVsbG8=']);
   });
 });

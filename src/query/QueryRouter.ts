@@ -1996,8 +1996,26 @@ export class QueryRouter {
         return { rows: [], rowCount: 0, queryTimeMs: 0, engine: 'shard' };
       }
       // Step 1i-ter: TDE key rotation — ALTER SYSTEM SET encryption_key
-      if (shouldRun('maintenance') && /^\s*ALTER\s+SYSTEM\s+SET\s+encryption_key\s*=\s*'([^']+)'\s*;?\s*$/i.test(postProcessSql)) {
-        const newKeyBase64 = RegExp.$1;
+      // NOTE: `ALTER SYSTEM` is categorized as DDL (ALTER), not maintenance, so
+      // it must be gated behind `shouldRun('ddl')`. Gating it behind
+      // `shouldRun('maintenance')` would drop the branch entirely, because the
+      // ALTER category only activates the ['ddl','general','security'] shim
+      // groups, leaving TDE key rotation silently unreachable.
+      if (shouldRun('ddl') && /^\s*ALTER\s+SYSTEM\s+SET\s+encryption_key\s*=\s*(__LIT_\d+__|'[^']*')\s*;?\s*$/i.test(postProcessSql)) {
+        let newKeyBase64 = RegExp.$1;
+        // The literal may be protected as `__LIT_N__` by the literal-protection
+        // layer (protectSQL), which runs before this branch and replaces quoted
+        // string literals with placeholders. Recover the original key from the
+        // protected literals when a placeholder is present, otherwise strip the
+        // surrounding single quotes from the raw literal.
+        const litMatch = newKeyBase64.match(/^__LIT_(\d+)__$/);
+        if (litMatch) {
+          const idx = parseInt(litMatch[1], 10);
+          const raw = protectedResult.literals[idx];
+          newKeyBase64 = raw ? raw.replace(/^'|'$/g, '') : '';
+        } else {
+          newKeyBase64 = newKeyBase64.replace(/^'|'$/g, '');
+        }
         try {
           if (this.shardManager) {
             const result = this.shardManager.rotateAllKeys(newKeyBase64);
