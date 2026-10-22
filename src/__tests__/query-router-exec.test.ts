@@ -372,37 +372,6 @@ describe('QueryRouter — multi-shard scatter-gather', () => {
 });
 
 describe('QueryRouter — SAVEPOINT transaction semantics', () => {
-  // Reuse the single-shard harness from the first describe block.
-  function makeRouter() {
-    const db = new Database(':memory:');
-    const exec = (s: string) => db.exec(s);
-    const sm: any = {
-      getAllShards: () => new Map([[0, { db, vectorIndex: null, readers: [] }] as any]),
-      getShard: (n: number) => (n === 0 ? { db, vectorIndex: null, readers: [] } as any : undefined),
-      execShard: async (_n: number, sql: string) => exec(sql),
-      queryShard: (_n: number, sql: string, params?: any[]) =>
-        db.prepare(sql).all(...(params || [])),
-      getShardCount: () => 1,
-      getShardIdForKey: () => 0,
-      getShardIds: () => [0],
-      execAll: async (sql: string) => exec(sql),
-      queryAll: async () => [],
-      getStats: () => [],
-      execAllBatch: async (sqls: string[]) => exec(sqls.join(';\n')),
-      execBatchOnShard: async (_n: number, sqls: string[]) => exec(sqls.join(';\n')),
-    };
-    const config: any = {
-      enabled: true,
-      dimension: 768,
-      metric: VectorMetric.COSINE,
-      mode: VectorMode.AUTO,
-      bruteForceThreshold: 1000,
-      indexType: VectorIndexType.FLAT,
-      indexParams: {},
-    };
-    return { qr: new QueryRouter(sm, {} as any, config), db };
-  }
-
   it('ROLLBACK TO SAVEPOINT discards only post-savepoint changes', async () => {
     const { qr, db } = makeRouter();
     await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)');
@@ -429,5 +398,84 @@ describe('QueryRouter — SAVEPOINT transaction semantics', () => {
       { a: 'one' },
       { a: 'three' },
     ]);
+  });
+});
+
+describe('QueryRouter — read-your-own-writes within a transaction', () => {
+  it('SELECT sees a buffered INSERT from the same session', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)');
+    await qr.execute('BEGIN', undefined, 's');
+    await qr.execute("INSERT INTO t (id, a) VALUES (1, 'x')", undefined, 's');
+
+    // The uncommitted INSERT is pending; SELECT must merge it via
+    // mergeOwnWritesIntoResult rather than returning an empty table.
+    const sel = await qr.execute('SELECT * FROM t', undefined, 's');
+    expect(sel.rows).toEqual([{ id: 1, a: 'x' }]);
+    expect(sel.rowCount).toBe(1);
+  });
+});
+
+describe('QueryRouter — window function execution', () => {
+  it('ROW_NUMBER with PARTITION BY re-ranks within each partition', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (dept TEXT, name TEXT, sal INTEGER)');
+    await qr.execute("INSERT INTO t (dept, name, sal) VALUES ('eng', 'a', 10)");
+    await qr.execute("INSERT INTO t (dept, name, sal) VALUES ('eng', 'b', 20)");
+    await qr.execute("INSERT INTO t (dept, name, sal) VALUES ('eng', 'c', 15)");
+    await qr.execute("INSERT INTO t (dept, name, sal) VALUES ('sales', 'd', 30)");
+    await qr.execute("INSERT INTO t (dept, name, sal) VALUES ('sales', 'e', 25)");
+
+    const r = await qr.execute(
+      'SELECT dept, name, sal, ROW_NUMBER() OVER (PARTITION BY dept ORDER BY sal DESC) AS rn FROM t',
+    );
+
+    // eng members ranked 1..3 by sal desc; sales ranked 1..2.
+    const rn = Object.fromEntries(
+      r.rows.map((row: any) => [`${row.dept}:${row.name}`, row.rn]),
+    );
+    expect(rn).toEqual({
+      'eng:b': 1,
+      'eng:c': 2,
+      'eng:a': 3,
+      'sales:d': 1,
+      'sales:e': 2,
+    });
+  });
+
+  it('RANK without PARTITION BY ties equal values', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (name TEXT, sal INTEGER)');
+    await qr.execute("INSERT INTO t (name, sal) VALUES ('a', 10)");
+    await qr.execute("INSERT INTO t (name, sal) VALUES ('b', 25)");
+    await qr.execute("INSERT INTO t (name, sal) VALUES ('c', 25)");
+    await qr.execute("INSERT INTO t (name, sal) VALUES ('d', 30)");
+
+    const r = await qr.execute(
+      'SELECT name, sal, RANK() OVER (ORDER BY sal DESC) AS rk FROM t',
+    );
+    const rk = Object.fromEntries(r.rows.map((row: any) => [row.name, row.rk]));
+    expect(rk).toEqual({ d: 1, b: 2, c: 2, a: 4 });
+  });
+});
+
+describe('QueryRouter — INSERT RETURNING', () => {
+  it('returns the inserted row for INSERT ... RETURNING', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)');
+    const r = await qr.execute("INSERT INTO t (a, b) VALUES (1, 'x') RETURNING a, b");
+    expect(r.rows).toEqual([{ a: 1, b: 'x' }]);
+    expect(r.rowCount).toBe(1);
+  });
+
+  it('honors ON CONFLICT DO NOTHING with RETURNING', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)');
+    const r1 = await qr.execute("INSERT INTO t (a, b) VALUES (2, 'y') ON CONFLICT (a) DO NOTHING RETURNING a");
+    expect(r1.rows).toEqual([{ a: 2 }]);
+
+    // Second insert conflicts on (a); RETURNING must yield nothing.
+    const r2 = await qr.execute("INSERT INTO t (a, b) VALUES (2, 'z') ON CONFLICT (a) DO NOTHING RETURNING a");
+    expect(r2.rows).toEqual([]);
   });
 });
