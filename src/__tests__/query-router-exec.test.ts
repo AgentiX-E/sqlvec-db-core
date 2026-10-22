@@ -370,3 +370,64 @@ describe('QueryRouter — multi-shard scatter-gather', () => {
     expect(ordered.rows.map((r: any) => r.v)).toEqual([30, 20]);
   });
 });
+
+describe('QueryRouter — SAVEPOINT transaction semantics', () => {
+  // Reuse the single-shard harness from the first describe block.
+  function makeRouter() {
+    const db = new Database(':memory:');
+    const exec = (s: string) => db.exec(s);
+    const sm: any = {
+      getAllShards: () => new Map([[0, { db, vectorIndex: null, readers: [] }] as any]),
+      getShard: (n: number) => (n === 0 ? { db, vectorIndex: null, readers: [] } as any : undefined),
+      execShard: async (_n: number, sql: string) => exec(sql),
+      queryShard: (_n: number, sql: string, params?: any[]) =>
+        db.prepare(sql).all(...(params || [])),
+      getShardCount: () => 1,
+      getShardIdForKey: () => 0,
+      getShardIds: () => [0],
+      execAll: async (sql: string) => exec(sql),
+      queryAll: async () => [],
+      getStats: () => [],
+      execAllBatch: async (sqls: string[]) => exec(sqls.join(';\n')),
+      execBatchOnShard: async (_n: number, sqls: string[]) => exec(sqls.join(';\n')),
+    };
+    const config: any = {
+      enabled: true,
+      dimension: 768,
+      metric: VectorMetric.COSINE,
+      mode: VectorMode.AUTO,
+      bruteForceThreshold: 1000,
+      indexType: VectorIndexType.FLAT,
+      indexParams: {},
+    };
+    return { qr: new QueryRouter(sm, {} as any, config), db };
+  }
+
+  it('ROLLBACK TO SAVEPOINT discards only post-savepoint changes', async () => {
+    const { qr, db } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT)');
+    await qr.execute('BEGIN', undefined, 's');
+    await qr.execute("INSERT INTO t (a) VALUES ('one')", undefined, 's');
+    await qr.execute('SAVEPOINT sp1', undefined, 's');
+    await qr.execute("INSERT INTO t (a) VALUES ('two')", undefined, 's');
+
+    // Regression: ROLLBACK TO SAVEPOINT was misclassified by the top-level
+    // transaction fast-path regex as a plain ROLLBACK, destroying the entire
+    // transaction instead of rolling back to the savepoint.
+    const rb = await qr.execute('ROLLBACK TO SAVEPOINT sp1', undefined, 's');
+    expect(rb.rows).toEqual([{ message: 'ROLLBACK TO SP1', discarded: 1 }]);
+
+    await qr.execute("INSERT INTO t (a) VALUES ('three')", undefined, 's');
+    const rel = await qr.execute('RELEASE SAVEPOINT sp1', undefined, 's');
+    expect(rel.rows).toEqual([{ message: 'RELEASE SP1', staged: 2 }]);
+
+    const commit = await qr.execute('COMMIT', undefined, 's');
+    expect(commit.rows?.[0]).toMatchObject({ message: 'COMMIT' });
+
+    // 'two' must be rolled back; 'one' and 'three' must persist.
+    expect(db.prepare('SELECT a FROM t ORDER BY id').all()).toEqual([
+      { a: 'one' },
+      { a: 'three' },
+    ]);
+  });
+});

@@ -1415,7 +1415,8 @@ export class QueryRouter {
     // pure overhead (3-5ms per SQL = ~40% of pgbench transaction time).
     // parseStatement() is called anyway later; this early call adds no
     // net overhead while saving all the detect/rewrite steps.
-    if (/^\s*(BEGIN|COMMIT|ROLLBACK|END)\b/i.test(sql)) {
+    const isRollbackTo = /^\s*ROLLBACK\s+(?:WORK\s+)?TO\b/i.test(sql);
+    if (!isRollbackTo && /^\s*(BEGIN|COMMIT|ROLLBACK|END)\b/i.test(sql)) {
       const fastParsed = parseStatement(sql);
       if (fastParsed.type === 'TRANSACTION') {
         return this.executeTransaction(fastParsed as any, sessionId, start);
@@ -2877,6 +2878,13 @@ export class QueryRouter {
           if (rollbackToMatch) {
             const spName = rollbackToMatch[1];
             const savedIndex = txnSp.savepointIndexMap.get(spName);
+            // Capture the number of discarded changes BEFORE splicing so the
+            // diagnostic `discarded` count is accurate (splicing mutates
+            // pendingChanges.length, which would otherwise always report 0).
+            const discarded =
+              savedIndex !== undefined && savedIndex < txnSp.pendingChanges.length
+                ? txnSp.pendingChanges.length - savedIndex
+                : 0;
             if (savedIndex !== undefined) {
               // Discard pending changes from savepoint index onward
               if (savedIndex < txnSp.pendingChanges.length) {
@@ -2892,7 +2900,7 @@ export class QueryRouter {
               }
             }
             return {
-              rows: [{ message: `ROLLBACK TO ${spName}`, discarded: (savedIndex !== undefined && savedIndex < txnSp.pendingChanges.length) ? (txnSp.pendingChanges.length - savedIndex) : 0 }],
+              rows: [{ message: `ROLLBACK TO ${spName}`, discarded }],
               rowCount: 1,
               queryTimeMs: performance.now() - start,
               engine: 'shard',
