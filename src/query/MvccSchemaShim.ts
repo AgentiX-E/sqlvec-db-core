@@ -151,7 +151,20 @@ export class MvccSchemaShim {
     // Find the first table-level constraint in the column definitions.
     // SQLite requires column definitions BEFORE table constraints,
     // so we must insert the MVCC columns before any table constraint.
-    const constraintRegex = /^\s*(PRIMARY\s+KEY|UNIQUE|FOREIGN\s+KEY|CONSTRAINT|CHECK)\s/i;
+    //
+    // Distinguishing table-level from inline column constraints:
+    //   - Table-level constraints appear as their own comma-separated item:
+    //     `PRIMARY KEY (cols)`, `UNIQUE (cols)`, `FOREIGN KEY (cols) …`,
+    //     `CHECK (expr)`, or `CONSTRAINT name …`. They are always preceded by
+    //     a comma (or start the list).
+    //   - Inline column constraints follow the column type directly, e.g.
+    //     `INTEGER PRIMARY KEY AUTOINCREMENT`, `TEXT UNIQUE`,
+    //     `INTEGER CHECK (x > 0)`. They must NOT be treated as table
+    //     constraints (previous behavior split `INTEGER PRIMARY KEY
+    //     AUTOINCREMENT` into `INTEGER` + a dangling `PRIMARY KEY
+    //     AUTOINCREMENT`, producing invalid SQL).
+    const constraintRegex =
+      /^\s*(?:PRIMARY\s+KEY\s*\(|UNIQUE\s*\(|FOREIGN\s+KEY\s*\(|CONSTRAINT\s|CHECK\s*\()/i;
     const trimmedDef = colDefs.trimEnd();
     let insertPos = -1;
     let parenCount = 0;
@@ -162,7 +175,16 @@ export class MvccSchemaShim {
       } else if (ch === ')') {
         parenCount--;
       }
-      if (parenCount === 0 && constraintRegex.test(trimmedDef.slice(i))) {
+      if (parenCount !== 0 || !constraintRegex.test(trimmedDef.slice(i))) {
+        continue;
+      }
+      // Ensure the matched keyword is a standalone table-constraint item: the
+      // nearest preceding non-whitespace character must be a comma (table
+      // constraints are comma-separated items) rather than a column type name
+      // (which would make this an inline `INT CHECK (x > 0)` constraint).
+      const before = trimmedDef.slice(0, i);
+      const prevChar = before.replace(/\s+$/, '').slice(-1);
+      if (prevChar === ',' || prevChar === '') {
         insertPos = i;
         break;
       }

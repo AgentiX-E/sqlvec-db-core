@@ -39,12 +39,39 @@ describe('injectRowVersionColumns', () => {
     );
   });
 
-  it('appends after UNIQUE(name) without space (not a table-level constraint match)', () => {
-    // `UNIQUE(name)` has no space after UNIQUE, so the table-constraint regex
-    // (which requires `\s` after the keyword) does not match it; the MVCC
-    // columns are appended at the end instead.
+  it('injects before UNIQUE(name) without space (table-level constraint)', () => {
+    // `UNIQUE(name)` is a table-level constraint (SQLite accepts both
+    // `UNIQUE (name)` and `UNIQUE(name)`), so the MVCC columns are injected
+    // before it, preserving column-definitions-before-constraints ordering.
     expect(shim.injectRowVersionColumns('CREATE TABLE t (id INT, UNIQUE(name))')).toBe(
-      'CREATE TABLE IF NOT EXISTS t (id INT, UNIQUE(name), _xmin INTEGER DEFAULT 0, _xmax INTEGER DEFAULT 0, _cmin INTEGER DEFAULT 0, _cmax INTEGER DEFAULT 0)',
+      'CREATE TABLE IF NOT EXISTS t (id INT, _xmin INTEGER DEFAULT 0, _xmax INTEGER DEFAULT 0, _cmin INTEGER DEFAULT 0, _cmax INTEGER DEFAULT 0, UNIQUE(name))',
+    );
+  });
+
+  it('preserves inline PRIMARY KEY AUTOINCREMENT (regression)', () => {
+    // `INTEGER PRIMARY KEY AUTOINCREMENT` is an inline column constraint; the
+    // MVCC columns must be appended, NOT injected between `INTEGER` and
+    // `PRIMARY KEY` (which previously produced `... PRIMARY KEY AUTOINCREMENT`
+    // without a column name, a SQL syntax error).
+    const out = shim.injectRowVersionColumns(
+      'CREATE TABLE d (id INTEGER PRIMARY KEY AUTOINCREMENT, a TEXT)',
+    );
+    expect(out).toBe(
+      'CREATE TABLE IF NOT EXISTS d (id INTEGER PRIMARY KEY AUTOINCREMENT, a TEXT, _xmin INTEGER DEFAULT 0, _xmax INTEGER DEFAULT 0, _cmin INTEGER DEFAULT 0, _cmax INTEGER DEFAULT 0)',
+    );
+  });
+
+  it('preserves inline UNIQUE column constraint', () => {
+    const out = shim.injectRowVersionColumns('CREATE TABLE t (id INT, name TEXT UNIQUE)');
+    expect(out).toBe(
+      'CREATE TABLE IF NOT EXISTS t (id INT, name TEXT UNIQUE, _xmin INTEGER DEFAULT 0, _xmax INTEGER DEFAULT 0, _cmin INTEGER DEFAULT 0, _cmax INTEGER DEFAULT 0)',
+    );
+  });
+
+  it('preserves inline CHECK column constraint', () => {
+    const out = shim.injectRowVersionColumns('CREATE TABLE t (id INT CHECK (id > 0))');
+    expect(out).toBe(
+      'CREATE TABLE IF NOT EXISTS t (id INT CHECK (id > 0), _xmin INTEGER DEFAULT 0, _xmax INTEGER DEFAULT 0, _cmin INTEGER DEFAULT 0, _cmax INTEGER DEFAULT 0)',
     );
   });
 
