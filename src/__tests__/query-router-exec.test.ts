@@ -515,3 +515,60 @@ describe('QueryRouter — ALTER SYSTEM SET encryption_key (TDE key rotation)', (
     expect(rotateCalls).toEqual(['aGVsbG8=']);
   });
 });
+
+describe('QueryRouter — FOR UPDATE / FOR SHARE row locking', () => {
+  it('strips FOR UPDATE from the fast path without a syntax error', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)');
+    await qr.execute("INSERT INTO t (id, x) VALUES (1, 'a')");
+    // SQLite has no SELECT ... FOR UPDATE; the fast path must strip the clause
+    // before reaching SQLite instead of failing with `near "UPDATE"`.
+    const r = await qr.execute('SELECT * FROM t FOR UPDATE');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).id).toBe(1);
+    expect((r.rows[0] as any).x).toBe('a');
+  });
+
+  it('strips FOR SHARE NOWAIT', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY)');
+    const r = await qr.execute('SELECT * FROM t FOR SHARE NOWAIT');
+    expect(r.rowCount).toBe(0);
+  });
+
+  it('strips FOR NO KEY UPDATE', async () => {
+    const { qr } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, x TEXT)');
+    const r = await qr.execute('SELECT * FROM t FOR NO KEY UPDATE');
+    expect(r.rowCount).toBe(0);
+  });
+});
+
+describe('QueryRouter — PL/pgSQL executor interop', () => {
+  it('intercepts a registered SELECT function call', async () => {
+    const { qr } = makeRouter();
+    (qr as any).plpgsqlExecutor = {
+      hasFunction: (n: string) => n === 'add',
+      execute: async () => 7,
+      dropFunction: async () => {},
+    };
+    const r = await qr.execute('SELECT add(2, 5)');
+    expect(r.engine).toBe('plpgsql');
+    expect(r.rows).toEqual([{ add: 7 }]);
+  });
+
+  it('routes DROP FUNCTION to the PL/pgSQL executor', async () => {
+    const { qr } = makeRouter();
+    let dropped = '';
+    (qr as any).plpgsqlExecutor = {
+      hasFunction: () => false,
+      execute: async () => 0,
+      dropFunction: async (n: string) => {
+        dropped = n;
+      },
+    };
+    const r = await qr.execute('DROP FUNCTION foo(integer)');
+    expect(dropped).toBe('foo');
+    expect(r.engine).toBe('plpgsql');
+  });
+});

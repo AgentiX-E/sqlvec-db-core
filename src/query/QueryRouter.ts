@@ -5199,6 +5199,14 @@ export class QueryRouter {
     preParsed?: any,
   ): Promise<QueryResult> {
     try {
+      // ── FOR UPDATE / FOR SHARE: strip the row-locking clause before SQLite ──
+      // SQLite has no SELECT ... FOR UPDATE. The full pipeline
+      // (executeSingleTableSelect) strips it, but the fast path reaches SQLite
+      // directly; without this strip, "SELECT * FROM t FOR UPDATE" fails with
+      // "near \"UPDATE\": syntax error". Strip it here for parity.
+      if (hasForUpdate(sql)) {
+        sql = stripForUpdate(sql);
+      }
       // ── DuckDB routing via UnifiedRouter: route SELECT to DuckDB if appropriate ──
       // Skip DuckDB routing if:
       //   a) Session has recent writes not yet synced (read-your-writes consistency)

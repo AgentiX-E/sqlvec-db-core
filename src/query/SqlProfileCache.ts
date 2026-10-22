@@ -155,6 +155,11 @@ const PG_SPECIFIC_PATTERN = new RegExp([
   // ── Misc ──
   /\bINHERITS\s*\(/.source,                                                              // INHERITS (parent table)
   /\bONLY\s+\w+/.source,                                                                 // ONLY tablename
+  // Row-locking clauses — SQLite has no FOR UPDATE / FOR SHARE, so these MUST
+  // route through the full pipeline (executeSingleTableSelect strips them)
+  // instead of the standard-SQL fast path, which would forward the clause to
+  // SQLite verbatim and fail with "near UPDATE/SHARE: syntax error".
+  /\bFOR\s+(?:NO\s+KEY\s+UPDATE|KEY\s+SHARE|UPDATE|SHARE)\b/.source,
   /\bCONCURRENTLY\b/.source,                                                             // CONCURRENTLY
   /\bINCLUDING\s+(?:ALL|COMMENTS|CONSTRAINTS|DEFAULTS|IDENTITY|INDEXES|STATISTICS|STORAGE)\b/.source,  // INCLUDING
   /\bEXCLUDING\s+(?:ALL|COMMENTS|CONSTRAINTS|DEFAULTS|IDENTITY|INDEXES|STATISTICS|STORAGE)\b/.source,  // EXCLUDING
