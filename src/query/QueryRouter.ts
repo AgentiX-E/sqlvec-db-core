@@ -7947,10 +7947,15 @@ export class QueryRouter {
     const tableNameEsc = tableName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
     // 提取 GROUP BY / ORDER BY / LIMIT / HAVING
-    const groupByMatch = sql.match(/\bGROUP\s+BY\b\s+(.+?)(?:\s+(?:ORDER\s+BY|LIMIT|HAVING|$))/is);
-    const orderByMatch = sql.match(/\bORDER\s+BY\b\s+(.+?)(?:\s+(?:LIMIT|$))/i);
+    // Note: use lookahead terminators (`?= ... |\s*$`) rather than nesting `$`
+    // inside the alternation group — the latter fails to match a trailing
+    // clause ending at end-of-string (the `$` inside `(?:...|$)` cannot assert
+    // end-of-string once `.+?` has consumed the clause text), dropping the
+    // clause entirely and producing incorrect re-aggregation results.
+    const groupByMatch = sql.match(/\bGROUP\s+BY\b\s+(.+?)(?=\s+(?:ORDER\s+BY|LIMIT|HAVING)\b|\s*$)/is);
+    const orderByMatch = sql.match(/\bORDER\s+BY\b\s+(.+?)(?=\s+LIMIT\b|\s*$)/i);
     const limitMatch = sql.match(/\bLIMIT\b\s+(\d+)/i);
-    const havingMatch = sql.match(/\bHAVING\b\s+(.+?)(?:\s+(?:ORDER\s+BY|LIMIT|$))/i);
+    const havingMatch = sql.match(/\bHAVING\b\s+(.+?)(?=\s+(?:ORDER\s+BY|LIMIT)\b|\s*$)/i);
 
     const groupByCols = groupByMatch ? groupByMatch[1].trim().split(/\s*,\s*/) : [];
     const groupKeys = groupByCols.map(c => c.replace(/"/g, '').trim());

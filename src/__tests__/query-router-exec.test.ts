@@ -266,3 +266,107 @@ describe('QueryRouter — real SQLite execution', () => {
     expect((r.rows?.[0] as any).id).toBeGreaterThan(0);
   });
 });
+
+describe('QueryRouter — multi-shard scatter-gather', () => {
+  function makeMultiRouter(shardCount: number) {
+    const dbs: any[] = [];
+    for (let i = 0; i < shardCount; i++) dbs.push(new Database(':memory:'));
+    const exec = (n: number, s: string) => dbs[n].exec(s);
+    const sm: any = {
+      getAllShards: () =>
+        new Map(dbs.map((db, i) => [i, { db, vectorIndex: null, readers: [] } as any])),
+      getShard: (n: number) =>
+        n < shardCount ? { db: dbs[n], vectorIndex: null, readers: [] } : undefined,
+      execShard: async (n: number, sql: string) => exec(n, sql),
+      queryShard: (n: number, sql: string, params?: any[]) =>
+        dbs[n].prepare(sql).all(...(params || [])),
+      getShardCount: () => shardCount,
+      getShardIdForKey: (key: string, _c: number) =>
+        String(key).split('').reduce((a, c) => a + c.charCodeAt(0), 0) % shardCount,
+      getShardIds: () => dbs.map((_, i) => i),
+      execAll: async (sql: string) => {
+        dbs.forEach((d) => d.exec(sql));
+      },
+      queryAll: async () => [],
+      getStats: () => [],
+      execAllBatch: async (sqls: string[]) => {
+        dbs.forEach((d) => d.exec(sqls.join(';\n')));
+      },
+      execBatchOnShard: async (n: number, sqls: string[]) => exec(n, sqls.join(';\n')),
+    };
+    const config: any = {
+      enabled: true,
+      dimension: 768,
+      metric: VectorMetric.COSINE,
+      mode: VectorMode.AUTO,
+      bruteForceThreshold: 1000,
+      indexType: VectorIndexType.FLAT,
+      indexParams: {},
+    };
+    return { qr: new QueryRouter(sm, {} as any, config), dbs };
+  }
+
+  it('scatter-gathers an unqualified SELECT across all shards', async () => {
+    const { qr } = makeMultiRouter(2);
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, v INTEGER)');
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (1, 'x', 10)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (2, 'y', 20)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (3, 'z', 30)");
+
+    const all = await qr.execute('SELECT * FROM t');
+    expect(all.rowCount).toBe(3);
+  });
+
+  it('re-aggregates COUNT and SUM across shards', async () => {
+    const { qr } = makeMultiRouter(2);
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, v INTEGER)');
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (1, 'x', 10)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (2, 'y', 20)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (3, 'z', 30)");
+
+    const cnt = await qr.execute('SELECT COUNT(*) AS cnt FROM t');
+    expect(cnt.rows).toEqual([{ cnt: 3 }]);
+
+    const sum = await qr.execute('SELECT SUM(v) AS sv FROM t');
+    expect(sum.rows).toEqual([{ sv: 60 }]);
+  });
+
+  it('correctly re-aggregates GROUP BY across shards', async () => {
+    const { qr } = makeMultiRouter(2);
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, v INTEGER)');
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (1, 'x', 10)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (2, 'x', 20)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (3, 'y', 30)");
+
+    // Regression: GROUP BY re-aggregation previously dropped the GROUP BY
+    // clause, collapsing distinct groups into a single incorrect row.
+    const grp = await qr.execute('SELECT a, COUNT(*) AS c FROM t GROUP BY a');
+    expect(grp.rowCount).toBe(2);
+    expect(grp.rows).toEqual(
+      expect.arrayContaining([
+        { a: 'x', c: 2 },
+        { a: 'y', c: 1 },
+      ]),
+    );
+
+    const sumGrp = await qr.execute('SELECT a, SUM(v) AS sv FROM t GROUP BY a');
+    expect(sumGrp.rows).toEqual(
+      expect.arrayContaining([
+        { a: 'x', sv: 30 },
+        { a: 'y', sv: 30 },
+      ]),
+    );
+  });
+
+  it('re-aggregates ORDER BY + LIMIT across shards', async () => {
+    const { qr } = makeMultiRouter(2);
+    await qr.execute('CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, v INTEGER)');
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (1, 'x', 10)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (2, 'y', 20)");
+    await qr.execute("INSERT INTO t (id, a, v) VALUES (3, 'z', 30)");
+
+    const ordered = await qr.execute('SELECT id, v FROM t ORDER BY v DESC LIMIT 2');
+    expect(ordered.rowCount).toBe(2);
+    expect(ordered.rows.map((r: any) => r.v)).toEqual([30, 20]);
+  });
+});
