@@ -5253,6 +5253,17 @@ export class QueryRouter {
           sql = ftsRewritten;
         }
       }
+      // ── Advisory lock rewrite: pg_advisory_lock(...) et al. ──
+      // A standalone `SELECT pg_advisory_lock(...)` is non-standard SQL that
+      // routes here instead of through executeInternal, so the rewrite in
+      // executeInternal (Step 1l) never runs and SQLite fails with
+      // `no such function: pg_advisory_lock`. Translate it here for parity so
+      // the lock side-effect (acquire/release) is preserved and the SELECT
+      // reaches SQLite as a benign `SELECT 1`.
+      if (detectAdvisoryLock(sql)) {
+        const ar = rewriteAdvisoryLock(sql);
+        if (ar.rewritten) sql = ar.sql;
+      }
       // ── Partition routing: rewrite SELECT to UNION ALL across shards ──
       {
         const selTblMatch = sql.match(/FROM\s+"?(\w+)"?/i);

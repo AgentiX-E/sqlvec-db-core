@@ -628,3 +628,33 @@ describe('QueryRouter — CREATE INDEX CONCURRENTLY (CONCURRENTLY stripping)', (
     expect(idx).toBeUndefined();
   });
 });
+
+describe('QueryRouter — advisory lock functions (pg_advisory_* → SELECT 1)', () => {
+  it('rewrites pg_advisory_lock to SELECT 1', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT pg_advisory_lock(12345)');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any)['1']).toBe(1);
+  });
+
+  it('rewrites pg_advisory_unlock to SELECT 1', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT pg_advisory_unlock(12345)');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any)['1']).toBe(1);
+  });
+
+  it('rewrites pg_advisory_unlock_all to SELECT 1', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT pg_advisory_unlock_all()');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any)['1']).toBe(1);
+  });
+
+  it('rewrites the two-key pg_try_advisory_lock to SELECT 1', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT pg_try_advisory_lock(42, 99)');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any)['1']).toBe(1);
+  });
+});
