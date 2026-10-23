@@ -751,3 +751,22 @@ describe('QueryRouter — UUID functions in the SELECT fast path', () => {
     expect(u).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
   });
 });
+
+describe('QueryRouter — system catalog views in the SELECT fast path', () => {
+  it('returns synthetic rows for pg_stat_bgwriter', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_stat_bgwriter');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+    const keys = Object.keys(r.rows[0] as any);
+    expect(keys).toContain('checkpoints_timed');
+  });
+
+  it('returns synthetic rows for pg_settings', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_settings');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+    const keys = Object.keys(r.rows[0] as any);
+    expect(keys).toContain('name');
+    expect(keys).toContain('setting');
+  });
+});

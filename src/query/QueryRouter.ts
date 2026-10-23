@@ -5340,6 +5340,25 @@ export class QueryRouter {
       // ── Remaining PG SELECT rewrites (ROW/ARRAY/range/intarray/pgcrypto/
       //    DISTINCT ON/LATERAL/XML/COMPOSITE) — parity with executeInternal ──
       sql = this.applyPgSelectRewrites(sql);
+      // ── System catalog interception ──
+      // A `SELECT * FROM pg_stat_bgwriter` (or pg_settings, pg_stat_activity,
+      // information_schema.*) is non-standard and has no PG rewrite above, so
+      // it would reach SQLite and fail with `no such table: pg_stat_bgwriter`.
+      // Only intercept catalog/queries that reference a system table. A bare
+      // `SELECT func()` is handled by the PG rewriters above and must NOT be
+      // delegated to executeSystemQuery, which would eagerly evaluate it to a
+      // NULL row and swallow the pg_advisory_lock / ::cast / ROW / ARRAY output.
+      if (/\b(?:FROM|JOIN)\s+(?:pg_|information_schema\.)/i.test(sql)) {
+        const systemResult = SystemIntegration.executeSystemQuery(sql);
+        if (systemResult) {
+          return {
+            rows: systemResult.rows,
+            rowCount: systemResult.rowCount,
+            queryTimeMs: performance.now() - start,
+            engine: 'shard',
+          };
+        }
+      }
       // ── Partition routing: rewrite SELECT to UNION ALL across shards ──
       {
         const selTblMatch = sql.match(/FROM\s+"?(\w+)"?/i);
