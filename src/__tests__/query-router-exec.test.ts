@@ -601,3 +601,30 @@ describe('QueryRouter — FTS full-text search (tsvector/tsquery @@ → FTS5 MAT
     expect((r.rows[0] as any).body).toBe('hello world');
   });
 });
+
+describe('QueryRouter — CREATE INDEX CONCURRENTLY (CONCURRENTLY stripping)', () => {
+  it('strips CONCURRENTLY and actually creates the index', async () => {
+    const { qr, db } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER, name TEXT)');
+    // If CONCURRENTLY is not stripped, SQLite rejects the statement with
+    // `near "idx": syntax error` and no index is created.
+    const r = await qr.execute('CREATE INDEX CONCURRENTLY idx_t_name ON t (name)');
+    expect(r.engine).toBe('shard');
+    const idx = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_t_name'",
+    ).get();
+    expect(idx).toEqual({ name: 'idx_t_name' });
+  });
+
+  it('strips CONCURRENTLY from DROP INDEX', async () => {
+    const { qr, db } = makeRouter();
+    await qr.execute('CREATE TABLE t (id INTEGER, name TEXT)');
+    await qr.execute('CREATE INDEX idx_t_name ON t (name)');
+    const r = await qr.execute('DROP INDEX CONCURRENTLY idx_t_name');
+    expect(r.engine).toBe('shard');
+    const idx = db.prepare(
+      "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_t_name'",
+    ).get();
+    expect(idx).toBeUndefined();
+  });
+});

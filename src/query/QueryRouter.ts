@@ -1900,7 +1900,12 @@ export class QueryRouter {
       }
 
       // Step 1i: Maintenance & async statement compatibility
-      if (shouldRun('maintenance') && detectConcurrently(postProcessSql)) {
+      // `CONCURRENTLY` appears only in DDL (CREATE INDEX CONCURRENTLY /
+      // DROP INDEX CONCURRENTLY), whose category maps to ddlShims. Gating
+      // behind `shouldRun('maintenance')` made this branch unreachable, so the
+      // keyword was forwarded to SQLite verbatim and failed with
+      // `near "idx": syntax error`. Gate behind `ddl` instead.
+      if (shouldRun('ddl') && detectConcurrently(postProcessSql)) {
         const ccResult = rewriteConcurrently(postProcessSql);
         if (ccResult.rewritten) postProcessSql = ccResult.sql;
       }
