@@ -62,3 +62,10 @@ describe('LateralJoinRewriter', () => {
     });
   });
 });
+
+describe('rewriteLateral — comma-separated LATERAL (glue regression)', () => {
+  it('keeps a space before CROSS JOIN when LATERAL follows a comma', () => {
+    expect(rewriteLateral('SELECT * FROM t, LATERAL (SELECT 1) x', { forceRewrite: true }))
+      .toEqual({ sql: 'SELECT * FROM t CROSS JOIN (SELECT 1) x', rewritten: true });
+  });
+});

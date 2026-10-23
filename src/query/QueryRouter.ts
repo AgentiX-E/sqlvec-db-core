@@ -5195,6 +5195,57 @@ export class QueryRouter {
   }
 
   /**
+   * Apply the PostgreSQL-specific SELECT rewrites that executeInternal would
+   * otherwise perform, but which are skipped when a non-standard SELECT routes
+   * through the fast path. Each is a pure `sql -> { sql, rewritten }` transform
+   * with no state side-effect, so it is safe to run here.
+   */
+  private applyPgSelectRewrites(sql: string): string {
+    let out = sql;
+    if (detectRowExpr(out)) {
+      const rr = rewriteRowExpr(out);
+      if (rr.rewritten) out = rr.sql;
+    }
+    if (detectArrayConstructor(out)) {
+      const ar = rewriteArrayExpr(out);
+      if (ar.rewritten) out = ar.sql;
+    }
+    if (detectRangeOperator(out)) {
+      const ro = expandRangeOperators(out);
+      if (ro.rewritten) out = ro.sql;
+    }
+    if (detectRangeFunc(out)) {
+      const rr = rewriteRangeFunc(out);
+      if (rr.rewritten) out = rr.sql;
+    }
+    if (detectIntarray(out)) {
+      const ia = rewriteIntarray(out);
+      if (ia.rewritten) out = ia.sql;
+    }
+    if (detectPgCrypto(out)) {
+      const pgr = rewritePgCrypto(out);
+      if (pgr.rewritten) out = pgr.sql;
+    }
+    if (detectDistinctOn(out)) {
+      const dor = rewriteDistinctOn(out);
+      if (dor.rewritten) out = dor.sql;
+    }
+    if (detectLateral(out)) {
+      const lr = rewriteLateral(out, { forceRewrite: true });
+      if (lr.rewritten) out = lr.sql;
+    }
+    if (detectXmlFunc(out)) {
+      const xr = rewriteXmlFunc(out);
+      if (xr.rewritten) out = xr.sql;
+    }
+    if (detectCompositeType(out)) {
+      const cr = rewriteCompositeType(out);
+      if (cr.rewritten) out = cr.sql;
+    }
+    return out;
+  }
+
+  /**
    * SELECT fast path — direct SQLite execution for simple SELECTs.
    *
    * Skip the ~2000-line PG shim pipeline for vanilla SQLite SELECTs.
@@ -5282,6 +5333,9 @@ export class QueryRouter {
         const jsonbResult = transformJsonbOperators(sql);
         if (jsonbResult.transformed) sql = jsonbResult.sql;
       }
+      // ── Remaining PG SELECT rewrites (ROW/ARRAY/range/intarray/pgcrypto/
+      //    DISTINCT ON/LATERAL/XML/COMPOSITE) — parity with executeInternal ──
+      sql = this.applyPgSelectRewrites(sql);
       // ── Partition routing: rewrite SELECT to UNION ALL across shards ──
       {
         const selTblMatch = sql.match(/FROM\s+"?(\w+)"?/i);

@@ -109,10 +109,15 @@ export function rewriteLateral(
     return 'INNER JOIN ' + paren;
   });
 
-  // 2. Handle bare LATERAL subqueries in FROM clause
-  result = result.replace(FROM_LATERAL_RE, (_match: string, paren: string) => {
+  // 2. Handle bare LATERAL subqueries in FROM clause.
+  // `FROM LATERAL (...)` -> `CROSS JOIN (...)` (unchanged historical contract).
+  // `, LATERAL (...)` -> ` CROSS JOIN (...)` — the leading space is required so
+  // the preceding table alias is not glued to `CROSS JOIN` (e.g.
+  // `t, LATERAL (SELECT 1) x` must become `t CROSS JOIN (SELECT 1) x`, not
+  // `tCROSS JOIN ...`).
+  result = result.replace(FROM_LATERAL_RE, (match: string, paren: string) => {
     count++;
-    return 'CROSS JOIN ' + paren;
+    return /^FROM\s*/i.test(match) ? `CROSS JOIN ${paren}` : ` CROSS JOIN ${paren}`;
   });
 
   // 3. Fallback: strip any remaining standalone LATERAL keywords (edge cases).

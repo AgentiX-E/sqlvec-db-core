@@ -695,3 +695,41 @@ describe('QueryRouter — JSONB operators in the SELECT fast path', () => {
     expect((r.rows[1] as any).a).toBe(5);
   });
 });
+
+describe('QueryRouter — PG expression rewrites in the SELECT fast path', () => {
+  it('rewrites ROW(...) to json_array', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT ROW(1, 'a') AS r");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).r).toBe('[1,"a"]');
+  });
+
+  it('rewrites ARRAY[...] to json_array', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT ARRAY[1,2,3] AS a');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).a).toBe('[1,2,3]');
+  });
+
+  it('expands range overlap && to a boolean expression', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT int4range(1,5) && int4range(3,8) AS o');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).o).toBe(1);
+  });
+
+  it('rewrites DISTINCT ON to a ROW_NUMBER window subquery', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT DISTINCT ON (a) a, b FROM (SELECT 1 a, 2 b UNION ALL SELECT 1, 3)');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).a).toBe(1);
+    expect((r.rows[0] as any).b).toBe(2);
+  });
+
+  it('rewrites xmlelement to a benign XML literal', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT xmlelement(name foo) AS x");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).x).toBe('<xml/>');
+  });
+});
