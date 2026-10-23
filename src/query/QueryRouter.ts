@@ -5264,6 +5264,24 @@ export class QueryRouter {
         const ar = rewriteAdvisoryLock(sql);
         if (ar.rewritten) sql = ar.sql;
       }
+      // ── Type cast rewrite: expr::type / type 'literal' → CAST(...) ──
+      // PostgreSQL `::` cast syntax is invalid SQLite; a `SELECT '123'::int`
+      // routes here (non-standard) and otherwise reaches SQLite verbatim,
+      // failing with `unrecognized token ":"`. Translate it for parity with
+      // executeInternal's Step 1n.
+      if (detectTypeCast(sql)) {
+        const tr = rewriteTypeCast(sql);
+        if (tr.rewritten) sql = tr.sql;
+      }
+      // ── JSONB operator translation: @> / <@ / ? / ?| / ?& / #> / #>> ──
+      // A `SELECT doc @> '{"a":1}'` (or ::jsonb cast) is non-standard SELECT
+      // that routes here and otherwise reaches SQLite with `@>`, failing with
+      // `unrecognized token "@"`. Translate for parity with executeInternal
+      // Step 0b.
+      {
+        const jsonbResult = transformJsonbOperators(sql);
+        if (jsonbResult.transformed) sql = jsonbResult.sql;
+      }
       // ── Partition routing: rewrite SELECT to UNION ALL across shards ──
       {
         const selTblMatch = sql.match(/FROM\s+"?(\w+)"?/i);

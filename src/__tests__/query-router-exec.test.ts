@@ -658,3 +658,40 @@ describe('QueryRouter — advisory lock functions (pg_advisory_* → SELECT 1)',
     expect((r.rows[0] as any)['1']).toBe(1);
   });
 });
+
+describe('QueryRouter — type cast (::) in the SELECT fast path', () => {
+  it('rewrites ::int to CAST AS INTEGER', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT '123'::int AS n");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).n).toBe(123);
+  });
+
+  it('rewrites ::text to CAST AS TEXT', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT 456::text AS s');
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).s).toBe('456');
+  });
+});
+
+describe('QueryRouter — JSONB operators in the SELECT fast path', () => {
+  it('translates doc @> to json_extract containment', async () => {
+    const { qr, db } = makeRouter();
+    db.exec('CREATE TABLE t (doc TEXT)');
+    db.exec('INSERT INTO t (doc) VALUES (\'{"a":1,"b":2}\'), (\'{"a":5}\')');
+    const r = await qr.execute("SELECT * FROM t WHERE doc @> '{\"a\":1}'");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).doc).toBe('{"a":1,"b":2}');
+  });
+
+  it('translates doc->>\'key\' to json_extract', async () => {
+    const { qr, db } = makeRouter();
+    db.exec('CREATE TABLE t (doc TEXT)');
+    db.exec('INSERT INTO t (doc) VALUES (\'{"a":1}\'), (\'{"a":5}\')');
+    const r = await qr.execute("SELECT doc->>'a' AS a FROM t");
+    expect(r.rowCount).toBe(2);
+    expect((r.rows[0] as any).a).toBe(1);
+    expect((r.rows[1] as any).a).toBe(5);
+  });
+});
