@@ -5202,6 +5202,10 @@ export class QueryRouter {
    */
   private applyPgSelectRewrites(sql: string): string {
     let out = sql;
+    if (detectUuidUsage(out)) {
+      const ur = rewriteUuidSql(out);
+      if (ur.rewritten) out = ur.sql;
+    }
     if (detectRowExpr(out)) {
       const rr = rewriteRowExpr(out);
       if (rr.rewritten) out = rr.sql;

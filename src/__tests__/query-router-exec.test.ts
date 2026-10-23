@@ -733,3 +733,21 @@ describe('QueryRouter — PG expression rewrites in the SELECT fast path', () =>
     expect((r.rows[0] as any).x).toBe('<xml/>');
   });
 });
+
+describe('QueryRouter — UUID functions in the SELECT fast path', () => {
+  it('rewrites gen_random_uuid() to a 32-hex random value', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT gen_random_uuid() AS u');
+    expect(r.rowCount).toBe(1);
+    const u = (r.rows[0] as any).u;
+    expect(u).toMatch(/^[0-9a-f]{32}$/i);
+  });
+
+  it('rewrites uuid_generate_v4() to a valid v4 UUID', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT uuid_generate_v4() AS u');
+    expect(r.rowCount).toBe(1);
+    const u = (r.rows[0] as any).u;
+    expect(u).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  });
+});
