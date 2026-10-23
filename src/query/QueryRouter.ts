@@ -214,6 +214,7 @@ import { detectAggFunc, rewriteAggFunc } from './AggFuncShim';
 import { detectStringFunc, rewriteStringFunc, registerStringFunctions } from './StringFuncShim';
 import { detectFuzzyMatch, rewriteFuzzyMatch, registerFuzzyFunctions } from './FuzzystrmatchShim';
 import { registerDateFunctions } from './PgDateFuncShim';
+import { registerPgScalarFunctions } from '../system/FunctionRegistry';
 import { detectFilter, rewriteFilter } from './FilterClauseShim';
 import { detectTextSearchFunc, rewriteTextSearchFunc } from './TextSearchShim';
 import { detectLargeObjectFunc, rewriteLargeObjectFunc } from './LargeObjectShim';
@@ -780,6 +781,8 @@ export class QueryRouter {
       registerStringFunctions(shard0.db);
       registerFuzzyFunctions(shard0.db);
       registerDateFunctions(shard0.db);
+      // Core PG scalar functions (md5, sha256, encode, decode, div, etc.)
+      registerPgScalarFunctions(shard0.db);
     }
 
     // ── Step 1j: Initialize autovacuum daemon ────────────────

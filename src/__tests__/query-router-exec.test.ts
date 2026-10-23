@@ -806,3 +806,33 @@ describe('QueryRouter — pg_stat_* / pg_* catalog views in the SELECT fast path
     expect(keys).toContain('relfilenode');
   });
 });
+
+describe('QueryRouter — PG scalar functions (FunctionRegistry) in the SELECT fast path', () => {
+  it('evaluates md5() to the correct MD5 digest', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT md5('hello') AS h");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).h).toBe('5d41402abc4b2a76b9719d911017c592');
+  });
+
+  it('evaluates sha256() to the correct digest', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT sha256('hello') AS h");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).h).toBe('2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
+  });
+
+  it('evaluates encode(..., hex) correctly', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT encode('hello','hex') AS h");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).h).toBe('68656c6c6f');
+  });
+
+  it('does not clobber SQLite built-in length()', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT length('hello') AS l");
+    expect(r.rowCount).toBe(1);
+    expect((r.rows[0] as any).l).toBe(5);
+  });
+});
