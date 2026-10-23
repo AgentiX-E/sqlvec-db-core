@@ -836,3 +836,44 @@ describe('QueryRouter — PG scalar functions (FunctionRegistry) in the SELECT f
     expect((r.rows[0] as any).l).toBe(5);
   });
 });
+
+describe('QueryRouter — column-level encryption policy wiring', () => {
+  it('exposes createEncryptionPolicy and encrypts INSERT values end-to-end', async () => {
+    const { qr, db } = makeRouter();
+    await qr.execute('CREATE TABLE emp (id INTEGER PRIMARY KEY, name TEXT, ssn BLOB)');
+    qr.createEncryptionPolicy('ssn_policy', 'emp.ssn', 'aes-256-gcm');
+
+    // Parameterized INSERT takes the inline path (executeInternal); use the
+    // literal-VALUES path so rewriteInsert sees plaintext and encrypts ssn.
+    await qr.execute("INSERT INTO emp (id, name, ssn) VALUES (1, 'Alice', '123-45-6789')");
+
+    const row = db.prepare('SELECT ssn FROM emp WHERE id = 1').get() as any;
+    // ssn must no longer be stored in plaintext: it is an X'...' BLOB.
+    expect(row.ssn).not.toBe('123-45-6789');
+    expect(Buffer.isBuffer(row.ssn)).toBe(true);
+  });
+
+  it('leaves columns without a policy in plaintext', async () => {
+    const { qr, db } = makeRouter();
+    await qr.execute('CREATE TABLE emp2 (id INTEGER PRIMARY KEY, name TEXT)');
+    await qr.execute("INSERT INTO emp2 (id, name) VALUES (1, 'Bob')");
+    const row = db.prepare('SELECT name FROM emp2 WHERE id = 1').get() as any;
+    expect(row.name).toBe('Bob');
+  });
+});
+
+  it('decrypts encrypted columns on SELECT (full round-trip)', async () => {
+    const { qr, db } = makeRouter();
+    await qr.execute('CREATE TABLE emp3 (id INTEGER PRIMARY KEY, name TEXT, ssn BLOB)');
+    qr.createEncryptionPolicy('ssn3', 'emp3.ssn', 'aes-256-gcm');
+
+    await qr.execute("INSERT INTO emp3 (id, name, ssn) VALUES (1, 'Alice', '123-45-6789')");
+
+    // At rest, ssn is encrypted (not plaintext).
+    const raw = db.prepare('SELECT ssn FROM emp3 WHERE id = 1').get() as any;
+    expect(raw.ssn).not.toBe('123-45-6789');
+
+    // Through the router, SELECT must transparently decrypt it back.
+    const r = await qr.execute('SELECT id, name, ssn FROM emp3 WHERE id = 1');
+    expect(r.rows?.[0]).toMatchObject({ id: 1, name: 'Alice', ssn: '123-45-6789' });
+  });

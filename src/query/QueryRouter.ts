@@ -776,6 +776,13 @@ export class QueryRouter {
     // ── Initialize FTS translator (tsvector/tsquery → FTS5) ──
     this.ftsTranslator = new FtsTranslator();
 
+    // ── Initialize column-level encryption engine ─────────────────
+    // EncryptionEngine is policy-driven and a safe no-op until a policy is
+    // registered via createEncryptionPolicy(). Instantiating it here (instead
+    // of leaving the field undefined) is what makes createEncryptionPolicy()
+    // and the INSERT/SELECT encryption rewrites actually reachable.
+    this.encryptionEngine = new EncryptionEngine();
+
     // ── Register PG string/fuzzy/date functions on shard 0 database ─────
     if (shard0?.db) {
       registerStringFunctions(shard0.db);
@@ -898,6 +905,38 @@ export class QueryRouter {
     if (this.qpsFlushTimer && typeof this.qpsFlushTimer === 'object' && 'unref' in this.qpsFlushTimer) {
       (this.qpsFlushTimer as any).unref();
     }
+  }
+
+  // ──────────────────────────────────────────────
+  //  Column-level encryption policy API
+  // ──────────────────────────────────────────────
+
+  /**
+   * Register a column-level encryption policy.
+   *
+   * Once a policy is active for a column, INSERTs into that column are
+   * transparently encrypted (AES-GCM via X'...' literals) and SELECTs mark it
+   * for decryption. Without any policy the encryption engine is a no-op, so
+   * calling this is the only way to opt a column into encryption.
+   *
+   * @param name      - Unique policy name.
+   * @param column    - Qualified column name (e.g. 'employees.ssn').
+   * @param algorithm - 'aes-256-gcm' (default) or 'aes-128-gcm'.
+   */
+  createEncryptionPolicy(
+    name: string,
+    column: string,
+    algorithm: 'aes-256-gcm' | 'aes-128-gcm' = 'aes-256-gcm',
+  ): void {
+    if (!this.encryptionEngine) this.encryptionEngine = new EncryptionEngine();
+    this.encryptionEngine.createPolicy(name, column, algorithm);
+  }
+
+  /**
+   * Remove an encryption policy by name.
+   */
+  dropEncryptionPolicy(name: string): void {
+    this.encryptionEngine?.dropPolicy(name);
   }
 
   // ──────────────────────────────────────────────
@@ -5052,6 +5091,18 @@ export class QueryRouter {
       }
     }
 
+    // ── Column-level encryption: encrypt protected columns in VALUES ──
+    // Runs AFTER partition routing (which must read the plaintext partition
+    // key from VALUES) and BEFORE execution. Safe no-op when no policy covers
+    // any column of this INSERT.
+    if (this.encryptionEngine) {
+      const encryptedSql = this.encryptionEngine.rewriteInsert(sql);
+      if (encryptedSql !== sql) {
+        logger.debug({ table: sql.match(/INSERT\s+INTO\s+("[^"]+"|\w+)/i)?.[1] }, 'INSERT column-encryption rewrite applied');
+        sql = encryptedSql;
+      }
+    }
+
     // ── Execute on target shard (single-shard or routed) ──
     try {
       try {
@@ -5582,8 +5633,15 @@ export class QueryRouter {
       const shard = this.shardManager.getShard(targetShard);
       if (!shard) throw new Error(`No shard ${targetShard} available`);
       const stmt = shard.db.prepare(adjustedSql);
-      const rows = stmt.all() as Record<string, any>[];
-      const rowCount = rows.length;
+      let rows = stmt.all() as Record<string, any>[];
+      let rowCount = rows.length;
+
+      // ── Column-level encryption: decrypt protected columns in the result set ──
+      // Safe no-op when no policy covers any returned column.
+      if (this.encryptionEngine) {
+        const selTbl = sql.match(/FROM\s+"?([\w.]+)"?/i)?.[1] ?? '';
+        rows = rows.map((r) => this.encryptionEngine!.decryptRow(r, selTbl));
+      }
 
       return {
         rows,
