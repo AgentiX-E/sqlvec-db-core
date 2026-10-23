@@ -170,9 +170,13 @@ export function rewritePgBufferCache(sql: string, rows?: PgBufferCacheRow[]): Bu
       `(${r.bufferid},${r.relfilenode},${r.relforknumber},${r.relblocknumber},${r.isdirty},${r.usagecount},${r.pinning_backends})`
     ).join(',');
 
+    // SQLite's VALUES clause does NOT accept a column-rename list
+    // (`AS t(c1, c2, ...)`); that form is a syntax error (`near "("`). Instead,
+    // alias the implicit `columnN` names of the VALUES row so the selected
+    // columns keep their pg_buffercache names.
     const result = sql.replace(
       /\bpg_buffercache\b/gi,
-      `(SELECT * FROM (VALUES ${valuesSql}) AS pg_buffercache(bufferid,relfilenode,relforknumber,relblocknumber,isdirty,usagecount,pinning_backends))`,
+      `(SELECT column1 AS bufferid, column2 AS relfilenode, column3 AS relforknumber, column4 AS relblocknumber, column5 AS isdirty, column6 AS usagecount, column7 AS pinning_backends FROM (VALUES ${valuesSql}))`,
     );
 
     logger.debug({ original: sql, rewritten: result }, 'Rewrote pg_buffercache reference');

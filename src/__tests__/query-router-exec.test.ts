@@ -770,3 +770,39 @@ describe('QueryRouter — system catalog views in the SELECT fast path', () => {
     expect(keys).toContain('setting');
   });
 });
+
+describe('QueryRouter — pg_stat_* / pg_* catalog views in the SELECT fast path', () => {
+  it('returns rows for pg_stat_io', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_stat_io');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+  });
+  it('returns rows for pg_stat_checkpointer', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_stat_checkpointer');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+  });
+  it('returns rows for pg_statio_user_tables', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_statio_user_tables');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+  });
+  it('returns rows for pg_stat_archiver', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_stat_archiver');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+  });
+  it('returns rows for pg_stat_slru', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_stat_slru');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+  });
+  it('returns rows for pg_buffercache with correct column names', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT * FROM pg_buffercache');
+    expect(r.rowCount).toBeGreaterThanOrEqual(1);
+    const keys = Object.keys(r.rows[0] as any);
+    expect(keys).toContain('bufferid');
+    expect(keys).toContain('relfilenode');
+  });
+});

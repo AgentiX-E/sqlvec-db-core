@@ -5202,6 +5202,22 @@ export class QueryRouter {
    */
   private applyPgSelectRewrites(sql: string): string {
     let out = sql;
+    // ── pg_stat_* / pg_* catalog views (pure-function rewrites to VALUES) ──
+    // These standalone views are NOT in SystemIntegration's known-pg-table
+    // list, so a `SELECT * FROM pg_stat_io` (etc.) reaches SQLite verbatim and
+    // fails with `no such table`. Each shim is a pure `sql -> sql` rewrite that
+    // replaces the catalog reference with a VALUES clause; replay them here.
+    if (detectPgStatIo(out)) out = rewritePgStatIo(out);
+    if (detectPgStatCheckpointer(out)) out = rewritePgStatCheckpointer(out);
+    if (detectPgStatIoUser(out)) out = rewritePgStatIoUser(out);
+    if (detectPgStatArchiver(out)) out = rewritePgStatArchiver(out);
+    if (detectPgStatGssapi(out)) out = rewritePgStatGssapi(out);
+    if (detectPgStatSlru(out)) out = rewritePgStatSlru(out);
+    if (detectPgStatBackend(out)) out = rewritePgStatBackend(out);
+    if (detectPgBufferCache(out)) {
+      const bc = rewritePgBufferCache(out);
+      if (bc.rewritten) out = bc.sql;
+    }
     if (detectUuidUsage(out)) {
       const ur = rewriteUuidSql(out);
       if (ur.rewritten) out = ur.sql;

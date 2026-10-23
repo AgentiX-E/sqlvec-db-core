@@ -158,14 +158,14 @@ describe('rewritePgBufferCache', () => {
     ];
     const r = rewritePgBufferCache('SELECT * FROM pg_buffercache', rows);
     expect(r.rewritten).toBe(true);
-    expect(r.sql).toContain('(SELECT * FROM (VALUES');
-    expect(r.sql).toContain('AS pg_buffercache(bufferid,relfilenode');
+    expect(r.sql).toContain('SELECT column1 AS bufferid');
+    expect(r.sql).toContain('FROM (VALUES');
   });
 
   it('uses synthetic rows when no rows provided', () => {
     const r = rewritePgBufferCache('SELECT * FROM pg_buffercache');
     expect(r.rewritten).toBe(true);
-    expect(r.sql).toContain('(SELECT * FROM (VALUES');
+    expect(r.sql).toContain('SELECT column1 AS bufferid');
   });
 
   it('falls back to subquery when rows array is empty', () => {
