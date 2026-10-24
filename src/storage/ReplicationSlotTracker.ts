@@ -171,6 +171,7 @@ export class ReplicationSlotTracker {
    */
   private static loadSlots(): void {
     const dir = ReplicationSlotTracker.slotsDir;
+    /* istanbul ignore next -- loadSlots is only reached via initFromStorage, which already returns early when slotsDir is null */
     if (!dir) return;
 
     const filePath = path.join(dir, ReplicationSlotTracker.SLOTS_FILENAME);

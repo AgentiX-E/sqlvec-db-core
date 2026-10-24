@@ -239,6 +239,7 @@ export class PgWalSegmentManager {
     }
     const name = this.segmentNames[this.currentSegmentIndex];
     const segment = this.segments.get(name);
+    /* istanbul ignore next -- segmentNames and segments are kept in sync by init/switchSegment, so a name always resolves */
     if (!segment) {
       throw new Error(`Current segment "${name}" not found in segment map`);
     }

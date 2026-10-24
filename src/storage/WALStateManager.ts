@@ -40,6 +40,8 @@
 import { PinoLogger } from '../logger/PinoLogger';
 import { WALArchiver } from '../backup/WALArchiver';
 import { PgWalSegmentManager } from './PgWalSegmentManager';
+import { MvccCrashRecovery } from '../recovery/MvccCrashRecovery';
+import { WalRecordReader } from '../recovery/WalRecordReader';
 
 const logger = PinoLogger.forComponent('WALStateManager');
 
@@ -577,12 +579,6 @@ export class WALStateManager {
     recordsReplayed: number;
     durationMs: number;
   } {
-    // Lazy-import to avoid circular dependencies
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { MvccCrashRecovery } = require('../recovery/MvccCrashRecovery');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { WalRecordReader } = require('../recovery/WalRecordReader');
-
     const reader = new WalRecordReader();
     const recovery = new MvccCrashRecovery(reader);
     return recovery.recover(segmentDir);
