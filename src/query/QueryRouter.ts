@@ -330,109 +330,90 @@ import { planAndExecute, shouldUsePlanner } from './QueryPlannerIntegration';
 import { loadTableStats, clearStatsCache } from './StatsPlannerAdapter';
 const logger = PinoLogger.forComponent('QueryRouter');
 
-function generateMsgId(): string {
+export function generateMsgId(): string {
   return crypto.randomUUID();
 }
 
 // ── Step 2: Enterprise module detect/rewrite wrappers ──────────
 
 // Step 2a: MVCC transaction intercept detection
-function detectTransactionBegin(sql: string): boolean {
+export function detectTransactionBegin(sql: string): boolean {
   return /^\s*BEGIN\b/i.test(sql) || /^\s*SET\s+TRANSACTION\b/i.test(sql);
 }
 
 // Step 2b: DDL detection for triggers
-function detectDDLStatement(sql: string): boolean {
+export function detectDDLStatement(sql: string): boolean {
   return /^\s*(CREATE|ALTER|DROP|TRUNCATE|COMMENT|GRANT|REVOKE|RENAME|SECURITY)\s/i.test(sql);
 }
 
 // Step 2c: Partition routing detection
-function detectPartitionTarget(sql: string): boolean {
+export function detectPartitionTarget(sql: string): boolean {
   return /^\s*INSERT\s+INTO\s+\w+/i.test(sql) || /^\s*SELECT\s+.+\bFROM\b\s+\w+/i.test(sql);
 }
 
 // Step 2d: FTS5 translation detection
-function detectFTSOperator(sql: string): boolean {
+export function detectFTSOperator(sql: string): boolean {
   return /\bto_tsvector\s*\(|\bto_tsquery\s*\(|\bplainto_tsquery\s*\(|\bts_rank\s*\(|@@\s*to_tsquery\b/i.test(sql);
 }
 
 // Step 2e: Sequence nextval detection
-function detectSequenceNextval(sql: string): boolean {
+export function detectSequenceNextval(sql: string): boolean {
   return /\bnextval\s*\(|\bcurrval\s*\(|\bsetval\s*\(/i.test(sql);
 }
 
 // Step 2f: Advisory lock function detection
-function detectAdvisoryLockFunc(sql: string): boolean {
+export function detectAdvisoryLockFunc(sql: string): boolean {
   return /\bpg_advisory_lock\s*\(|\bpg_advisory_unlock\s*\(|\bpg_try_advisory_lock\s*\(|\bpg_advisory_xact_lock\s*\(/i.test(sql);
 }
 
 // Step 2g: pg_cron schedule detection
-function detectPgCronSchedule(sql: string): boolean {
+export function detectPgCronSchedule(sql: string): boolean {
   return /\bcron\.schedule\s*\(|\bcron\.unschedule\s*\(/i.test(sql);
 }
 
 // Step 2h: pg_stat_bgwriter view detection
-function detectPgStatBgwriter(sql: string): boolean {
+export function detectPgStatBgwriter(sql: string): boolean {
   return /\bpg_stat_bgwriter\b/i.test(sql);
 }
 
 // Step 2i: pg_stat_replication view detection
-function detectPgStatReplication(sql: string): boolean {
+export function detectPgStatReplication(sql: string): boolean {
   return /\bpg_stat_replication\b/i.test(sql);
 }
 
 // Step 2j: pg_blocking_pids detection
-function detectPgBlockingPids(sql: string): boolean {
+export function detectPgBlockingPids(sql: string): boolean {
   return /\bpg_blocking_pids\s*\(/i.test(sql);
 }
 
 // Step 2k: pg_wait_sampling detection
-function detectPgWaitSampling(sql: string): boolean {
+export function detectPgWaitSampling(sql: string): boolean {
   return /\bpg_wait_sampling\b/i.test(sql);
 }
 
 // Step 2l: pg_prewarm detection
-function detectPgPrewarm(sql: string): boolean {
+export function detectPgPrewarm(sql: string): boolean {
   return /\bpg_prewarm\s*\(/i.test(sql);
 }
 
 // Step 2m: SET standard_conforming_strings / escape_string_warning detection
-function detectBackslashQuoteSet(sql: string): boolean {
+export function detectBackslashQuoteSet(sql: string): boolean {
   return /^\s*SET\s+(standard_conforming_strings|escape_string_warning)\s*=/i.test(sql);
 }
 
-// Step 2n: PL/pgSQL function/DO block detection
-function detectPLpgSQLStmt(sql: string): boolean {
-  return /^\s*DO\s+\$\$/i.test(sql) || /^\s*CREATE\s+(OR\s+REPLACE\s+)?FUNCTION\b/i.test(sql);
-}
-
 // Step 2o: Foreign table detection
-function detectForeignTableQuery(sql: string): boolean {
+export function detectForeignTableQuery(sql: string): boolean {
   return /\bFROM\s+\w*foreign\w*\b/i.test(sql) || /\bfdw_.+\b/i.test(sql);
 }
 
-// Step 2p: Encrypted column detection
-function detectEncryptedColumn(sql: string): boolean {
-  return false; // detection is handled inside EncryptionEngine via policy registration
-}
-
 // Step 2q: SET CONSTRAINTS detection
-function detectSetConstraints(sql: string): boolean {
+export function detectSetConstraints(sql: string): boolean {
   return /^\s*SET\s+CONSTRAINTS\b/i.test(sql);
 }
 
-// Step 2r: Column-level encryption INSERT/UPDATE rewrite detection
-function detectEncryptionTarget(sql: string): boolean {
-  return false; // handled via EncryptionEngine policy matching
-}
-
 // Detection for encryption engine built-in rewrites
-function detectEncryptionInsert(sql: string): boolean {
+export function detectEncryptionInsert(sql: string): boolean {
   return /\bINSERT\b/i.test(sql);
-}
-
-function detectEncryptionSelect(sql: string): boolean {
-  return /\bSELECT\b/i.test(sql);
 }
 
 /**
@@ -440,7 +421,7 @@ function detectEncryptionSelect(sql: string): boolean {
  * Batched INSERTs are grouped into a single Raft entry, reducing consensus
  * overhead by ~100× during bulk load.
  */
-function isBatchableInsert(sql: string): boolean {
+export function isBatchableInsert(sql: string): boolean {
   if (!sql || typeof sql !== 'string') return false;
   const s = sql.trim();
   if (!/^INSERT\s+INTO\s/i.test(s)) return false;
