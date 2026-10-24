@@ -34,9 +34,18 @@ describe('LateralJoinRewriter', () => {
         .toEqual({ sql: 'SELECT 1', rewritten: false });
     });
 
-    it('rewrites FROM LATERAL to CROSS JOIN', () => {
+    // A bare `FROM LATERAL (...)` has no left input to cross-join against, so
+    // LATERAL must be dropped while FROM is preserved. The prior behavior
+    // (rewriting to `SELECT * CROSS JOIN (...)`) omitted the FROM keyword and
+    // produced SQLite "near CROSS" syntax errors.
+    it('rewrites a bare FROM LATERAL to FROM (drops LATERAL)', () => {
       expect(rewriteLateral('SELECT * FROM LATERAL (SELECT 1) AS t', { forceRewrite: true }))
-        .toEqual({ sql: 'SELECT * CROSS JOIN (SELECT 1) AS t', rewritten: true });
+        .toEqual({ sql: 'SELECT * FROM (SELECT 1) AS t', rewritten: true });
+    });
+
+    it('rewrites a comma-separated LATERAL to CROSS JOIN', () => {
+      expect(rewriteLateral('SELECT * FROM a, LATERAL (SELECT 1) AS t', { forceRewrite: true }))
+        .toEqual({ sql: 'SELECT * FROM a CROSS JOIN (SELECT 1) AS t', rewritten: true });
     });
 
     it('rewrites JOIN LATERAL to INNER JOIN', () => {

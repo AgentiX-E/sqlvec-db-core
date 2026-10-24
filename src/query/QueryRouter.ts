@@ -2240,14 +2240,19 @@ export class QueryRouter {
         const rr = rewriteRangeFunc(postProcessSql);
         if (rr.rewritten) postProcessSql = rr.sql;
       }
-      if (detectArrayConstructor(postProcessSql)) {
-        const ar = rewriteArrayExpr(postProcessSql);
-        if (ar.rewritten) postProcessSql = ar.sql;
-      }
       // Step 1m-bis: intarray extension (icount, sort_asc, idx, subarray, &&, @>, <@)
+      // Must run BEFORE the ARRAY[...] constructor rewrite below: `col @> ARRAY[1]`
+      // is first rewritten by this shim to `intarray_contains(col, ARRAY[1])`, and
+      // if the ARRAY constructor rewrite ran first it would turn the operand into
+      // `json_array(1)`, leaving the `@>` token intact and producing an SQLite
+      // "unrecognized token: @" failure.
       if (detectIntarray(postProcessSql)) {
         const ia = rewriteIntarray(postProcessSql);
         if (ia.rewritten) postProcessSql = ia.sql;
+      }
+      if (detectArrayConstructor(postProcessSql)) {
+        const ar = rewriteArrayExpr(postProcessSql);
+        if (ar.rewritten) postProcessSql = ar.sql;
       }
 
       // Step 1n: PG type compatibility (ROW/XML/COMPOSITE/pg_dump)
@@ -5367,6 +5372,13 @@ export class QueryRouter {
       const rr = rewriteRowExpr(out);
       if (rr.rewritten) out = rr.sql;
     }
+    // Intarray operators (`@>`, `<@`, `&&`) must rewrite before ARRAY[...],
+    // otherwise `col @> ARRAY[1]` becomes `col @> json_array(1)` and the `@>`
+    // token survives to SQLite as "unrecognized token: @".
+    if (detectIntarray(out)) {
+      const ia = rewriteIntarray(out);
+      if (ia.rewritten) out = ia.sql;
+    }
     if (detectArrayConstructor(out)) {
       const ar = rewriteArrayExpr(out);
       if (ar.rewritten) out = ar.sql;
@@ -5378,10 +5390,6 @@ export class QueryRouter {
     if (detectRangeFunc(out)) {
       const rr = rewriteRangeFunc(out);
       if (rr.rewritten) out = rr.sql;
-    }
-    if (detectIntarray(out)) {
-      const ia = rewriteIntarray(out);
-      if (ia.rewritten) out = ia.sql;
     }
     if (detectPgCrypto(out)) {
       const pgr = rewritePgCrypto(out);
@@ -5402,6 +5410,37 @@ export class QueryRouter {
     if (detectCompositeType(out)) {
       const cr = rewriteCompositeType(out);
       if (cr.rewritten) out = cr.sql;
+    }
+    // Grouping/window/aggregate clauses that the main pipeline rewrites but the
+    // fast path would otherwise forward verbatim to SQLite (which rejects
+    // GROUPING SETS, GROUPS frames, EXCLUDE, FILTER, and extended window
+    // functions). Replay the same pure transforms here for parity.
+    if (detectGroupingSets(out)) {
+      const gs = rewriteGroupingSets(out);
+      if (gs.rewritten) out = gs.sql;
+    }
+    if (detectGroupsFrame(out)) {
+      const gf = rewriteGroupsFrame(out);
+      if (gf.rewritten) out = gf.sql;
+    }
+    if (detectExclude(out)) {
+      const ex = rewriteExclude(out);
+      if (ex.rewritten) out = ex.sql;
+    }
+    if (detectFilter(out)) {
+      const fr = rewriteFilter(out);
+      if (fr.rewritten) out = fr.sql;
+    }
+    if (detectWindowExt(out)) {
+      const we = rewriteWindowExt(out);
+      if (we.rewritten) out = we.sql;
+    }
+    if (detectJsonTable(out)) {
+      const jt = rewriteJsonTable(out);
+      if (jt.rewritten) out = jt.sql;
+    }
+    if (detectJsonStdFunc(out)) {
+      out = rewriteJsonStdFunc(out);
     }
     return out;
   }

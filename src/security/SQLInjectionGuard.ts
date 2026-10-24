@@ -56,8 +56,13 @@ const STACKED_QUERY =
  * Matches SQL comment markers used to truncate the remainder of a query
  * (`--`, `#`, or a C-style block comment).  A block comment is only flagged
  * when it does not span the whole statement (i.e. used to hide a tail).
+ *
+ * The pg_hint_plan hint marker `/*+` is explicitly exempt: PostgreSQL treats
+ * `/*+ SeqScan(t) *​/` as a legitimate planner directive, and QueryHintShim
+ * strips it during the rewrite pipeline. Flagging it as comment-truncation
+ * injection would break a supported PG feature.
  */
-const COMMENT_TRUNCATION = /(--|\/\*|#)/;
+const COMMENT_TRUNCATION = /(--|#|\/\*(?!\+))/;
 
 /**
  * Matches always-true tautologies commonly used in boolean/union injection:

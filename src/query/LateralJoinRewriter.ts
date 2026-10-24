@@ -110,14 +110,18 @@ export function rewriteLateral(
   });
 
   // 2. Handle bare LATERAL subqueries in FROM clause.
-  // `FROM LATERAL (...)` -> `CROSS JOIN (...)` (unchanged historical contract).
   // `, LATERAL (...)` -> ` CROSS JOIN (...)` — the leading space is required so
   // the preceding table alias is not glued to `CROSS JOIN` (e.g.
   // `t, LATERAL (SELECT 1) x` must become `t CROSS JOIN (SELECT 1) x`, not
-  // `tCROSS JOIN ...`).
+  // `tCROSS JOIN ...`). The historical contract treated `FROM LATERAL (...)`
+  // the same way, but that produced `SELECT * CROSS JOIN (...)` (a missing
+  // FROM keyword) for a bare FROM with no preceding table, which SQLite
+  // rejects as "near CROSS". A bare `FROM LATERAL (...)` has no left input to
+  // cross-join against, so we simply drop LATERAL and keep FROM: the subquery
+  // already references nothing lateral in that position.
   result = result.replace(FROM_LATERAL_RE, (match: string, paren: string) => {
     count++;
-    return /^FROM\s*/i.test(match) ? `CROSS JOIN ${paren}` : ` CROSS JOIN ${paren}`;
+    return /^FROM\s*/i.test(match) ? `FROM ${paren}` : ` CROSS JOIN ${paren}`;
   });
 
   // 3. Fallback: strip any remaining standalone LATERAL keywords (edge cases).
