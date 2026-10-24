@@ -257,12 +257,12 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
     // DELETE orphans: NOT MATCHED BY SOURCE THEN DELETE
     const deleteParsed = { ...parsed, whenNotMatchedBySourceUpdate: null, whenMatchedUpdate: null, whenNotMatchedInsert: null, whenMatchedDelete: null } as ParsedMerge;
     const deleteResult = translateNotMatchedBySourceDelete(deleteParsed);
-    /* c8 ignore next -- translateNotMatchedBySourceDelete never returns null (only guarded whenNotMatchedBySourceDelete, already ignored) */
+    /* istanbul ignore next -- translateNotMatchedBySourceDelete never returns null (only guarded whenNotMatchedBySourceDelete, already ignored) */
     if (deleteResult) {
       results.push(`-- WHEN NOT MATCHED BY SOURCE THEN DELETE\n${deleteResult}`);
     }
 
-    /* c8 ignore next -- deleteResult is always non-null, so results.length is always >= 1 */
+    /* istanbul ignore next -- deleteResult is always non-null, so results.length is always >= 1 */
     if (results.length > 0) {
       logger.info({ target: parsed.targetTable }, 'MERGE with UPSERT+BY-SOURCE-DELETE rewritten as 2 statements');
       return { sql: results.join('\n\n'), rewritten: true };
@@ -281,12 +281,12 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
 
     const deleteParsed = { ...parsed, whenNotMatchedBySourceUpdate: null, whenMatchedUpdate: null, whenNotMatchedInsert: null, whenMatchedDelete: null } as ParsedMerge;
     const deleteResult = translateNotMatchedBySourceDelete(deleteParsed);
-    /* c8 ignore next -- translateNotMatchedBySourceDelete never returns null */
+    /* istanbul ignore next -- translateNotMatchedBySourceDelete never returns null */
     if (deleteResult) {
       results.push(`-- WHEN NOT MATCHED BY SOURCE THEN DELETE\n${deleteResult}`);
     }
 
-    /* c8 ignore next -- deleteResult is always non-null, so results.length is always >= 1 */
+    /* istanbul ignore next -- deleteResult is always non-null, so results.length is always >= 1 */
     if (results.length > 0) {
       logger.info({ target: parsed.targetTable }, 'MERGE with INSERT+BY-SOURCE-DELETE rewritten as 2 statements');
       return { sql: results.join('\n\n'), rewritten: true };
@@ -338,11 +338,11 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
         const setSql = setParts.map(s => `${s.column} = ${s.valueExpr}`).join(', ');
         results.push(`-- Conditional MATCHED UPDATE${clause.andCondition ? ` (${clause.andCondition})` : ''}\nUPDATE ${targetBase} SET ${setSql} ${whereExists};`);
       } else if (clause.action === 'DELETE') {
-        /* c8 ignore next */
+        /* istanbul ignore next */
         const whereExists = clause.andCondition
           ? `WHERE EXISTS (SELECT 1 FROM ${parsed.sourceTable} WHERE ${parsed.onCondition} AND (${clause.andCondition}))`
           : `WHERE EXISTS (SELECT 1 FROM ${parsed.sourceTable} WHERE ${parsed.onCondition})`;
-        /* c8 ignore next */
+        /* istanbul ignore next */
         results.push(`-- Conditional MATCHED DELETE${clause.andCondition ? ` (${clause.andCondition})` : ''}\nDELETE FROM ${targetBase} WHERE (${conflictColsStr}) IN (SELECT ${conflictColsStr} FROM ${parsed.sourceTable})${clause.andCondition ? ` AND (${clause.andCondition})` : ''};`);
       }
       // DO NOTHING — skip, no SQL needed
@@ -411,7 +411,7 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
   // → DELETE FROM target WHERE NOT EXISTS (SELECT 1 FROM source WHERE on_condition)
   if (parsed.whenNotMatchedBySourceDelete && !parsed.whenNotMatchedBySourceUpdate) {
     const result = translateNotMatchedBySourceDelete(parsed);
-    /* c8 ignore next -- translateNotMatchedBySourceDelete never returns null */
+    /* istanbul ignore next -- translateNotMatchedBySourceDelete never returns null */
     if (result) {
       logger.info(
         { target: parsed.targetTable },
@@ -425,7 +425,7 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
   // → UPDATE target SET ... WHERE NOT EXISTS (SELECT 1 FROM source WHERE on_condition)
   if (parsed.whenNotMatchedBySourceUpdate && !parsed.whenNotMatchedBySourceDelete) {
     const result = translateNotMatchedBySourceUpdate(parsed);
-    /* c8 ignore next -- translateNotMatchedBySourceUpdate never returns null */
+    /* istanbul ignore next -- translateNotMatchedBySourceUpdate never returns null */
     if (result) {
       logger.info(
         { target: parsed.targetTable },
@@ -442,19 +442,19 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
 
     const deleteOnly = { ...parsed, whenNotMatchedBySourceUpdate: null, whenMatchedUpdate: null, whenNotMatchedInsert: null, whenMatchedDelete: null };
     const deleteResult = translateNotMatchedBySourceDelete(deleteOnly as any);
-    /* c8 ignore next -- translateNotMatchedBySourceDelete never returns null */
+    /* istanbul ignore next -- translateNotMatchedBySourceDelete never returns null */
     if (deleteResult) {
       results.push(`-- WHEN NOT MATCHED BY SOURCE THEN DELETE\n${deleteResult}`);
     }
 
     const updateOnly = { ...parsed, whenNotMatchedBySourceDelete: null, whenMatchedUpdate: null, whenNotMatchedInsert: null, whenMatchedDelete: null };
     const updateResult = translateNotMatchedBySourceUpdate(updateOnly as any);
-    /* c8 ignore next -- translateNotMatchedBySourceUpdate never returns null */
+    /* istanbul ignore next -- translateNotMatchedBySourceUpdate never returns null */
     if (updateResult) {
       results.push(`-- WHEN NOT MATCHED BY SOURCE THEN UPDATE\n${updateResult}`);
     }
 
-    /* c8 ignore next -- both delete and update always succeed, so results.length is always >= 1 */
+    /* istanbul ignore next -- both delete and update always succeed, so results.length is always >= 1 */
     if (results.length > 0) {
       logger.info({ target: parsed.targetTable }, 'MERGE with BY SOURCE DELETE+UPDATE rewritten as 2 statements');
       return { sql: results.join('\n\n'), rewritten: true };
@@ -464,7 +464,7 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
   // 场景 D: 组合 MATCHED UPDATE + MATCHED DELETE + NOT MATCHED INSERT
   // 这是最复杂的场景，需要顺序执行多个操作
   // 策略：拆分为 UPDATE + DELETE + INSERT 三个独立语句
-  /* c8 ignore start */
+  /* istanbul ignore start */
   if (parsed.whenMatchedUpdate && parsed.whenMatchedDelete && parsed.whenNotMatchedInsert) {
     const results: string[] = [];
 
@@ -521,7 +521,7 @@ export function rewriteMerge(sql: string): MergeRewriteResult {
       return { sql: combined, rewritten: true };
     }
   }
-  /* c8 ignore stop */
+  /* istanbul ignore stop */
 
   // 无法翻译的组合 — 返回原文
   logger.warn(
@@ -706,7 +706,7 @@ function extractConflictColumns(onCondition: string, targetTableOrRef: string): 
     const operator = match[2].trim();
     const rhs = match[3].trim();
 
-    /* c8 ignore next -- EQUALITY_COND_RE captures only '=' (operator group is literal), so operator !== '=' is unreachable */
+    /* istanbul ignore next -- EQUALITY_COND_RE captures only '=' (operator group is literal), so operator !== '=' is unreachable */
     if (operator !== '=') continue;
 
     // 确定哪一侧是 target 列
@@ -814,6 +814,7 @@ function translateUpsert(parsed: ParsedMerge): string | null {
       selectExprs.push(item.valueExpr);
     }
   } else {
+    /* istanbul ignore next -- every reachable caller guarantees whenMatchedUpdate or whenNotMatchedInsert */
     return null;
   }
 
@@ -868,7 +869,7 @@ function translateUpsert(parsed: ParsedMerge): string | null {
 function translateInsertNotExists(parsed: ParsedMerge): string | null {
   const { targetTable, sourceTable, onCondition, whenNotMatchedInsert } = parsed;
 
-  /* c8 ignore next -- all callers guarantee whenNotMatchedInsert is set */
+  /* istanbul ignore next -- all callers guarantee whenNotMatchedInsert is set */
   if (!whenNotMatchedInsert) return null;
 
   const targetBase = targetTable.trim().split(/\s+/)[0];
@@ -969,7 +970,7 @@ function translateDeleteIn(parsed: ParsedMerge): string | null {
  */
 function translateNotMatchedBySourceDelete(parsed: ParsedMerge): string | null {
   const { targetTable, sourceTable, onCondition, whenNotMatchedBySourceDelete } = parsed;
-  /* c8 ignore next -- all callers guarantee whenNotMatchedBySourceDelete is set */
+  /* istanbul ignore next -- all callers guarantee whenNotMatchedBySourceDelete is set */
   if (!whenNotMatchedBySourceDelete) return null;
 
   const targetBase = targetTable.trim().split(/\s+/)[0];
@@ -1015,7 +1016,7 @@ function translateNotMatchedBySourceDelete(parsed: ParsedMerge): string | null {
  */
 function translateNotMatchedBySourceUpdate(parsed: ParsedMerge): string | null {
   const { targetTable, sourceTable, onCondition, whenNotMatchedBySourceUpdate } = parsed;
-  /* c8 ignore next -- all callers guarantee whenNotMatchedBySourceUpdate is set */
+  /* istanbul ignore next -- all callers guarantee whenNotMatchedBySourceUpdate is set */
   if (!whenNotMatchedBySourceUpdate) return null;
 
   const targetBase = targetTable.trim().split(/\s+/)[0];
@@ -1260,7 +1261,7 @@ function findTopLevelFromKeyword(text: string): number {
         // `else if (depth === 0 && i + 4 < text.length)` branch, so the `: ' '`
         // fallback and the trailing `i + 4 >= text.length` disjunct are defensive.
         const nextCh = i + 4 < text.length ? text[i + 4] : ' ';
-        /* c8 ignore next -- trailing i + 4 >= length is unreachable (outer guard) */
+        /* istanbul ignore next -- trailing i + 4 >= length is unreachable (outer guard) */
         if (nextCh === ' ' || nextCh === '\t' || nextCh === '\n' || nextCh === '(' || i + 4 >= text.length) {
           return i;
         }
@@ -1296,8 +1297,10 @@ function rewriteOnConditionForNotExists(
     const targetPattern = new RegExp(`\\b${escapeRegex(targetAlias)}\\.`, 'gi');
     result = result.replace(targetPattern, `${targetBase}.`);
   } else {
+    /* istanbul ignore next -- all callers pass a non-empty targetTable */
     // 兼容旧版本：去掉 target 前缀
     const targetPattern = new RegExp(`\\b${escapeRegex(targetAlias)}\\.`, 'gi');
+    /* istanbul ignore next */
     result = result.replace(targetPattern, '');
   }
 
@@ -1441,7 +1444,7 @@ let _needsWhereOneOne: boolean | null = null;
 function needsWhereOneOneHack(db?: any): boolean {
   if (_needsWhereOneOne !== null) return _needsWhereOneOne;
   
-  /* c8 ignore next -- executeMergeWithReturning always passes a non-empty db, so !db is unreachable */
+  /* istanbul ignore next -- executeMergeWithReturning always passes a non-empty db, so !db is unreachable */
   if (!db || typeof db !== 'object') {
     // No db available — assume hack is needed (conservative default)
     _needsWhereOneOne = true;
@@ -1474,7 +1477,7 @@ function patchInsertOnConflict(sql: string, db?: any): string {
     !/\bLIMIT\b/im.test(sql) &&
     /\bON CONFLICT\b/im.test(sql)
   ) {
-    /* c8 ignore next -- needsWhereOneOneHack always returns true (conservative default), so the false branch is unreachable */
+    /* istanbul ignore next -- needsWhereOneOneHack always returns true (conservative default), so the false branch is unreachable */
     if (needsWhereOneOneHack(db)) {
       return sql.replace(/\bON CONFLICT\b/i, 'WHERE 1=1 ON CONFLICT');
     }
@@ -1484,7 +1487,7 @@ function patchInsertOnConflict(sql: string, db?: any): string {
 
 function execStatement(db: any, sql: string): void {
   const trimmed = sql.trim().replace(/;\s*$/, '');
-  /* c8 ignore next -- all callers pass non-empty sql (filtered statements or a validated MERGE body) */
+  /* istanbul ignore next -- all callers pass non-empty sql (filtered statements or a validated MERGE body) */
   if (!trimmed) return;
   const patched = patchInsertOnConflict(trimmed, db);
   try {
@@ -1586,14 +1589,14 @@ export function executeMergeWithReturning(
   // ── Helper: build a RETURNING clause for the rewrite output ──
   function buildSqlReturning(): string {
     if (!hasMergeAction) {
-      /* c8 ignore next -- returningClause is guaranteed non-null (guarded earlier), ?? '' is defensive */
+      /* istanbul ignore next -- returningClause is guaranteed non-null (guarded earlier), ?? '' is defensive */
       return returningClause ?? '';
     }
     // For DELETE actions, use 'DELETE' literal
     // For UPSERT actions, 'INSERT'/'UPDATE' will be determined post-execution
-    /* c8 ignore next -- returningClause is guaranteed non-null (guarded earlier), ?? '' is defensive */
+    /* istanbul ignore next -- returningClause is guaranteed non-null (guarded earlier), ?? '' is defensive */
     const stripped = stripMergeActionFromReturning(returningClause ?? '');
-    /* c8 ignore next -- returningClause is guaranteed non-null (guarded earlier), ?? '' is defensive */
+    /* istanbul ignore next -- returningClause is guaranteed non-null (guarded earlier), ?? '' is defensive */
     if (!stripped) return returningClause ?? ''; // fallback
     return stripped;
   }
@@ -1633,7 +1636,7 @@ export function executeMergeWithReturning(
     }
 
     const returningExprs = buildSqlReturning();
-    /* c8 ignore next -- returningClause is non-null here, so buildSqlReturning() never returns empty */
+    /* istanbul ignore next -- returningClause is non-null here, so buildSqlReturning() never returns empty */
     if (!returningExprs) {
       execStatement(db, rewriteResult.sql);
       return { rows: [], rowCount: 0 };
@@ -1643,7 +1646,7 @@ export function executeMergeWithReturning(
 
     for (const stmt of statements) {
       let trimmed = stmt.trim();
-      /* c8 ignore next -- statements are already filtered to non-empty strings */
+      /* istanbul ignore next -- statements are already filtered to non-empty strings */
       if (!trimmed) continue;
 
       // Strip leading SQL comment lines to detect the actual statement type
@@ -1680,7 +1683,7 @@ export function executeMergeWithReturning(
     const rewriteResult = rewriteMerge(mergeSql);
     if (rewriteResult.rewritten) {
       const returningExprs = buildSqlReturning();
-      /* c8 ignore next -- returningClause is non-null here, so buildSqlReturning() never returns empty */
+      /* istanbul ignore next -- returningClause is non-null here, so buildSqlReturning() never returns empty */
       if (!returningExprs) {
         execStatement(db, rewriteResult.sql);
         return { rows: [], rowCount: 0 };
@@ -1700,6 +1703,7 @@ export function executeMergeWithReturning(
             );
           }
         } else {
+          /* istanbul ignore next -- a standalone MATCHED DELETE rewrite yields only DELETE statements */
           // NOT MATCHED BY SOURCE UPDATE
           execStatement(db, stmt);
         }
@@ -1714,7 +1718,7 @@ export function executeMergeWithReturning(
     const rewriteResult = rewriteMerge(mergeSql);
     if (rewriteResult.rewritten) {
       const returningExprs = buildSqlReturning();
-      /* c8 ignore next -- returningClause is non-null here, so buildSqlReturning() never returns empty */
+      /* istanbul ignore next -- returningClause is non-null here, so buildSqlReturning() never returns empty */
       if (!returningExprs) {
         execStatement(db, rewriteResult.sql);
         return { rows: [], rowCount: 0 };
@@ -1738,6 +1742,7 @@ export function executeMergeWithReturning(
         }
       }
     } else {
+      /* istanbul ignore next -- a standalone BY SOURCE DELETE always rewrites successfully (no equality columns required) */
       execStatement(db, mergeSql);
     }
   }
