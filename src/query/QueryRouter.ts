@@ -313,6 +313,7 @@ import { detectCreateFunction, parseCreateFunction, detectDropFunction, extractD
 import { FDWExecutor } from './FDWExecutor';
 import { PostGISEngine } from './PostGISEngine';
 import { DeferredConstraintManager } from './DeferredConstraintManager';
+import { PreparedStatementManager } from './PreparedStatementManager';
 import { tryRouteDuckDB } from './DuckDBRouter';
 import { UnifiedRouter, UnifiedRouterConfig } from './UnifiedRouter';
 import { DuckDBExecutor } from './DuckDBExecutor';
@@ -499,6 +500,8 @@ export class QueryRouter {
   private prewarmShim?: PrewarmShim;
   private backslashQuoteShim?: BackslashQuoteShim;
   private ftsIndexer?: FullTextSearchIndexer;
+  /** In-memory registry for PREPARE / EXECUTE / DEALLOCATE statements */
+  private preparedStatements = new PreparedStatementManager();
   /** Set by execute() when a DDL has the @raft_forward or @peer_forwarded marker */
   private _isCurrentDdlForwarded = false;
   private plpgsqlExecutor?: PLpgSQLExecutor;
@@ -937,6 +940,97 @@ export class QueryRouter {
    */
   dropEncryptionPolicy(name: string): void {
     this.encryptionEngine?.dropPolicy(name);
+  }
+
+  // ──────────────────────────────────────────────
+  //  Prepared statements (PREPARE / EXECUTE / DEALLOCATE)
+  // ──────────────────────────────────────────────
+
+  private readonly PREPARE_RE = /^\s*PREPARE\s+(\w+)\s*(?:\(([^)]*)\))?\s*AS\s+([\s\S]+)/i;
+  private readonly EXECUTE_RE = /^\s*EXECUTE\s+(\w+)\s*(?:\(([^)]*)\))?/i;
+  private readonly DEALLOCATE_RE = /^\s*DEALLOCATE\s+(?:PREPARE\s+)?(\w+)\s*;?\s*$/i;
+
+  /**
+   * Intercept PREPARE / EXECUTE / DEALLOCATE and drive PreparedStatementManager.
+   *
+   * Returns a QueryResult when the statement was handled, or null when the SQL
+   * is not a prepared-statement DDL and should continue through the normal
+   * execution pipeline.
+   */
+  private async handlePreparedStatement(
+    sql: string,
+    params: any[] | undefined,
+  ): Promise<QueryResult | null> {
+    // PREPARE name [(type, ...)] AS <inner SQL>
+    const prepareMatch = sql.match(this.PREPARE_RE);
+    if (prepareMatch) {
+      const name = prepareMatch[1];
+      const paramDefs = prepareMatch[2] ?? '';
+      const innerSql = prepareMatch[3].trim().replace(/;\s*$/, '');
+      const paramTypes = paramDefs
+        .split(',')
+        .map((s) => s.trim().split(/\s+/).pop() || 'text')
+        .filter(Boolean);
+      this.preparedStatements.prepare(name, innerSql, paramTypes);
+      const start = performance.now();
+      return {
+        rows: [],
+        rowCount: 0,
+        queryTimeMs: performance.now() - start,
+        engine: 'shard',
+      };
+    }
+
+    // DEALLOCATE [PREPARE] name
+    const deallocMatch = sql.match(this.DEALLOCATE_RE);
+    if (deallocMatch) {
+      const start = performance.now();
+      this.preparedStatements.deallocate(deallocMatch[1]);
+      return {
+        rows: [],
+        rowCount: 0,
+        queryTimeMs: performance.now() - start,
+        engine: 'shard',
+      };
+    }
+
+    // EXECUTE name [(arg, ...)]
+    const execMatch = sql.match(this.EXECUTE_RE);
+    if (execMatch) {
+      const name = execMatch[1];
+      const argStr = execMatch[2] ?? '';
+      const args = argStr
+        .split(',')
+        .map((a) => this.parseExecuteArg(a.trim()))
+        .filter((a) => a !== undefined);
+      const { sql: substitutedSql } = this.preparedStatements.execute(name, args);
+      // Re-enter the normal pipeline with the substituted SQL so all downstream
+      // rewrites (jsonb, FTS, pgcrypto, MVCC, etc.) still apply.
+      return this.execute(substitutedSql, params, undefined);
+    }
+
+    return null;
+  }
+
+  /**
+   * Parse a single EXECUTE argument literal into its raw value. PreparedStatementManager
+   * re-escapes values via escapeParam, so string literals must have their outer quotes
+   * stripped here (otherwise `'hello'` would be escaped again into `'''hello'''`).
+   */
+  private parseExecuteArg(raw: string): any {
+    if (raw === '') return undefined;
+    const upper = raw.toUpperCase();
+    if (upper === 'NULL') return null;
+    if (upper === 'TRUE') return true;
+    if (upper === 'FALSE') return false;
+    // Numeric literal
+    if (/^-?\d+(\.\d+)?$/.test(raw)) return Number(raw);
+    // Single-quoted string literal: strip outer quotes, unescape doubled quotes.
+    if (raw.length >= 2 && raw.startsWith("'") && raw.endsWith("'")) {
+      return raw.slice(1, -1).replace(/''/g, "'");
+    }
+    // Fallback: treat as a raw string value.
+    return raw;
   }
 
   // ──────────────────────────────────────────────
@@ -1465,6 +1559,18 @@ export class QueryRouter {
       const fastParsed = parseStatement(sql);
       if (fastParsed.type === 'TRANSACTION') {
         return this.executeTransaction(fastParsed as any, sessionId, start);
+      }
+    }
+
+    // ── PREPARE / EXECUTE / DEALLOCATE interception ──
+    // pgsql-ast-parser does not cover prepared-statement DDL, so intercept it
+    // here (before classification/rewrite) and drive PreparedStatementManager.
+    // PREPARE stores the inner SQL + param types; EXECUTE substitutes $N and
+    // re-enters execute() with the substituted SQL; DEALLOCATE drops the entry.
+    {
+      const preparedResult = await this.handlePreparedStatement(sql, params);
+      if (preparedResult !== null) {
+        return preparedResult;
       }
     }
 
