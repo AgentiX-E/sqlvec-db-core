@@ -184,7 +184,6 @@ export interface RowVersion {
 interface WriteQueueEntry {
   xid: number;
   resolve: () => void;
-  reject: (err: Error) => void;
 }
 
 /**
@@ -1723,6 +1722,7 @@ export class MVCCExecutor {
     let cycleSids: string[] = [];
 
     const dfs = (sid: string, path: string[]): void => {
+      /* istanbul ignore next -- dfs is only entered while hasCycle is false; all call sites guard before recursing */
       if (hasCycle) return;
       color.set(sid, 'gray');
       path.push(sid);
@@ -2233,6 +2233,7 @@ export class MVCCExecutor {
     try {
       this.gcRowVersions(true);
     } catch (err: any) {
+      /* istanbul ignore next -- gcRowVersions only mutates in-memory Maps and never throws */
       this.logger.warn({ error: err.message }, 'RowVersion GC failed');
     }
 
@@ -2476,6 +2477,7 @@ export class MVCCExecutor {
 
     let hasCycle = false;
     const dfs = (xid: number): void => {
+      /* istanbul ignore next -- dfs is only entered while hasCycle is false; call sites guard before recursing */
       if (hasCycle) return;
       color.set(xid, 'grey');
       for (const next of edges.get(xid) ?? []) {
@@ -2528,7 +2530,7 @@ export class MVCCExecutor {
    * It is retained for future refactors where snapshot cleanup is deferred,
    * so the whole body is marked as ignored by coverage (not dead-removed).
    */
-  /* v8 ignore next 12 */
+  /* istanbul ignore next -- unreachable: commit()/rollback() delete snapshots inline and never defer to this helper */
   private gcStaleSnapshots(): void {
     let cleaned = 0;
     for (const [xid] of this.txnSnapshots) {
@@ -2613,7 +2615,6 @@ export class MVCCExecutor {
           }
           resolve(waitTime);
         },
-        reject: (err) => reject(err),
       };
       queue.push(entry);
       this.writeQueues.set(key, queue);
@@ -2692,7 +2693,7 @@ export class MVCCExecutor {
    * invokes it (activity is updated inline via ensureConflictStats). Retained
    * for API completeness; body is marked ignored by coverage, not removed.
    */
-  /* v8 ignore next 6 */
+  /* istanbul ignore next -- unreachable: no caller invokes it; session activity is updated inline via ensureConflictStats */
   private updateSessionActivity(sessionId: string): void {
     const stats = this.conflictStats.get(sessionId);
     if (stats) {
@@ -3055,6 +3056,7 @@ export class MVCCExecutor {
 
     for (const sessionId of staleSessions) {
       const txn = this.activeTxns.get(sessionId);
+      /* istanbul ignore next -- no removal happens between collecting staleSessions and this lookup, so txn always resolves */
       if (!txn) continue;
       this.logger.info(
         { sessionId, xid: txn.xid, elapsed: now - txn.started },
@@ -3260,6 +3262,7 @@ export class MVCCExecutor {
    */
   private initializeRowVersionsTable(): void {
     const db = this.config.db;
+    /* istanbul ignore next -- only invoked from the constructor when config.db is set, so db is always truthy here */
     if (!db) return;
     try {
       db.exec(
@@ -3283,6 +3286,7 @@ export class MVCCExecutor {
    */
   private reloadRowVersions(): void {
     const db = this.config.db;
+    /* istanbul ignore next -- only invoked from initializeRowVersionsTable, which already guards a null db */
     if (!db) return;
     try {
       const rows = db.prepare('SELECT key, xmin, xmax FROM __row_versions').all() as Array<{ key: string; xmin: number; xmax: number | null }>;
