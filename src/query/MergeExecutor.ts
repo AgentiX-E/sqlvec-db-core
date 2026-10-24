@@ -852,9 +852,16 @@ function translateUpsert(parsed: ParsedMerge): string | null {
   const colsStr = insertColumns.join(', ');
   const selectStr = selectExprs.join(', ');
   const fromStr = buildFromClause(sourceTable, sourceAlias);
+  // When the source is a parenthesized subquery, SQLite parses the ON CONFLICT
+  // keyword that follows a bare subquery alias as a JOIN ... ON clause,
+  // producing a "near DO" syntax error. Insert a "WHERE 1=1" barrier so the
+  // upsert clause is recognized unambiguously. Plain table sources need no
+  // barrier (verified: `INSERT ... SELECT ... ON CONFLICT` is unambiguous).
+  const needsWhereBarrier = /^\s*\(/.test(fromStr);
+  const whereBarrier = needsWhereBarrier ? '\nWHERE 1=1' : '';
   const onConflictStr = `ON CONFLICT(${conflictColsStr}) DO UPDATE SET ${updateSetItems.join(', ')}`;
 
-  const result = `INSERT INTO ${targetBase} (${colsStr})\nSELECT ${selectStr}\nFROM ${fromStr}\n${onConflictStr};`;
+  const result = `INSERT INTO ${targetBase} (${colsStr})\nSELECT ${selectStr}\nFROM ${fromStr}${whereBarrier}\n${onConflictStr};`;
 
   return result;
 }
@@ -1201,8 +1208,17 @@ function topLevelSplit(text: string, delimiter: string): string[] {
  * 否则直接使用。
  */
 function buildFromClause(sourceTable: string, sourceAlias: string): string {
-  // 如果是子查询（以 SELECT 开头或括号包裹），需要加别名
+  // If the source is a subquery (parenthesized or SELECT-leading), it needs an
+  // alias. But if it already ends with the alias (e.g. the USING clause was
+  // written as "(SELECT ...) s"), appending another "AS s" produces an
+  // invalid "(...) s AS s", which SQLite rejects with a syntax error.
   if (/^\s*\(/.test(sourceTable) || /^\s*SELECT\b/i.test(sourceTable)) {
+    const trimmed = sourceTable.trimEnd();
+    const alreadyAliased = new RegExp(
+      `\\s+(?:AS\\s+)?${escapeRegex(sourceAlias)}\\s*$`,
+      'i',
+    ).test(trimmed);
+    if (alreadyAliased) return sourceTable;
     return `${sourceTable} AS ${sourceAlias}`;
   }
   return sourceTable;
