@@ -143,10 +143,13 @@ export class NodeTransportStrategy implements FederationStrategy {
         : baseQuery;
       logger.debug({ pushdown: pushdownPlan.strategy, mergeStrategy }, 'PredicatePushdown applied');
 
-      const mergedResult = await this.duckDB.execute(finalSql);
+      // Return the merged remote result. Previously this result was computed
+      // and then dropped, falling through to a local-only execution below —
+      // so successfully-fetched remote data was never returned to the caller.
+      return this.duckDB.execute(finalSql);
     }
 
-    // Fall back to local-only execution (no remote peers returned data)
+    // No remote peers returned data — fall back to local-only execution.
     return this.duckDB.execute(sql);
   }
 
