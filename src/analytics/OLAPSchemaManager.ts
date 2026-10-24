@@ -553,29 +553,4 @@ export class OLAPSchemaManager {
     }
   }
 
-  /**
-   * Verify that a DuckDB table's data matches the SQLite source.
-   * Uses row count as a quick consistency check.
-   *
-   * @returns { consistent, duckRowCount, sqliteRowCount } or null if not comparable
-   */
-  verifyTableData(shardHandle: ShardHandle, duckTableName: string, sqliteTableName: string): {
-    consistent: boolean;
-    duckRowCount: number;
-    sqliteRowCount: number;
-  } | null {
-    try {
-      // SQLite row count
-      const sqliteRow = shardHandle.db.prepare(
-        `SELECT COUNT(*) AS cnt FROM "${sqliteTableName.replace(/"/g, '""')}"`
-      ).get() as { cnt: number } | undefined;
-      const sqliteRowCount = sqliteRow?.cnt ?? 0;
-
-      // DuckDB row count via promise
-      // (inlined sync check not possible — async caller must handle)
-      return null;
-    } catch {
-      return null;
-    }
-  }
 }
