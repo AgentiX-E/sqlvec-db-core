@@ -107,7 +107,6 @@ import {
   detectGeneratedColumn,
   rewriteGeneratedColumn,
   extractGeneratedDefs,
-  computeGeneratedValues,
 } from './GeneratedColumnShim';
 import {
   detectIdentityColumn,
@@ -6777,6 +6776,19 @@ export class QueryRouter {
           await this.dmlTriggerManager.fireTruncate(truncateMatch[1]);
         }
       }
+
+      // ── Generated column metadata cleanup ────────────────────
+      // DROP TABLE must remove the table's generated-column definitions from
+      // _sqlvec_generated_columns, otherwise the metadata leaks and a later
+      // CREATE TABLE reusing the same name picks up stale generation rules.
+      if (stmt.ddlType === 'DROP') {
+        const dropTableMatch = stmt.originalSql.trim().match(
+          /^DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?([\w."`]+)/i,
+        );
+        if (dropTableMatch) {
+          this.dropGeneratedColumnDefs(dropTableMatch[1].replace(/["`]/g, ''));
+        }
+      }
     }
 
     // ── Detect peer-forwarded DDL ─────────────────────────────
@@ -7884,43 +7896,6 @@ export class QueryRouter {
       logger.debug({ err: err.message }, 'returning empty array');
       return [];
     }
-  }
-
-  /**
-   * Add generated column values to an INSERT row.
-   * Detects generated column definitions and computes them.
-   */
-  private addGeneratedColumnValues(
-    tableName: string,
-    row: Record<string, any>,
-  ): Record<string, any> {
-    const genCols = this.getGeneratedColumnDefs(tableName);
-    if (genCols.length === 0) return row;
-
-    const tableCols = Object.keys(row);
-    const computed = computeGeneratedValues(row, tableCols, genCols.map((g) => ({
-      name: g.name,
-      expression: g.expression,
-      stored: true,
-      dependencies: g.dependencies,
-    })));
-
-    return { ...row, ...computed };
-  }
-
-  /**
-   * Detect if a CREATE TABLE has generated columns and store their definitions.
-   */
-  private processGeneratedColumnsInDDL(sql: string, tableName: string): void {
-    try {
-      // First rewrite the generated column syntax to get SQLite-compatible SQL
-      const rewriteResult = rewriteGeneratedColumn(sql);
-      if (rewriteResult.rewritten) {
-        // Extract generated definitions from the rewritten SQL
-        const genDefs = extractGeneratedDefs(rewriteResult.sql);
-        this.storeGeneratedColumnDefs(tableName, genDefs);
-      }
-    } catch (err: any) { logger.debug({ err: err.message }, 'Non-fatal') }
   }
 
   /**
