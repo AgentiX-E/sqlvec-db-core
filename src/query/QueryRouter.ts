@@ -1696,7 +1696,13 @@ export class QueryRouter {
       }
 
       // Step 1e: SQL compatibility rewrites
-      if (detectSetReset(postProcessSql)) {
+      // Guard against swallowing parallel-query GUCs (SET parallel_workers,
+      // SET max_parallel_workers, SHOW ..., optimizer hint /*+ PARALLEL ... */)
+      // which are handled later by detectParallelQuery/rewriteParallelQuery in
+      // Step 1x. Without this guard, detectSetReset's broad SET/RESET matcher
+      // treats them as no-ops and returns early, so the parallel context is
+      // never updated and the parallel execution path is unreachable.
+      if (detectSetReset(postProcessSql) && !detectParallelQuery(postProcessSql)) {
         const setResult = handleSetReset(postProcessSql);
         if (setResult.noop) {
           logger.debug({ parameter: setResult.parameter }, 'SET/RESET no-op, skipping');
@@ -2354,7 +2360,12 @@ export class QueryRouter {
           postProcessSql = rsr.sql;
         }
       }
-      if (detectPoolSql(postProcessSql)) {
+      // Guard against swallowing parallel-query GUCs: ConnectionPoolShim's
+      // broad `SET_CMD = /^\s*SET\s+/i` matcher would rewrite `SET
+      // parallel_workers` / `SET max_parallel_workers` into `SELECT 1` before
+      // Step 1x can store them into the parallel session context. Exclude
+      // parallel GUCs here so they flow through to detectParallelQuery.
+      if (detectPoolSql(postProcessSql) && !detectParallelQuery(postProcessSql)) {
         const pr = rewritePoolSql(postProcessSql);
         if (pr.rewritten) postProcessSql = pr.sql;
       }
