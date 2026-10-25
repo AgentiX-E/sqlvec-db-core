@@ -963,6 +963,62 @@ export const INTAARRAY_FN_MAP: Record<string, (...args: any[]) => any> = {
   query_int,
 };
 
+/**
+ * Register the intarray operator functions that the operator rewrite emits.
+ *
+ * `rewriteIntarrayOperators` translates `a @> b` / `a <@ b` / `a && b` into
+ * `intarray_contains(a, b)` / `intarray_contained_by(a, b)` /
+ * `intarray_overlap(a, b)`. These names are NOT re-mapped to JSON expressions
+ * by {@link rewriteIntarrayFunctions} (only the standalone functions such as
+ * `icount`/`sort_asc` are), so the operator results cannot execute unless the
+ * three names are bound as SQL functions.
+ *
+ * SQLite has no array type: an `integer[]` value reaches these callbacks as a
+ * JSON array string (e.g. `[1,2,3]`, produced by `json_array(...)` or stored
+ * verbatim in a TEXT column). Each callback therefore decodes its JSON-array
+ * arguments with {@link toIntArray}, delegates to the pure implementation, and
+ * returns a boolean exactly as PostgreSQL does.
+ *
+ * @param db - SQLite connection exposing `.function(name, opts, fn)`.
+ */
+export function registerIntarrayFunctions(db: any): void {
+  if (typeof db?.function !== 'function') {
+    logger.warn('No `.function()` method on database — cannot register intarray operator functions');
+    return;
+  }
+  const opts = { deterministic: true } as const;
+  // better-sqlite3 only accepts number/string/null/Buffer return values, so
+  // the boolean operator results are mapped to SQLite integers (1/0), which
+  // SQLite treats as truthy/falsy exactly as PostgreSQL treats boolean.
+  db.function('intarray_contains', opts, (a: any, b: any) => (intarrayContains(toIntArray(a), toIntArray(b)) ? 1 : 0));
+  db.function('intarray_contained_by', opts, (a: any, b: any) => (intarrayContainedBy(toIntArray(a), toIntArray(b)) ? 1 : 0));
+  db.function('intarray_overlap', opts, (a: any, b: any) => (intarrayOverlap(toIntArray(a), toIntArray(b)) ? 1 : 0));
+}
+
+/**
+ * Decode a SQLite value that represents an `integer[]` into a `number[]`.
+ *
+ * Accepts a JSON array string (`[1,2]`), a PostgreSQL array-literal
+ * (`{1,2}`), and a pre-parsed number array (for programmatic callers). An
+ * empty/undefined value is treated as an empty array, matching the
+ * PostgreSQL semantic where an unset operand never satisfies `@>`.
+ */
+function toIntArray(value: any): number[] {
+  if (Array.isArray(value)) return value.map(Number);
+  if (value == null) return [];
+  const s = String(value).trim();
+  if (s === '' || s === '{}' || s === '[]') return [];
+  if (s[0] === '{') return parsePgArray(s);
+  try {
+    const parsed = JSON.parse(s);
+    if (Array.isArray(parsed)) return parsed.map(Number);
+  } catch {
+    // Fall through: not JSON — treat as a single-element array (a bare scalar).
+  }
+  const n = Number(s);
+  return Number.isNaN(n) ? [] : [n];
+}
+
 export { logger };
 
 // ═══════════════════════════════════════════════════════════════════

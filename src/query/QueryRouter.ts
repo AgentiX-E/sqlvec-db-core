@@ -148,7 +148,7 @@ import { detectNetType, rewriteNetType } from './MacAddrShim';
 import { detectUuidUsage, rewriteUuidSql } from './UuidShim';
 import { detectRangeType, rewriteRangeType, detectRangeOperator, expandRangeOperators, detectRangeFunc, rewriteRangeFunc } from './RangeTypeShim';
 // Step 1m: intarray extension (icount, sort_asc, uniq, idx, subarray, array operators)
-import { detectIntarray, rewriteIntarray } from './IntarrayShim';
+import { detectIntarray, rewriteIntarray, registerIntarrayFunctions } from './IntarrayShim';
 import { detectTypeCast, rewriteTypeCast } from './TypeCastShim';
 import { detectArrayConstructor, rewriteArrayExpr } from './ArrayConstructorShim';
 // Step 1n: PG type compatibility (ROW/XML/COMPOSITE/pg_dump)
@@ -772,6 +772,7 @@ export class QueryRouter {
       registerStringFunctions(shard0.db);
       registerFuzzyFunctions(shard0.db);
       registerDateFunctions(shard0.db);
+      registerIntarrayFunctions(shard0.db);
       // Core PG scalar functions (md5, sha256, encode, decode, div, etc.)
       registerPgScalarFunctions(shard0.db);
     }

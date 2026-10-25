@@ -350,8 +350,16 @@ export function registerFuzzyFunctions(db: any): void {
   }
 
   const opts = { deterministic: true } as const;
+  // better-sqlite3 derives a function's arity from `callback.length` (the
+  // number of declared parameters). PostgreSQL exposes two signatures for
+  // levenshtein — `(text, text)` and `(text, text, int, int, int)` — and one
+  // or two arguments for metaphone, so a fixed declared-parameter count would
+  // reject the shorter form with "wrong number of arguments". Registering with
+  // `varargs: true` lets any argument count through; we dispatch inside.
+  const varargsOpts = { deterministic: true, varargs: true } as const;
 
-  db.function('levenshtein', opts, (a: any, b: any, ins?: any, del?: any, sub?: any) => {
+  db.function('levenshtein', varargsOpts, (...args: any[]) => {
+    const [a, b, ins, del, sub] = args;
     // Dispatch: 2-arg standard distance or 5-arg custom-cost distance.
     // PostgreSQL exposes exactly two signatures — levenshtein(text, text)
     // and levenshtein(text, text, int, int, int) — so we branch on whether
@@ -362,7 +370,8 @@ export function registerFuzzyFunctions(db: any): void {
     return levenshteinCustom(String(a ?? ''), String(b ?? ''), ins, del, sub);
   });
 
-  db.function('metaphone', opts, (word: any, maxLen?: any) => {
+  db.function('metaphone', varargsOpts, (...args: any[]) => {
+    const [word, maxLen] = args;
     return metaphoneFn(String(word ?? ''), maxLen != null ? Number(maxLen) : undefined);
   });
 

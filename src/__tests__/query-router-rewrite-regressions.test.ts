@@ -48,23 +48,47 @@ function makeRouter(): RouterHarness {
 }
 
 describe('PG→SQLite rewrite regressions (execute() end-to-end)', () => {
-  it('rewrites `col @> ARRAY[...]` before the ARRAY constructor (no stray @ token)', async () => {
+  it('rewrites and executes `col @> ARRAY[...]` via intarray_contains (no stray @ token)', async () => {
     const { qr, db } = makeRouter();
     db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT)');
+    db.exec("INSERT INTO t VALUES (1, '[1,2,3]'), (2, '[4,5]')");
     // `@>` must become intarray_contains BEFORE ARRAY[1] becomes json_array(1);
-    // otherwise the `@>` token leaks to SQLite. The bare shard has no intarray
-    // UDF, so the failure here must be `no such function`, never `unrecognized
-    // token: @`.
-    const p = qr.execute('SELECT col @> ARRAY[1] FROM t').then(
-      (r) => ({ ok: true, rows: r.rows }),
-      (e: any) => ({ ok: false, msg: e.message }),
-    );
-    const res = await p;
-    if (res.ok) {
-      expect(Array.isArray(res.rows)).toBe(true);
-    } else {
-      expect(res.msg).not.toMatch(/unrecognized token/i);
-    }
+    // and intarray_contains is now registered, so the predicate actually
+    // evaluates: row 1 contains 1, row 2 does not.
+    const r = await qr.execute('SELECT id FROM t WHERE col @> ARRAY[1]');
+    expect(r.rows).toEqual([{ id: 1 }]);
+  });
+
+  it('executes `&&` and `<@` intarray operators semantically', async () => {
+    const { qr, db } = makeRouter();
+    db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, col TEXT)');
+    db.exec("INSERT INTO t VALUES (1, '[1,2]'), (2, '[3,4]')");
+    const overlap = await qr.execute('SELECT id FROM t WHERE col && ARRAY[2]');
+    expect(overlap.rows).toEqual([{ id: 1 }]);
+    const containedBy = await qr.execute('SELECT id FROM t WHERE col <@ ARRAY[1,2,3,4,5]');
+    expect(containedBy.rows).toEqual([{ id: 1 }, { id: 2 }]);
+  });
+
+  it('executes fuzzy-match functions (levenshtein/metaphone) with both arities', async () => {
+    const { qr } = makeRouter();
+    const d = await qr.execute("SELECT levenshtein('kitten', 'sitting') AS d");
+    expect(d.rows).toEqual([{ d: 3 }]);
+    const custom = await qr.execute("SELECT levenshtein('kitten', 'sitting', 1, 1, 1) AS d");
+    expect(custom.rows[0].d).toBe(3);
+    const m = await qr.execute("SELECT metaphone('hello') AS m");
+    expect(m.rows[0].m).toBe('HL');
+  });
+
+  it('executes string functions (split_part) through the fast path', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute("SELECT split_part('a,b,c', ',', 2) AS p");
+    expect(r.rows).toEqual([{ p: 'b' }]);
+  });
+
+  it('executes a date function (now()) through the fast path', async () => {
+    const { qr } = makeRouter();
+    const r = await qr.execute('SELECT now() AS n');
+    expect(typeof r.rows[0].n).toBe('string');
   });
 
   it('executes GROUPING SETS through the SELECT fast path', async () => {
