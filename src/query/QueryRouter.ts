@@ -38,8 +38,6 @@ import { PgWalSegmentManager } from '../storage/PgWalSegmentManager';
 import { PgWalWriter } from '../storage/PgWalWriter';
 import {
   parseStatement,
-  extractWindowFunctions,
-  rewriteWindowSql,
   extractCtes,
   inlineCtes,
   detectFTS,
@@ -51,7 +49,6 @@ import {
   type DeleteStatement,
   type DDLStatement,
   type TransactionStatement,
-  type WindowFunction,
 } from './SqlParser';
 
 // Phase A: ASTParser integration
@@ -3825,226 +3822,6 @@ export class QueryRouter {
     return result;
   }
 
-  /**
-   * B5: Handle queries with window functions.
-   *
-   * Strategy:
-   * 1. Scatter the query to all shards (each shard computes local window)
-   * 2. Gather partial results
-   * 3. For ROW_NUMBER/RANK/DENSE_RANK: re-rank the merged results
-   * 4. For aggregate windows: results are already correct from shards
-   */
-  private async handleWindowQuery(
-    stmt: SelectStatement,
-    params: any[] | undefined,
-    start: number,
-  ): Promise<QueryResult> {
-    const windows = extractWindowFunctions(stmt.originalSql);
-    const hasRanking = windows.some(
-      (w) => w.fn === 'ROW_NUMBER' || w.fn === 'RANK' || w.fn === 'DENSE_RANK',
-    );
-
-    // Scatter: execute the query on all shards
-    const shardIds = this.shardManager.getShardIds();
-    const allRows: any[] = [];
-
-    // For efficient execution, scatter the rewritten query (aggregates stripped)
-    const scatterSql = rewriteWindowSql(stmt.originalSql);
-
-    const promises = shardIds.map(async (shardId) => {
-      try {
-        if (this.consensus.isAvailable) {
-          return await this.consensus.read(shardId, scatterSql, params);
-        } else {
-          return this.shardManager.queryShard(shardId, scatterSql, params);
-        }
-      } catch (err: any) {
-        logger.debug({ err: err.message }, 'returning empty array');
-        return [];
-      }
-    });
-
-    const results = await Promise.all(promises);
-    for (const rows of results) {
-      allRows.push(...rows);
-    }
-
-    // Merge phase for ranking window functions — re-rank across merged results
-    if (hasRanking) {
-      for (const w of windows) {
-        if (w.fn !== 'ROW_NUMBER' && w.fn !== 'RANK' && w.fn !== 'DENSE_RANK') continue;
-
-        // Determine the column name for the window function value
-        const colName = this.inferWindowColumnName(stmt.originalSql, w.fn);
-
-        if (w.partitionBy && w.partitionBy.length > 0) {
-          // Group by partition columns and re-rank within each group
-          const groups = new Map<string, any[]>();
-          for (const row of allRows) {
-            const key = w.partitionBy
-              .map((p) => String(row[p] ?? ''))
-              .join('|');
-            if (!groups.has(key)) groups.set(key, []);
-            groups.get(key)!.push(row);
-          }
-
-          for (const [, group] of groups) {
-            // Sort by ORDER BY within each partition
-            if (w.orderBy && w.orderBy.length > 0) {
-              group.sort((a, b) => {
-                for (const ob of w.orderBy!) {
-                  const aVal = a[ob.key];
-                  const bVal = b[ob.key];
-                  if (aVal == null && bVal == null) continue;
-                  if (aVal == null) return ob.dir.toUpperCase() === 'DESC' ? -1 : 1;
-                  if (bVal == null) return ob.dir.toUpperCase() === 'DESC' ? 1 : -1;
-                  const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-                  if (cmp !== 0) return ob.dir.toUpperCase() === 'DESC' ? -cmp : cmp;
-                }
-                return 0;
-              });
-            }
-
-            // Re-assign row numbers within the partition
-            this.renumberWindowRows(group, w.fn, colName);
-          }
-        } else {
-          // No partition: sort across all rows
-          if (w.orderBy && w.orderBy.length > 0) {
-            allRows.sort((a, b) => {
-              for (const ob of w.orderBy!) {
-                const aVal = a[ob.key];
-                const bVal = b[ob.key];
-                if (aVal == null && bVal == null) continue;
-                if (aVal == null) return ob.dir.toUpperCase() === 'DESC' ? -1 : 1;
-                if (bVal == null) return ob.dir.toUpperCase() === 'DESC' ? 1 : -1;
-                const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-                if (cmp !== 0) return ob.dir.toUpperCase() === 'DESC' ? -cmp : cmp;
-              }
-              return 0;
-            });
-          }
-
-          // Re-assign row numbers across all rows
-          this.renumberWindowRows(allRows, w.fn, colName);
-        }
-      }
-    }
-
-    // Apply ORDER BY from statement
-    if (stmt.orderBy && allRows.length > 1) {
-      allRows.sort((a, b) => {
-        const orderParts = stmt.orderBy!.split(',').map((s) => s.trim());
-        for (const part of orderParts) {
-          const isDesc = part.toUpperCase().endsWith(' DESC');
-          const col = part.replace(/\s+(ASC|DESC)$/i, '').replace(/^["`]|["`]$/g, '');
-          const aVal = a[col];
-          const bVal = b[col];
-          if (aVal == null && bVal == null) continue;
-          if (aVal == null) return isDesc ? -1 : 1;
-          if (bVal == null) return isDesc ? 1 : -1;
-          const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0;
-          if (cmp !== 0) return isDesc ? -cmp : cmp;
-        }
-        return 0;
-      });
-    }
-
-    // Apply LIMIT
-    let finalRows = allRows;
-    if (stmt.limit && stmt.limit > 0) {
-      finalRows = allRows.slice(0, stmt.limit);
-    }
-
-    return {
-      rows: finalRows,
-      rowCount: finalRows.length,
-      queryTimeMs: Date.now() - start,
-      engine: 'shard',
-    };
-  }
-
-  /**
-   * Infer the column name for a window function from the SQL SELECT clause.
-   * Handles: ROW_NUMBER() OVER (...) AS col_name, or bare ROW_NUMBER() OVER (...)
-   */
-  private inferWindowColumnName(sql: string, fnName: string): string {
-    // Try to find: fnName() OVER ... AS col_name
-    const asPattern = new RegExp(
-      `${fnName}\\s*\\([^)]*\\)\\s*OVER\\s*\\([^)]*\\)\\s+(?:AS\\s+)?["\`]?([\\w_]+)["\`]?`,
-      'i',
-    );
-    const asMatch = sql.match(asPattern);
-    if (asMatch) return asMatch[1];
-
-    // Fallback: just use the function name (lowercase, matching SQLite output)
-    return fnName.toLowerCase();
-  }
-
-  /**
-   * Re-number window function values (ROW_NUMBER, RANK, DENSE_RANK) for
-   * a globally sorted/partitioned row set.
-   */
-  private renumberWindowRows(rows: any[], fnName: string, colName: string): void {
-    if (rows.length === 0) return;
-
-    switch (fnName) {
-      case 'ROW_NUMBER': {
-        for (let i = 0; i < rows.length; i++) {
-          rows[i][colName] = i + 1;
-        }
-        break;
-      }
-      case 'RANK': {
-        let rank = 1;
-        let offset = 1;
-        rows[0][colName] = rank;
-        for (let i = 1; i < rows.length; i++) {
-          offset++;
-          // Compare with previous row — if ORDER BY columns are equal, same rank
-          const prev = rows[i - 1];
-          const curr = rows[i];
-          if (this.rowsEqualForRanking(prev, curr)) {
-            curr[colName] = rank;
-          } else {
-            rank = offset;
-            curr[colName] = rank;
-          }
-        }
-        break;
-      }
-      case 'DENSE_RANK': {
-        let dRank = 1;
-        rows[0][colName] = dRank;
-        for (let i = 1; i < rows.length; i++) {
-          const prev = rows[i - 1];
-          const curr = rows[i];
-          if (this.rowsEqualForRanking(prev, curr)) {
-            curr[colName] = dRank;
-          } else {
-            dRank++;
-            curr[colName] = dRank;
-          }
-        }
-        break;
-      }
-    }
-  }
-
-  /**
-   * Simple row equality check — compares all keys except the window function column.
-   */
-  private rowsEqualForRanking(a: any, b: any): boolean {
-    const keysA = Object.keys(a);
-    const keysB = Object.keys(b);
-    if (keysA.length !== keysB.length) return false;
-    for (const key of keysA) {
-      if (key === 'row_number' || key === 'rank' || key === 'dense_rank') continue;
-      if (a[key] !== b[key]) return false;
-    }
-    return true;
-  }
-
   // ──────────────────────────────────────────────
   //  C05: Column-level privilege enforcement
   // ──────────────────────────────────────────────
@@ -4154,12 +3931,6 @@ export class QueryRouter {
     sessionId?: string,
   ): Promise<QueryResult> {
     const tables = stmt.tables;
-
-    // B5: Detect window functions — route to window handler
-    const windows = extractWindowFunctions(stmt.originalSql);
-    if (windows.length > 0) {
-      return this.handleWindowQuery(stmt, params, start);
-    }
 
     // B2: Detect if this is a cross-shard query (multi-table with JOIN)
     if (stmt.hasJoin && tables.length > 1) {
