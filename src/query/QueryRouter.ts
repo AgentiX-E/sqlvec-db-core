@@ -6289,17 +6289,30 @@ export class QueryRouter {
   private extractInsertRow(stmt: InsertStatement): Record<string, any> | null {
     try {
       const sql = stmt.originalSql;
-      // Match: INSERT INTO table(col1, col2) VALUES(val1, val2)
-      const valuesMatch = sql.match(/VALUES\s*\(([^)]+)\)/i);
-      if (!valuesMatch) return null;
 
-      const valuesStr = valuesMatch[1];
-      // Split values by comma respecting quotes
-      const values = this.parseSqlValues(valuesStr);
+      // Extract the full column list from `INSERT INTO t (c1, c2, ...)`.
+      // The MVCC schema shim appends `_xmin/_xmax/_cmin/_cmax` to both the
+      // column list and the VALUES tuple during executeInsertParsed, so the
+      // SQL column list is the source of truth (stmt.columns only carries the
+      // user columns and lags behind after the rewrite).
+      const colListMatch = sql.match(/INSERT\s+INTO\s+["`]?\w+["`]?\s*\(([^)]+)\)/i);
+      const valueListMatch = sql.match(/VALUES\s*\(([^)]+)\)/i);
+      if (!valueListMatch) return null;
 
-      // If no explicit columns, query the table schema from SQLite
-      let columns = stmt.columns;
-      if (columns.length === 0) {
+      const values = this.parseSqlValues(valueListMatch[1]);
+
+      // Resolve the column list. Prefer the explicit SQL column list (which
+      // includes any MVCC-injected trailing columns); fall back to stmt.columns
+      // and finally to the PRAGMA table_info schema when columns are omitted.
+      let columns: string[] = [];
+      if (colListMatch) {
+        columns = this.parseSqlValues(colListMatch[1]).map((c) => {
+          const m = c.trim().match(/^["`]?([\w$]+)["`]?$/);
+          return m ? m[1] : c.trim();
+        });
+      } else if (stmt.columns.length > 0) {
+        columns = stmt.columns.slice();
+      } else {
         const tableMatch = sql.match(/INSERT\s+(?:INTO\s+)?["`]?(\w+)["`]?/i);
         if (!tableMatch) return null;
         const tableName = tableMatch[1];
@@ -6308,7 +6321,6 @@ export class QueryRouter {
           const db = (shard0 as any).db;
           if (db) {
             const info = db.prepare(`PRAGMA table_info("${tableName}")`).all() as any[];
-
             if (info && info.length > 0) {
               columns = info
                 .filter((c: any) => !c.name.startsWith('_'))
@@ -6318,10 +6330,14 @@ export class QueryRouter {
         }
       }
 
+      if (columns.length === 0) return null;
       if (values.length !== columns.length) return null;
 
       const row: Record<string, any> = {};
       for (let i = 0; i < columns.length; i++) {
+        // Skip MVCC visibility columns: the BEFORE INSERT trigger only sees
+        // the user-visible row, not the physical _xmin/_xmax/_cmin/_cmax.
+        if (columns[i].startsWith('_')) continue;
         row[columns[i]] = this.parseSqlLiteral(values[i]);
       }
       return row;} catch (err: any) {
@@ -7957,10 +7973,11 @@ export class QueryRouter {
   }
 
   /**
-   * executeWithoutDuckDB — 执行 SQL 但跳过 DuckDB 路由
+   * executeWithoutDuckDB — execute SQL while bypassing DuckDB routing.
    *
-   * 在 Pipeline EngineStep 已尝试 DuckDB 并降级后使用，
-   * 防止 execSelectFast 再次尝试 DuckDB 路由（导致不完整结果）。
+   * Used after a Pipeline EngineStep has already tried DuckDB and fallen back,
+   * to prevent execSelectFast from attempting DuckDB routing a second time
+   * (which would produce incomplete results).
    */
   async executeWithoutDuckDB(
     sql: string,
@@ -7976,17 +7993,21 @@ export class QueryRouter {
   }
 
   /**
-   * _buildReaggregateSql — 程序化构建重聚合 SQL
+   * _buildReaggregateSql — programmatically build a re-aggregation SQL query.
    *
-   * 输入: 原始 SQL（如 SELECT category, COUNT(*) AS cnt, SUM(price) AS total FROM t GROUP BY category）
-   * 输入: perShardCols — temp 表的列名（即原始 SQL 的输出列）
-   * 输出: 重聚合 SQL（如 SELECT category, SUM(cnt) AS cnt, SUM(total) AS total FROM _ms_scatter GROUP BY category）
+   * Input: the original SQL (e.g. `SELECT category, COUNT(*) AS cnt,
+   * SUM(price) AS total FROM t GROUP BY category`).
+   * Input: perShardCols — the temp-table column names (i.e. the original SQL's
+   * output columns).
+   * Output: the re-aggregation SQL (e.g. `SELECT category, SUM(cnt) AS cnt,
+   * SUM(total) AS total FROM _ms_scatter GROUP BY category`).
    *
-   * 聚合函数映射:
-   *   COUNT / SUM → SUM(alias)     （partial sum 的 sum = 总数）
-   *   MIN         → MIN(alias)     （partial min 的 min = 全局 min）
-   *   MAX         → MAX(alias)     （partial max 的 max = 全局 max）
-   *   AVG         → 加权平均 SUM(alias * cnt) / SUM(cnt)，如果 cnt 列不存在则用 AVG(alias) 近似
+   * Aggregate-function mapping:
+   *   COUNT / SUM → SUM(alias)     (sum of partial sums = total)
+   *   MIN         → MIN(alias)     (min of partial mins = global min)
+   *   MAX         → MAX(alias)     (max of partial maxs = global max)
+   *   AVG         → weighted average SUM(alias * cnt) / SUM(cnt); if no cnt
+   *                 column exists, approximate with AVG(alias)
    */
   private _buildReaggregateSql(
     sql: string,
@@ -8096,7 +8117,8 @@ export class QueryRouter {
   }
 
   /**
-   * 在重聚合 SQL 中替换表名（不重写聚合函数）
+   * Replace a table name inside the re-aggregation SQL (without rewriting the
+   * aggregate functions themselves).
    */
   private _replaceTableName(sql: string, oldName: string, newName: string): string {
     const escaped = oldName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -8104,8 +8126,14 @@ export class QueryRouter {
   }
 
   /**
-   * 从聚合参数推断列别名
-   * SELECT COUNT(*) → cnt, SELECT COUNT(id) → cnt_id
+   * Infer a per-shard output column name from an aggregate argument.
+   *
+   * - `*` maps to `cnt` (for COUNT) or the bare lower-cased function name
+   *   (for other aggregates).
+   * - Any other argument is sanitized to a safe identifier (e.g. `a.b` →
+   *   `a_b`). The function name is NOT prepended; the re-aggregation matcher
+   *   also falls back to the raw expression text, so both `cnt` and the raw
+   *   `COUNT(id)` per-shard column names resolve correctly.
    */
   private _inferAggAlias(argStr: string, funcName: string): string {
     const arg = argStr.trim();
@@ -8117,7 +8145,8 @@ export class QueryRouter {
   }
 
   /**
-   * 按顶层逗号分割 SELECT 表达式（跳过函数括号内的逗号）
+   * Split a SELECT expression list on top-level commas, skipping commas that
+   * appear inside function-call parentheses.
    */
   private _splitTopLevelCommas(str: string): string[] {
     const parts: string[] = [];
