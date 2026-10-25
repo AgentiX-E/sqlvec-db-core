@@ -7753,28 +7753,6 @@ export class QueryRouter {
   /**
    * Get generated column definitions for a table.
    */
-  private getGeneratedColumnDefs(tableName: string): Array<{
-    name: string;
-    expression: string;
-    dependencies: string[];
-  }> {
-    try {
-      const shard0 = this.shardManager.getShard(0);
-      if (!shard0) return [];
-      const rows = shard0.db.prepare(
-        `SELECT column_name, expression, dependencies FROM _sqlvec_generated_columns WHERE table_name = ?`,
-      ).all(tableName.toLowerCase()) as any[];
-      return rows.map((r: any) => ({
-        name: String(r.column_name),
-        expression: String(r.expression),
-        dependencies: JSON.parse(String(r.dependencies || '[]')),
-      }));
-    } catch (err: any) {
-      logger.debug({ err: err.message }, 'returning empty array');
-      return [];
-    }
-  }
-
   /**
    * Delete generated column definitions when a table is dropped.
    */
