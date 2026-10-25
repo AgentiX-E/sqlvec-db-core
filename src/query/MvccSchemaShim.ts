@@ -59,7 +59,7 @@ const VALUES_CLAUSE = /\bVALUES\s*\(/i;
  * Matches the columns list in an INSERT with explicit column names.
  * `INSERT INTO t (c1, c2) VALUES (...)` → captures `c1, c2`
  */
-const INSERT_COLUMNS = /^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(?:`?\w+`?\s*\.\s*)?`?(\w+)`?\s*\(([^)]+)\)\s*(VALUES|SELECT)/i;
+const INSERT_COLUMNS = /^\s*INSERT\s+(?:OR\s+\w+\s+)?INTO\s+(?:`?\w+`?\s*\.\s*)?`?(\w+)`?\s*\(([^)]+)\)\s*(?:OVERRIDING\s+(?:SYSTEM|USER)\s+VALUE\s+)?(VALUES|SELECT)/i;
 
 /**
  * Matches a DELETE FROM statement to rewrite to soft-delete UPDATE.

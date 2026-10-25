@@ -84,6 +84,7 @@ import {
   SQLSTATE_FOREIGN_KEY_VIOLATION,
   SQLSTATE_UNDEFINED_COLUMN,
   SQLSTATE_DUPLICATE_OBJECT,
+  SQLSTATE_FEATURE_NOT_SUPPORTED,
 } from '../constants/sqlstate';
 import { stripCollate } from './CollationShim';
 import { stripDefaultValues } from './DefaultValuesShim';
@@ -102,7 +103,12 @@ import { DefaultPrivilegeManager } from './DefaultPrivilegeManager';
 import { detectDomainStmt, handleDomainStmt } from './DomainShim';
 import { detectPartitionDDL, handlePartitionDDL } from './PartitionTableShim';
 import { detectEnumStmt, handleEnumStmt } from './EnumShim';
-import { detectGeneratedColumn, rewriteGeneratedColumn } from './GeneratedColumnShim';
+import {
+  detectGeneratedColumn,
+  rewriteGeneratedColumn,
+  extractGeneratedDefs,
+  computeGeneratedValues,
+} from './GeneratedColumnShim';
 import {
   detectIdentityColumn,
   rewriteIdentityColumn,
@@ -1877,15 +1883,6 @@ export class QueryRouter {
           return { rows: [], rowCount: 0, queryTimeMs: 0, engine: 'shard' };
         }
       }
-      // Step 1e-i: Identity column rewrite (GENERATED ... AS IDENTITY → INTEGER PRIMARY KEY AUTOINCREMENT)
-      if (shouldRun('ddl') && detectIdentityColumn(postProcessSql)) {
-        const identityResult = rewriteIdentityColumn(postProcessSql);
-        if (identityResult !== postProcessSql) {
-          logger.debug('PG identity column syntax rewritten to SQLite AUTOINCREMENT');
-          postProcessSql = identityResult;
-        }
-      }
-
       // Step 1e-ii: SERIAL/BIGSERIAL/SMALLSERIAL → INTEGER PRIMARY KEY AUTOINCREMENT
       if (shouldRun('ddl') && detectSerialColumn(postProcessSql)) {
         const serialResult = rewriteSerialColumn(postProcessSql);
@@ -1904,14 +1901,12 @@ export class QueryRouter {
             if (tableMatch) {
               const rawTableName = tableMatch[1].replace(/["`]/g, '');
               try {
-                const { extractGeneratedDefs } = require('./GeneratedColumnShim');
                 const genDefs = extractGeneratedDefs(genResult.sql);
                 this.storeGeneratedColumnDefs(rawTableName, genDefs);
               } catch (err: any) { logger.debug({ err: err.message }, 'non-fatal') }
               // Register identity sequences if present
               if (genResult.identityCols && genResult.identityCols.length > 0) {
                 try {
-                  const { SequenceManager } = require('./SequenceManager');
                   const shard0 = this.shardManager.getShard(0);
                   if (shard0 && (shard0 as any).db) {
                     const seqMgr = new SequenceManager((shard0 as any).db);
@@ -1919,6 +1914,13 @@ export class QueryRouter {
                       seqMgr.createIdentitySequence(idCol.table, idCol.col, {
                         always: idCol.type === 'always',
                       });
+                      // Warm the INSERT meta cache so execInsertFast routes this
+                      // table through the identity-aware path on the very next
+                      // INSERT, without a redundant sequence-registry lookup.
+                      const tbl = idCol.table.toLowerCase();
+                      const existing = this._insertMetaCache.get(tbl) ?? { hasPartitions: false, hasIdentity: false };
+                      existing.hasIdentity = true;
+                      this._insertMetaCache.set(tbl, existing);
                     }
                     logger.info(
                       { table: rawTableName, identityCols: genResult.identityCols.length },
@@ -1932,6 +1934,21 @@ export class QueryRouter {
             }
           }
           postProcessSql = genResult.sql;
+        }
+      }
+
+      // Step 1e-i: Identity column rewrite (fallback).
+      // Runs AFTER generated-column handling: a GENERATED ... AS IDENTITY column
+      // is first consumed by detectGeneratedColumn (which strips the identity
+      // clause and registers a sequence via SequenceManager), so this
+      // AUTOINCREMENT shortcut only fires when GeneratedColumnShim did not
+      // apply (e.g. a legacy identity declaration with no generated-column
+      // support). Order matters: identity must not pre-empt sequence registration.
+      if (shouldRun('ddl') && detectIdentityColumn(postProcessSql)) {
+        const identityResult = rewriteIdentityColumn(postProcessSql);
+        if (identityResult !== postProcessSql) {
+          logger.debug('PG identity column syntax rewritten to SQLite AUTOINCREMENT');
+          postProcessSql = identityResult;
         }
       }
 
@@ -4872,8 +4889,17 @@ export class QueryRouter {
     start: number,
     sessionId?: string,
   ): Promise<QueryResult> {
-    // Fall back to full path for features this bypass doesn't handle
-    if (/RETURNING\b/i.test(sql) || this.dmlTriggerManager || /\?/.test(sql)) {
+    // Fall back to full path for features this bypass doesn't handle.
+    // Identity columns (GENERATED ... AS IDENTITY) need the sequence-aware
+    // rewrite in executeInsertParsed/rewriteIdentityInsertSql, which also
+    // enforces ALWAYS semantics and OVERRIDING SYSTEM VALUE — the fast path
+    // has none of that, so route those INSERTs through executeInternal.
+    if (
+      /RETURNING\b/i.test(sql) ||
+      this.dmlTriggerManager ||
+      /\?/.test(sql) ||
+      this._tableHasIdentityColumns(sql)
+    ) {
       return this.executeInternal(sql, params, sessionId, start,
         DistributedTracer.getInstance(), undefined);
     }
@@ -5085,6 +5111,32 @@ export class QueryRouter {
           logger.debug({ err: err.message }, 'MVCC commit failed (non-fatal)');
         }
       }
+    }
+  }
+
+  /**
+   * Determine whether the target table of an INSERT has any identity columns
+   * (GENERATED ... AS IDENTITY), using the same cache as rewriteIdentityInsertSql.
+   * When true, the INSERT must go through executeInsertParsed so identity values
+   * are drawn from the sequence registry and ALWAYS/OVERRIDING semantics hold.
+   */
+  private _tableHasIdentityColumns(sql: string): boolean {
+    const m = sql.match(/INSERT\s+INTO\s+"?(\w+)"?/i);
+    if (!m) return false;
+    const tableName = m[1];
+    const cached = this._insertMetaCache.get(tableName);
+    if (cached !== undefined) return cached.hasIdentity;
+
+    const shard0 = this.shardManager.getShard(0);
+    const db = shard0?.db as any;
+    if (!db?.prepare) return false;
+    try {
+      const row = db.prepare(
+        `SELECT 1 FROM _sqlvec_identity_columns WHERE table_name = ? LIMIT 1`,
+      ).get(tableName.toLowerCase());
+      return !!row;
+    } catch {
+      return false;
     }
   }
 
@@ -5604,6 +5656,13 @@ export class QueryRouter {
     //   → leader would rewrite 7→11 without this guard (same pattern as DDL guard at line 6507)
     const insertForwarded = this._isCurrentDdlForwarded;
     this._isCurrentDdlForwarded = false; // reset for next query
+    // Capture the PG `OVERRIDING {SYSTEM|USER} VALUE` clause before the MVCC
+    // rewrite (which may strip it) so identity-column handling downstream still
+    // knows an explicit value on an ALWAYS identity is authorized.
+    const overridingMatch = (stmt.originalSql || '').match(/\bOVERRIDING\s+(SYSTEM|USER)\s+VALUE\b/i);
+    (stmt as any)._overridingKind = overridingMatch
+      ? overridingMatch[1].toUpperCase()
+      : 'NONE';
     if (!insertForwarded && this.mvccSchemaShim && stmt.originalSql) {
       const rewritten = this.mvccSchemaShim.rewriteWriteSql(stmt.originalSql, 0);
       if (rewritten[0] && rewritten[0] !== stmt.originalSql) {
@@ -5668,15 +5727,15 @@ export class QueryRouter {
         return this.executeInsertRaw(rewrittenSql, start, stmt);
       }
     } catch (err: any) {
-      // Let identity errors propagate (e.g., "cannot insert into always identity column")
+      // Identity errors (e.g., "cannot insert into always identity column") must
+      // reject the caller, matching how every other DML constraint violation is
+      // surfaced. Returning a `{ error }` payload here would resolve instead of
+      // reject, silently swallowing the semantic violation.
       if (err.message && err.message.includes('identity column')) {
-        return {
-          error: new Error(`ERROR: ${err.message} (SQLSTATE 0A000)`),
-          rows: [],
-          rowCount: 0,
-          queryTimeMs: Date.now() - start,
-          engine: 'shard',
-        };
+        throw new DatabaseError(
+          `ERROR: ${err.message} (SQLSTATE 0A000)`,
+          SQLSTATE_FEATURE_NOT_SUPPORTED,
+        );
       }
       // Other errors (missing sequence etc.) — log and continue
       logger.warn({ err: err.message, sql: stmt.originalSql }, 'Identity column rewrite failed (non-fatal)');
@@ -6105,6 +6164,23 @@ export class QueryRouter {
 
     const sql = stmt.originalSql;
 
+    // Strip any PG-only OVERRIDING {SYSTEM|USER} VALUE clause up front. SQLite
+    // has no equivalent; leaving it in place produces "near ...: syntax error".
+    // We remember whether it was present so we can still return a rewritten
+    // (stripped) SQL even when no identity column needs a nextval — otherwise
+    // an explicit-value INSERT on an ALWAYS identity under OVERRIDING would leak
+    // the unsupported clause straight through to SQLite.
+    let overridingKind: 'NONE' | 'SYSTEM' | 'USER' =
+      (stmt as any)._overridingKind ?? 'NONE';
+    let cleanSql = sql;
+    {
+      const om = sql.match(/\bOVERRIDING\s+(SYSTEM|USER)\s+VALUE\b/i);
+      if (om) {
+        overridingKind = om[1].toUpperCase() as 'SYSTEM' | 'USER';
+        cleanSql = sql.replace(/\s+OVERRIDING\s+(SYSTEM|USER)\s+VALUE\b/i, '');
+      }
+    }
+
     // Check for DEFAULT VALUES
     if (/INSERT\s+(?:INTO\s+)?\S+\s+DEFAULT\s+VALUES/i.test(sql)) {
       // Expand to include all identity columns with their nextval
@@ -6117,11 +6193,12 @@ export class QueryRouter {
       return `INSERT INTO "${tableName}" (${seqCols.map(c => `"${c}"`).join(', ')}) VALUES (${seqVals.join(', ')})`;
     }
 
-    // Parse INSERT column list
-    const colsMatch = sql.match(/INSERT\s+(?:INTO\s+)?\S+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i);
+    // Parse INSERT column list (against the OVERRIDING-stripped SQL so the
+    // clause cannot corrupt column/value extraction).
+    const colsMatch = cleanSql.match(/INSERT\s+(?:INTO\s+)?\S+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i);
     if (!colsMatch) {
-      // INSERT without column list — try to get columns from the table
-      // This is rare for identity columns; just pass through
+      // INSERT without column list — try to get columns from the table.
+      // This is rare for identity columns; just pass through.
       return null;
     }
 
@@ -6142,9 +6219,10 @@ export class QueryRouter {
 
       // Check for explicit value on ALWAYS identity
       if (identInfo.always && val !== 'DEFAULT') {
-        // Check for OVERRIDING SYSTEM VALUE
-        if (/OVERRIDING\s+SYSTEM\s+VALUE/i.test(sql)) {
-          // Explicit value allowed with OVERRIDING SYSTEM VALUE
+        // Check for OVERRIDING {SYSTEM|USER} VALUE
+        if (overridingKind !== 'NONE') {
+          // Explicit value allowed under OVERRIDING — keep it, but the
+          // clause itself must be stripped from the final SQL (handled below).
           continue;
         }
         throw new Error(`cannot insert into always identity column "${insertCols[i]}"`);
@@ -6167,10 +6245,18 @@ export class QueryRouter {
       }
     }
 
-    if (!hasChanges) return null;
+    // If nothing changed and no OVERRIDING clause needs stripping, this INSERT
+    // needs no rewrite at all.
+    if (!hasChanges && overridingKind === 'NONE') return null;
 
-    // Rebuild SQL
-    const tableNameInSql = (sql.match(/INSERT\s+(?:INTO\s+)?(\S+)/i) || [])[1] || `"${tableName}"`;
+    // Rebuild SQL. When only the OVERRIDING clause was present (explicit value
+    // on an ALWAYS identity), return the stripped SQL verbatim — the column and
+    // value lists are already correct; we just drop the unsupported clause.
+    if (!hasChanges && overridingKind !== 'NONE') {
+      return cleanSql;
+    }
+
+    const tableNameInSql = (cleanSql.match(/INSERT\s+(?:INTO\s+)?(\S+)/i) || [])[1] || `"${tableName}"`;
     return `INSERT INTO ${tableNameInSql} (${newCols.map(c => `"${c}"`).join(', ')}) VALUES (${newVals.join(', ')})`;
   }
 
@@ -7811,10 +7897,8 @@ export class QueryRouter {
     const genCols = this.getGeneratedColumnDefs(tableName);
     if (genCols.length === 0) return row;
 
-    // Import and use computeGeneratedValues from GeneratedColumnShim
-    const { computeGeneratedValues: computeGv } = require('./GeneratedColumnShim');
     const tableCols = Object.keys(row);
-    const computed = computeGv(row, tableCols, genCols.map((g) => ({
+    const computed = computeGeneratedValues(row, tableCols, genCols.map((g) => ({
       name: g.name,
       expression: g.expression,
       stored: true,
@@ -7829,9 +7913,7 @@ export class QueryRouter {
    */
   private processGeneratedColumnsInDDL(sql: string, tableName: string): void {
     try {
-      const { extractGeneratedDefs } = require('./GeneratedColumnShim');
       // First rewrite the generated column syntax to get SQLite-compatible SQL
-      const { rewriteGeneratedColumn } = require('./GeneratedColumnShim');
       const rewriteResult = rewriteGeneratedColumn(sql);
       if (rewriteResult.rewritten) {
         // Extract generated definitions from the rewritten SQL
