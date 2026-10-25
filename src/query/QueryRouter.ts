@@ -1951,22 +1951,6 @@ export class QueryRouter {
         }
       }
 
-      // Step 1f: INSERT/UPDATE with generated columns (Gap 7)
-      // For INSERT statements, detect generated columns and rewrite to include computed values
-      if (/^\s*INSERT\s+INTO\s+\S+\s*\(.*?\)\s*VALUES\s*\(/i.test(postProcessSql) &&
-          !detectGeneratedColumn(postProcessSql)) {
-        const insertTableMatch = postProcessSql.match(/INSERT\s+INTO\s+(\S+)\s*\(/i);
-        if (insertTableMatch) {
-          const genInsertSql = this.rewriteInsertForGeneratedColumns(
-            postProcessSql,
-            insertTableMatch[1].replace(/["`]/g, ''),
-          );
-          if (genInsertSql !== postProcessSql) {
-            logger.debug('INSERT rewritten to include generated column values');
-            postProcessSql = genInsertSql;
-          }
-        }
-      }
       if (shouldRun('ddl') && detectAlterTable(postProcessSql)) {
         const alterResult = handleAlterTable(postProcessSql);
         if (alterResult.rewritten && alterResult.sql === null) {
@@ -7730,113 +7714,6 @@ export class QueryRouter {
    * Example: INSERT INTO t(a, b) VALUES(1,2) where c = a + b is generated
    *   → INSERT INTO t(a, b, c) VALUES(1, 2, 3)
    */
-  private rewriteInsertForGeneratedColumns(sql: string, tableName: string): string {
-    const genCols = this.getGeneratedColumnDefs(tableName);
-    if (genCols.length === 0) return sql;
-
-    // Parse INSERT columns
-    const colsMatch = sql.match(/INSERT\s+INTO\s+\S+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i);
-    if (!colsMatch) return sql;
-
-    const insertCols = colsMatch[1].split(',').map((c) => c.trim().replace(/["`]/g, '').toLowerCase());
-    const insertVals = colsMatch[2].split(',').map((v) => v.trim());
-
-    // Check which generated columns are NOT already in the INSERT
-    const missingGenCols = genCols.filter((gc) => !insertCols.includes(gc.name.toLowerCase()));
-
-    if (missingGenCols.length === 0) return sql;
-
-    // For simple cases, compute the value and add it
-    // This handles cases like 'a + b' where a and b are in the INSERT
-    const valueMap: Record<string, string> = {};
-    for (let i = 0; i < insertCols.length; i++) {
-      valueMap[insertCols[i]] = insertVals[i];
-    }
-
-    const newCols: string[] = [...insertCols];
-    const newVals: string[] = [...insertVals];
-
-    for (const gc of missingGenCols) {
-      newCols.push(gc.name);
-
-      // Try to evaluate the expression
-      try {
-        const computed = this.evaluateGenExpr(gc.expression, valueMap);
-        newVals.push(String(computed));
-      } catch (err: any) {
-        logger.debug({ err: err.message }, 'If we can\'t compute it, use NULL');
-        newVals.push('NULL');
-      }
-    }
-
-    // Rebuild the SQL
-    const rewritten = sql.replace(
-      /INSERT\s+INTO\s+\S+\s*\(([^)]+)\)\s*VALUES\s*\(([^)]+)\)/i,
-      `INSERT INTO ${tableName} (${newCols.join(', ')}) VALUES (${newVals.join(', ')})`,
-    );
-
-    return rewritten;
-  }
-
-  /**
-   * Evaluate a simple generated column expression with known column values.
-   * Supports: arithmetic (a + b, a - b, a * b, a / b), string concat (||),
-   * function calls (UPPER, LOWER, LENGTH, COALESCE, NULLIF), CASE expressions.
-   */
-  private evaluateGenExpr(expression: string, values: Record<string, string>): any {
-    const trimmed = expression.trim();
-
-    // Numeric literal
-    if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-    // String literal
-    const strMatch = trimmed.match(/^'([^']*)'$/);
-    if (strMatch) return strMatch[1];
-    // NULL literal
-    if (/^null$/i.test(trimmed)) return null;
-    // Simple column reference
-    if (/^[a-z_]\w*$/i.test(trimmed)) {
-      const v = values[trimmed.toLowerCase()];
-      return v !== undefined ? v : null;
-    }
-
-    // Binary operators: +, -, *, /, ||
-    const binOpRegex = /^(.+?)\s*(\|\||[+\-*/])\s*(.+)$/;
-    const binMatch = trimmed.match(binOpRegex);
-    if (binMatch) {
-      const left = this.evaluateGenExpr(binMatch[1].trim(), values);
-      const right = this.evaluateGenExpr(binMatch[3].trim(), values);
-      const op = binMatch[2];
-
-      switch (op) {
-        case '+': return Number(left) + Number(right);
-        case '-': return Number(left) - Number(right);
-        case '*': return Number(left) * Number(right);
-        case '/': return Number(right) !== 0 ? Number(left) / Number(right) : null;
-        case '||': return String(left ?? '') + String(right ?? '');
-      }
-    }
-
-    // Function calls: UPPER(x), LOWER(x), LENGTH(x), COALESCE(x,y,...)
-    const funcMatch = trimmed.match(/^(\w+)\((.+)\)$/i);
-    if (funcMatch) {
-      const fnName = funcMatch[1].toUpperCase();
-      const argsStr = funcMatch[2];
-      const args = argsStr.split(',').map((a) => this.evaluateGenExpr(a.trim(), values));
-
-      switch (fnName) {
-        case 'UPPER': return String(args[0] ?? '').toUpperCase();
-        case 'LOWER': return String(args[0] ?? '').toLowerCase();
-        case 'LENGTH': return String(args[0] ?? '').length;
-        case 'ABS': return Math.abs(Number(args[0]));
-        case 'COALESCE': return args.find((a) => a !== null && a !== undefined) ?? null;
-        case 'NULLIF': return args[0] === args[1] ? null : args[0];
-        default: return null;
-      }
-    }
-
-    return null;
-  }
-
   /**
    * Store generated column definitions in the system table.
    * Called during CREATE TABLE processing.
