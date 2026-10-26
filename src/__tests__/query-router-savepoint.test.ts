@@ -83,6 +83,18 @@ describe('parseStatement classification', () => {
     expect(rb.savepointName).toBeUndefined();
   });
 
+  it('parses a bare RELEASE (no savepoint name) with an undefined name', () => {
+    // A RELEASE with no trailing identifier still classifies as a RELEASE
+    // TRANSACTION, but its savepointName is undefined. This exercises the
+    // cond-expr fallback in the RELEASE arm of parseStatement.
+    for (const sql of ['RELEASE', 'RELEASE;']) {
+      const rel = parseStatement(sql) as any;
+      expect(rel.type).toBe('TRANSACTION');
+      expect(rel.command).toBe('RELEASE');
+      expect(rel.savepointName).toBeUndefined();
+    }
+  });
+
   it('reports NO TRANSACTION when a savepoint is used outside a transaction', async () => {
     const { qr } = makeRouter();
     const sid = 'sp-no-txn';
