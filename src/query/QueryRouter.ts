@@ -5244,6 +5244,14 @@ export class QueryRouter {
       const ar = rewriteArrayExpr(out);
       if (ar.rewritten) out = ar.sql;
     }
+    // Scalar array functions (array_position, array_length, array_append,
+    // unnest, …) are rewritten by the same shim that handles `ARRAY[...]`,
+    // but they were previously skipped on the SELECT fast path, so a query
+    // like `array_position(arr, x)` reached SQLite as "no such function".
+    if (detectArrayFunc(out)) {
+      const af = rewriteArrayFunc(out);
+      if (af.rewritten) out = af.sql;
+    }
     if (detectRangeOperator(out)) {
       const ro = expandRangeOperators(out);
       if (ro.rewritten) out = ro.sql;

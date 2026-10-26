@@ -283,22 +283,19 @@ const FUNC_REWRITERS: Record<
   },
 
   /**
-   * `array_position(arr, elem)` → `CASE WHEN json(arr) IS NOT NULL THEN 1 END`
+   * `array_position(arr, elem)` → actual 1-based index via json_each
    *
    * PG's `array_position` returns the 1-based index of the first occurrence
-   * of `elem` in `arr`, or NULL if not found. SQLite has no JSON search
-   * function that returns array positions. The simplified version returns 1
-   * (truthy) if the array is non-NULL, and NULL otherwise.
-   *
-   * ⚠️ Known semantic gap: always returns 1 (not the actual position, and
-   *    does not verify the element actually exists).
+   * of `elem` in `arr`, or NULL if not found. json_each exposes a zero-based
+   * `key`, so the position is `key + 1`. The subquery returns NULL when the
+   * element is absent (MIN over an empty result set).
    */
   array_position(args: string[], _funcRaw: string): string | null {
-    if (args.length < 1) {
+    if (args.length < 2) {
       logger.warn({ args, func: 'array_position' }, 'Insufficient arguments, returning null');
       return null;
     }
-    return `CASE WHEN json(${args[0]}) IS NOT NULL THEN 1 END`;
+    return `(SELECT MIN(json_each.key) + 1 FROM json_each(${args[0]}) WHERE json_each.value = ${args[1]})`;
   },
 
   /**

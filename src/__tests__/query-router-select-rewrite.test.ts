@@ -241,4 +241,19 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     const r: any = await qr.execute("SELECT count(*) AS c FROM t WHERE x SIMILAR TO 'abc|ABC'");
     expect(r.rows[0].c).toBe(2);
   });
+
+  it('rewrites array_position() on the SELECT fast path', async () => {
+    const r: any = await qr.execute('SELECT array_position(ARRAY[10, 20, 30], 20) AS p');
+    expect(r.rows[0].p).toBe(2);
+  });
+
+  it('rewrites array_length() on the SELECT fast path', async () => {
+    const r: any = await qr.execute('SELECT array_length(ARRAY[10, 20, 30], 1) AS l');
+    expect(r.rows[0].l).toBe(3);
+  });
+
+  it('rewrites array_append() on the SELECT fast path', async () => {
+    const r: any = await qr.execute('SELECT array_append(ARRAY[1, 2], 3) AS a');
+    expect(JSON.parse(r.rows[0].a)).toEqual([1, 2, 3]);
+  });
 });

@@ -73,9 +73,9 @@ describe('rewriteArrayFunc', () => {
     );
   });
 
-  it('rewrites array_position', () => {
+  it('rewrites array_position to an actual 1-based index lookup', () => {
     expect(rewriteArrayFunc('SELECT array_position(arr, x) FROM t').sql).toBe(
-      'SELECT CASE WHEN json(arr) IS NOT NULL THEN 1 END FROM t',
+      'SELECT (SELECT MIN(json_each.key) + 1 FROM json_each(arr) WHERE json_each.value = x) FROM t',
     );
   });
 
