@@ -259,7 +259,9 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
 
   it('binds regexp_matches() with optional flags end-to-end', async () => {
     const r: any = await qr.execute("SELECT regexp_matches('abc', 'b') AS m");
-    expect(JSON.parse(r.rows[0].m)).toEqual(['b']);
+    // regexp_matches returns text[][] (setof text[]); a single match wraps the
+    // capture in an outer array.
+    expect(JSON.parse(r.rows[0].m)).toEqual([['b']]);
   });
 
   it('binds regexp_replace() with optional flags end-to-end', async () => {

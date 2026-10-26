@@ -165,18 +165,20 @@ export function registerPgScalarFunctions(db: any): void {
       continue;
     }
     try {
-      // Any function whose accepted arity is not a single fixed value
-      // (minArgs !== maxArgs) must be bound variadically. better-sqlite3 would
-      // otherwise infer the arity from `fn.length`, which counts only required
-      // parameters — so `(a, b, c?) => …` (fn.length 3) rejects the 2-argument
-      // PG call `regexp_matches('abc','b')` with "wrong number of arguments".
-      // varargs:true hands the call args to us as a single array, so wrap the
-      // user fn to spread them back into its positional signature.
-      if (fn.minArgs !== fn.maxArgs) {
-        db.function(name, { deterministic: true, varargs: true }, (...args: any[]) => fn.fn(...args));
-      } else {
-        db.function(name, { deterministic: true }, fn.fn);
-      }
+      // Bound with `varargs: true` so better-sqlite3 does not enforce a fixed
+      // arity. Without it better-sqlite3 infers the arity from `fn.length`
+      // (required-parameter count), which rejects both optional-arg calls
+      // (regexp_matches('a','b') → 2 args vs fn.length 3) and any wrapper that
+      // uses a rest parameter (length 0). varargs still passes each argument
+      // positionally, so spread them into the user fn.
+      //
+      // SQLite scalar UDFs cannot return raw JS arrays (better-sqlite3 rejects
+      // them with "returned an invalid value"), so functions that return a PG
+      // text[]/array encode it as a JSON array string here.
+      db.function(name, { deterministic: true, varargs: true }, (...args: any[]) => {
+        const result = fn.fn(...args);
+        return Array.isArray(result) ? JSON.stringify(result) : result;
+      });
       registered++;
     } catch {
       // A name collision or binding incompatibility on one function must not

@@ -618,14 +618,11 @@ export function buildPgFunctions(): PgFunctionMap {
         while ((m = globalRe.exec(s)) !== null) {
           matches.push(m.slice(1).length > 0 ? m.slice(1) : [m[0]]);
         }
-        // A scalar UDF must not hand better-sqlite3 a raw JS array; encode
-        // text[] as a JSON array string so the result is a valid SQL value.
-        return matches.length > 0 ? JSON.stringify(matches) : null;
+        return matches.length > 0 ? matches : null;
       }
       const m = s.match(re);
       if (!m) return null;
-      const groups = m.slice(1).length > 0 ? m.slice(1) : [m[0]];
-      return JSON.stringify(groups);
+      return [m.slice(1).length > 0 ? m.slice(1) : [m[0]]];
     } catch {
       return null;
     }
@@ -658,8 +655,7 @@ export function buildPgFunctions(): PgFunctionMap {
     const f = flags !== undefined && flags !== null ? toString(flags) : '';
     try {
       const re = new RegExp(p, f);
-      // Encode text[] as a JSON array string (scalar UDFs cannot return arrays).
-      return JSON.stringify(s.split(re));
+      return s.split(re);
     } catch {
       return null;
     }
