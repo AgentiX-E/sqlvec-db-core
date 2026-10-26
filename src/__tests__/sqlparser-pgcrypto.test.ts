@@ -42,9 +42,9 @@ describe('PgCryptoShim', () => {
       });
     });
 
-    it('rewrites crypt to hex(sha256(expr))', () => {
+    it('rewrites crypt to sha256(expr) (no double hex encoding)', () => {
       expect(rewritePgCrypto('SELECT crypt(pwd, salt)')).toEqual({
-        sql: 'SELECT hex(sha256(pwd))', rewritten: true,
+        sql: 'SELECT sha256(pwd)', rewritten: true,
       });
     });
 
@@ -65,16 +65,16 @@ describe('PgCryptoShim', () => {
       expect(rewritePgCrypto('SELECT pgp_pub_decrypt(ct, privkey)').sql).toBe('SELECT ct');
     });
 
-    it('rewrites digest and hmac', () => {
-      expect(rewritePgCrypto('SELECT digest(d, "sha256")').sql).toBe('SELECT hex(sha256(d))');
+    it('rewrites digest and hmac without double hex encoding', () => {
+      expect(rewritePgCrypto('SELECT digest(d, "sha256")').sql).toBe('SELECT sha256(d)');
       expect(rewritePgCrypto('SELECT hmac(d, k, "sha256")').sql).toBe(
-        'SELECT hex(sha256(d || k))',
+        'SELECT sha256(d || k)',
       );
     });
 
     it('crypt with a nested gen_salt resolves to the literal first', () => {
       expect(rewritePgCrypto('SELECT crypt(pwd, gen_salt("bf"))').sql).toBe(
-        'SELECT hex(sha256(pwd))',
+        'SELECT sha256(pwd)',
       );
     });
 

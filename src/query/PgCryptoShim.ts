@@ -7,12 +7,12 @@
  *
  * Strategy:
  *   Replace pgcrypto function calls with SQLite-native equivalents:
- *     1. crypt(pwd, gen_salt('bf'))       -> hex(sha256(pwd))
+ *     1. crypt(pwd, gen_salt('bf'))       -> sha256(pwd)
  *     2. gen_salt('bf') (standalone)       -> 'salt'
  *     3. pgp_sym_encrypt(data, key)        -> _pgp_sym_encrypt_sc(data, key)
  *     4. pgp_sym_decrypt(data, key)        -> _pgp_sym_decrypt_sc(data, key)
- *     5. digest(data, 'sha256')            -> hex(sha256(data))
- *     6. hmac(data, key, 'sha256')         -> hex(sha256(data || key))
+ *     5. digest(data, 'sha256')            -> sha256(data)
+ *     6. hmac(data, key, 'sha256')         -> sha256(data || key)
  *     7. Non-pgcrypto constructs           -> pass through unchanged
  *
  * **Security fix (GAP 3):**
@@ -326,8 +326,10 @@ export function rewritePgCrypto(sql: string): PgCryptoResult {
   // 1. gen_salt(...) -> 'salt'  (must run first so crypt() sees a simple literal)
   result = result.replace(RE_GEN_SALT(), "'salt'");
 
-  // 2. crypt(expr1, expr2) -> hex(sha256(expr1))
-  result = result.replace(RE_CRYPT(), 'hex(sha256($1))');
+  // 2. crypt(expr1, expr2) -> sha256(expr1)
+  //    The sha256() scalar already returns a lowercase hex digest, so an extra
+  //    hex() wrapper would double-encode it (128 hex chars instead of 64).
+  result = result.replace(RE_CRYPT(), 'sha256($1)');
 
   // 3. pgp_sym_encrypt(expr1, expr2) -> _pgp_sym_encrypt_sc(expr1, expr2)
   //    This calls the registered SQL scalar function which invokes
@@ -343,11 +345,12 @@ export function rewritePgCrypto(sql: string): PgCryptoResult {
   // 6. pgp_pub_decrypt(expr1, ...) -> expr1
   result = result.replace(RE_PGP_PUB_DECRYPT(), '$1');
 
-  // 7. digest(expr1, ...) -> hex(sha256(expr1))
-  result = result.replace(RE_DIGEST(), 'hex(sha256($1))');
+  // 7. digest(expr1, ...) -> sha256(expr1)
+  //    (sha256 already returns hex; avoid double-encoding)
+  result = result.replace(RE_DIGEST(), 'sha256($1)');
 
-  // 8. hmac(expr1, expr2, ...) -> hex(sha256(expr1 || expr2))
-  result = result.replace(RE_HMAC(), 'hex(sha256($1 || $2))');
+  // 8. hmac(expr1, expr2, ...) -> sha256(expr1 || expr2)
+  result = result.replace(RE_HMAC(), 'sha256($1 || $2)');
 
   const restored = restoreSQL({ ...protectedSql, protectedSql: result });
   const rewritten = restored !== sql;

@@ -8,6 +8,7 @@
 
 import { buildPgFunctions, type PgFunctionDef, type PgReturnType } from './PgFunctions';
 import { PinoLogger } from '../logger/PinoLogger';
+import { pgp_sym_encrypt, pgp_sym_decrypt } from '../query/PgCryptoShim';
 
 const logger = PinoLogger.forComponent('FunctionRegistry');
 
@@ -170,6 +171,25 @@ export function registerPgScalarFunctions(db: any): void {
     } catch {
       // A name collision or binding incompatibility on one function must not
       // abort the rest of the registry.
+      skipped++;
+    }
+  }
+
+  // ── pgcrypto symmetric-encryption wrappers ──────────────────────────────
+  // rewritePgCrypto translates `pgp_sym_encrypt(data, key)` into a call to the
+  // `_pgp_sym_encrypt_sc` SQL scalar (and `pgp_sym_decrypt` into
+  // `_pgp_sym_decrypt_sc`). Those wrappers are implemented in PgCryptoShim but
+  // were never bound to the SQLite connection, so the rewritten statement
+  // failed with `no such function: _pgp_sym_encrypt_sc`. Bind them here so the
+  // pgcrypto encrypt/decrypt path actually works end-to-end.
+  for (const [name, fn] of [
+    ['_pgp_sym_encrypt_sc', pgp_sym_encrypt],
+    ['_pgp_sym_decrypt_sc', pgp_sym_decrypt],
+  ] as const) {
+    try {
+      db.function(name, opts, fn as any);
+      registered++;
+    } catch {
       skipped++;
     }
   }

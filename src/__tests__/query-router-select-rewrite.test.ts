@@ -135,4 +135,26 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     const r: any = await qr.execute("SELECT md5('abc') AS h");
     expect(r.rows[0].h).toBe('900150983cd24fb0d6963f7d28e17f72');
   });
+
+  it('rewrites gen_salt() into a plain salt literal', async () => {
+    const r: any = await qr.execute("SELECT gen_salt('bf') AS s");
+    expect(r.rows[0].s).toBe('salt');
+  });
+
+  it('rewrites crypt(password, salt) into sha256 (64 hex, no double encoding)', async () => {
+    const r: any = await qr.execute("SELECT crypt('pass', gen_salt('bf')) AS h");
+    // sha256('pass') — deterministic, exactly 64 hex chars.
+    expect(r.rows[0].h).toBe('d74ff0ee8da3b9806b18c877dbf29bbde50b5bd8e4dad7a3a725000feb82e8f1');
+  });
+
+  it('round-trips pgp_sym_encrypt / pgp_sym_decrypt end-to-end', async () => {
+    const enc: any = await qr.execute("SELECT pgp_sym_encrypt('hello world', 'secret') AS c");
+    const ciphertext = enc.rows[0].c;
+    expect(ciphertext).toBeTruthy();
+    expect(ciphertext).not.toBe('hello world');
+    const dec: any = await qr.execute(
+      `SELECT pgp_sym_decrypt('${ciphertext}', 'secret') AS p`,
+    );
+    expect(dec.rows[0].p).toBe('hello world');
+  });
 });
