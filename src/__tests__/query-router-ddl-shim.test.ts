@@ -162,4 +162,23 @@ describe('executeInternal — DDL/DML-only PG-ism rewrites', () => {
     const r: any = await qr.execute('SELECT jsonb_build_array(1, 2, 3) AS a');
     expect(JSON.parse(r.rows[0].a)).toEqual([1, 2, 3]);
   });
+
+  it('rewrites a generic USING GIN index to an FTS5 inverted index', async () => {
+    await qr.execute('CREATE TABLE docs (id INTEGER PRIMARY KEY, body TEXT)');
+    await qr.execute("INSERT INTO docs (id, body) VALUES (1, 'hello world')");
+    await qr.execute('CREATE INDEX docs_gin ON docs USING GIN (body)');
+    // FTS5 virtual table must exist and answer a MATCH query.
+    const hit: any = db0.prepare("SELECT rowid FROM __gin_docs_gin WHERE __gin_docs_gin MATCH 'hello'").get();
+    expect(hit.rowid).toBe(1);
+  });
+
+  it('accepts table-level GRANT as a no-op', async () => {
+    const r: any = await qr.execute('GRANT SELECT ON docs TO reader');
+    expect(r.rowCount).toBe(0);
+  });
+
+  it('accepts table-level REVOKE as a no-op', async () => {
+    const r: any = await qr.execute('REVOKE SELECT ON docs FROM reader');
+    expect(r.rowCount).toBe(0);
+  });
 });

@@ -119,6 +119,7 @@ import { detectAlterTable, handleAlterTable } from './AlterTableShim';
 import { detectNullsClause, rewriteNullsClause } from '../index/NullsIndexShim';
 import { detectBRIN, rewriteBRIN } from '../index/BRINIndexShim';
 import { detectHash, rewriteHash } from '../index/HashIndexShim';
+import { detectGIN, rewriteGINIndex } from '../index/GINIndexShim';
 // Step 1h: DDL compatibility (views, FK, grouping)
 import { detectPgViewSyntax, rewriteViewSql, expandViewInSql } from './ViewShim';
 import { detectMatView, handleMatView } from './MatViewShim';
@@ -174,6 +175,7 @@ import { detectJsonTable, rewriteJsonTable } from './JsonTableShim';
 import { detectUnloggedTable, rewriteUnloggedTable } from './UnloggedTableShim';
 import { detectCertMap, rewriteCertMap } from './CertMapShim';
 import { detectColumnGrant, rewriteColumnGrant } from './ColumnGrantShim';
+import { detectDcl, rewriteDcl } from './DclShim';
 import { ColumnGrantChecker } from '../security/ColumnGrantChecker';
 import { ScopedConnection } from './ScopedConnection';
 import { IConsensusLayer, RaflessConsensus, RaftConsensus } from './ConsensusLayer';
@@ -2021,6 +2023,16 @@ export class QueryRouter {
         const hashResult = rewriteHash(postProcessSql);
         if (hashResult.rewritten) postProcessSql = hashResult.sql;
       }
+      if (detectGIN(postProcessSql)) {
+        const ginResult = rewriteGINIndex(postProcessSql);
+        if (ginResult.rewritten && ginResult.sql !== null) {
+          // GIN rewrites to a multi-statement FTS5 virtual table + sync
+          // triggers + populate, which must be executed as a batch rather than
+          // fed back through the single-statement DDL pipeline.
+          await this.shardManager.execAll(ginResult.sql);
+          return { rows: [], rowCount: 0, queryTimeMs: performance.now() - start, engine: 'shard' };
+        }
+      }
       if (detectNullsClause(postProcessSql)) {
         const nullsResult = rewriteNullsClause(postProcessSql);
         if (nullsResult.rewritten) postProcessSql = nullsResult.sql;
@@ -2375,6 +2387,14 @@ export class QueryRouter {
         if (detectColumnGrant(postProcessSql)) {
           const cgr = rewriteColumnGrant(postProcessSql, this.scope.columnGrantChecker || undefined);
           if (cgr.rewritten) postProcessSql = cgr.sql;
+        }
+        if (detectDcl(postProcessSql)) {
+          const dr = rewriteDcl(postProcessSql);
+          if (dr.rewritten && dr.sql === null) {
+            logger.debug('Table-level GRANT/REVOKE no-op, skipping');
+            return { rows: [], rowCount: 0, queryTimeMs: 0, engine: 'shard' };
+          }
+          if (dr.rewritten) postProcessSql = dr.sql!;
         }
         if (detectRLS(postProcessSql)) {
           const rr = rewriteRLS(postProcessSql);
