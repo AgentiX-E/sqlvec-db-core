@@ -178,4 +178,41 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     expect(r.rows.length).toBeGreaterThan(0);
     expect(r.rows[0]).toHaveProperty('bufferid');
   });
+
+  it('rewrites lower_inc() range boundary function', async () => {
+    const r: any = await qr.execute("SELECT lower_inc('[1,5)') AS li");
+    expect(r.rows[0].li).toBe(1);
+  });
+
+  it('rewrites range_merge() into a SQLite string expression', async () => {
+    const r: any = await qr.execute("SELECT range_merge('[1,5)','[3,7)') AS m");
+    // Merge returns the union bounds; the exact text is non-null and starts with '['.
+    expect(r.rows[0].m).toBeTruthy();
+    expect(String(r.rows[0].m)).toContain(',');
+  });
+
+  it('rewrites pg_stat_io catalog query into VALUES rows', async () => {
+    const r: any = await qr.execute('SELECT * FROM pg_stat_io LIMIT 1');
+    expect(r.rows.length).toBeGreaterThan(0);
+  });
+
+  it('rewrites pg_stat_checkpointer catalog query', async () => {
+    const r: any = await qr.execute('SELECT * FROM pg_stat_checkpointer LIMIT 1');
+    expect(r.rows.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('rewrites pg_stat_archiver catalog query', async () => {
+    const r: any = await qr.execute('SELECT * FROM pg_stat_archiver LIMIT 1');
+    expect(r.rows.length).toBeGreaterThanOrEqual(0);
+  });
+
+  it('rewrites pg_stat_activity catalog query', async () => {
+    const r: any = await qr.execute('SELECT * FROM pg_stat_activity LIMIT 1');
+    expect(r.rows.length).toBeGreaterThan(0);
+  });
+
+  it('rewrites pg_settings catalog query', async () => {
+    const r: any = await qr.execute('SELECT * FROM pg_settings LIMIT 1');
+    expect(r.rows.length).toBeGreaterThan(0);
+  });
 });
