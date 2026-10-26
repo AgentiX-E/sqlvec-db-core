@@ -135,4 +135,21 @@ describe('executeInternal — DDL/DML-only PG-ism rewrites', () => {
     const r: any = await qr.execute('LOCK TABLE t IN ACCESS EXCLUSIVE MODE');
     expect(r).toBeDefined();
   });
+
+  it('no-ops CREATE TYPE ... AS ENUM even after literal protection', async () => {
+    const r: any = await qr.execute("CREATE TYPE mood AS ENUM ('sad','ok','happy')");
+    expect(r.rowCount).toBe(0);
+  });
+
+  it('registers a standalone CREATE SEQUENCE via SequenceManager', async () => {
+    await qr.execute('CREATE SEQUENCE seq1 START 1');
+    const row: any = db0.prepare("SELECT name FROM _sqlvec_sequences WHERE name='seq1'").get();
+    expect(row).toBeTruthy();
+  });
+
+  it('drops a standalone DROP SEQUENCE via SequenceManager', async () => {
+    await qr.execute('DROP SEQUENCE IF EXISTS seq1');
+    const row: any = db0.prepare("SELECT name FROM _sqlvec_sequences WHERE name='seq1'").get();
+    expect(row).toBeUndefined();
+  });
 });

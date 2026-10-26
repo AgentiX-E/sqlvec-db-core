@@ -1911,6 +1911,30 @@ export class QueryRouter {
           return { rows: [], rowCount: 0, queryTimeMs: 0, engine: 'shard' };
         }
       }
+      // Step 1d2: Standalone SEQUENCE DDL — CREATE/DROP/ALTER SEQUENCE.
+      // SQLite has no native sequence object; SequenceManager registers these
+      // in an internal catalog so `nextval`/`currval`/`setval` resolve against
+      // it. Without this interception a `CREATE SEQUENCE` reaches SQLite and
+      // fails with `near "SEQUENCE": syntax error`.
+      if (shouldRun('ddl') && /^\s*(CREATE\s+SEQUENCE|DROP\s+SEQUENCE|ALTER\s+SEQUENCE)\b/i.test(postProcessSql)) {
+        try {
+          const shard0 = this.shardManager.getShard(0);
+          if (shard0 && (shard0 as any).db) {
+            const seqMgr = new SequenceManager((shard0 as any).db);
+            if (/^\s*CREATE\s+SEQUENCE\b/i.test(postProcessSql)) {
+              seqMgr.createSequence(postProcessSql);
+            } else if (/^\s*DROP\s+SEQUENCE\b/i.test(postProcessSql)) {
+              seqMgr.dropSequence(postProcessSql);
+            }
+            // ALTER SEQUENCE is a no-op here (options are advisory metadata).
+            logger.debug('SEQUENCE DDL intercepted');
+            return { rows: [], rowCount: 0, queryTimeMs: 0, engine: 'shard' };
+          }
+        } catch (err: any) {
+          // A malformed sequence DDL is surfaced as a normal query error.
+          throw new Error(err.message || 'Invalid SEQUENCE statement');
+        }
+      }
       // Step 1e-ii: SERIAL/BIGSERIAL/SMALLSERIAL → INTEGER PRIMARY KEY AUTOINCREMENT
       if (shouldRun('ddl') && detectSerialColumn(postProcessSql)) {
         const serialResult = rewriteSerialColumn(postProcessSql);

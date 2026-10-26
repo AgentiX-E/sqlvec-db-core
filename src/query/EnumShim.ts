@@ -137,11 +137,24 @@ export function parseCreateEnum(sql: string): { typeName: string; values: string
       i++;
       break;
     }
-    if (sql[i] !== "'") return null; // enum values must be string literals
-    const lit = readStringLiteral(sql, i);
-    if (!lit) return null;
-    values.push(lit.value);
-    i = skipWs(sql, lit.next);
+    // Enum values are single-quoted string literals. Under the literal-
+    // protection layer they may instead appear as `__LIT_N__` placeholders;
+    // accept those as opaque values so the statement is still recognized as a
+    // no-op DDL (the placeholder is restored to the original quoted value
+    // downstream, but the enum body is never executed against SQLite anyway).
+    if (sql[i] === "'") {
+      const lit = readStringLiteral(sql, i);
+      if (!lit) return null;
+      values.push(lit.value);
+      i = skipWs(sql, lit.next);
+    } else if (sql.startsWith('__LIT_', i)) {
+      const m = sql.slice(i).match(/^__LIT_\d+__/);
+      if (!m) return null;
+      values.push(m[0]);
+      i = skipWs(sql, i + m[0].length);
+    } else {
+      return null; // enum values must be string literals
+    }
     if (sql[i] === ',') {
       i++;
       continue;
