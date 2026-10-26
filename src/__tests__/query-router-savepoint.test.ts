@@ -82,6 +82,14 @@ describe('parseStatement classification', () => {
     expect(rb.command).toBe('ROLLBACK');
     expect(rb.savepointName).toBeUndefined();
   });
+
+  it('reports NO TRANSACTION when a savepoint is used outside a transaction', async () => {
+    const { qr } = makeRouter();
+    const sid = 'sp-no-txn';
+    const r: any = await qr.execute('SAVEPOINT sp_x', undefined, sid);
+    expect(r.rows[0].message).toBe('NO TRANSACTION');
+    expect(r.rows[0].savepoint).toBe('sp_x');
+  });
 });
 
 describe('savepoint bounds staged changes (end-to-end)', () => {

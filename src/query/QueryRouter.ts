@@ -3729,6 +3729,22 @@ export class QueryRouter {
           engine: 'shard',
         };
 
+      case 'SAVEPOINT':
+      case 'RELEASE':
+      case 'ROLLBACK TO':
+        // Savepoint control statements are only meaningful inside an active
+        // transaction. When an active transaction exists, the savepoint
+        // interception block in executeInternal handles them before reaching
+        // executeTransaction; reaching this branch therefore means no
+        // transaction is active, which mirrors the COMMIT/ROLLBACK behaviour
+        // of reporting `NO TRANSACTION` rather than silently no-op'ing.
+        return {
+          rows: [{ message: 'NO TRANSACTION', savepoint: stmt.savepointName }],
+          rowCount: 1,
+          queryTimeMs: Date.now() - s,
+          engine: 'shard',
+        };
+
       default:
         return {
           rows: [],
