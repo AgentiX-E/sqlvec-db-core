@@ -3805,7 +3805,11 @@ export class QueryRouter {
    * Matches "SET col1 = val, col2 = expr" from the SQL text.
    */
   private static extractUpdateColumns(sql: string): string[] {
-    const setMatch = sql.match(/SET\s+([^WHERE]+?)(?:\s+WHERE\s+|$)/i);
+    // The previous `/SET\s+([^WHERE]+?)/` used a negated character class, which
+    // excludes the *characters* W/H/E/R/E rather than the `WHERE` keyword — so
+    // any column name containing one of those letters (e.g. `secret`, `name`)
+    // silently returned []. Match lazily up to a real clause keyword instead.
+    const setMatch = sql.match(/SET\s+([\s\S]+?)(?=\s+WHERE\b|\s+ORDER\b|\s+LIMIT\b|\s+RETURNING\b|$)/i);
     if (!setMatch) return [];
     return setMatch[1]
       .split(',')
@@ -3851,7 +3855,9 @@ export class QueryRouter {
    *   - Table-level grants only (no column restrictions)
    */
   private enforceDmlColumnPrivileges(parsed: ParsedStatement): void {
-    if (!this.scope.columnGrantChecker || !this.scope.columnGrantChecker.isReady()) {
+    // `isReady` is a plain boolean field on ColumnGrantChecker (not a method);
+    // calling it as a function would throw and silently disable enforcement.
+    if (!this.scope.columnGrantChecker || !this.scope.columnGrantChecker.isReady) {
       return;
     }
 
