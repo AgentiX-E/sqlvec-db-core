@@ -194,6 +194,43 @@ export function registerPgScalarFunctions(db: any): void {
     }
   }
 
+  // ── REGEXP functions for PG pattern operators (`~`, `~*`, `!~`, `!~*`,
+  //    complex `SIMILAR TO`) ────────────────────────────────────────────────
+  // rewritePGPattern translates `expr ~ 'pat'` to `expr REGEXP 'pat'` and
+  // `expr ~* 'pat'` to `regexp_isens('pat', expr)`, but SQLite does not ship a
+  // REGEXP function. Without these bindings a `~`/`~*` predicate reaches
+  // SQLite and fails with `no such function: REGEXP`. SQLite invokes the
+  // `REGEXP` operator as `regexp(pattern, value)` (pattern first), and the
+  // dedicated `regexp_isens(pattern, value)` handles case-insensitive matches
+  // (JS RegExp has no inline `/i` flag for dynamically-built patterns via a
+  // bare function name).
+  try {
+    db.function('regexp', { deterministic: true }, (pattern: any, value: any) => {
+      if (pattern == null || value == null) return 0;
+      try {
+        return new RegExp(String(pattern)).test(String(value)) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    });
+    registered++;
+  } catch {
+    skipped++;
+  }
+  try {
+    db.function('regexp_isens', { deterministic: true }, (pattern: any, value: any) => {
+      if (pattern == null || value == null) return 0;
+      try {
+        return new RegExp(String(pattern), 'i').test(String(value)) ? 1 : 0;
+      } catch {
+        return 0;
+      }
+    });
+    registered++;
+  } catch {
+    skipped++;
+  }
+
   logger.info(
     { registered, skipped },
     'Registered pg scalar functions on SQLite connection',

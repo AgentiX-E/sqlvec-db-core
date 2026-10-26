@@ -215,4 +215,30 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     const r: any = await qr.execute('SELECT * FROM pg_settings LIMIT 1');
     expect(r.rows.length).toBeGreaterThan(0);
   });
+
+  it('rewrites ~ (regex match) using a bound REGEXP function', async () => {
+    // t.x = {'abc', 'def', 'ABC'}; case-sensitive '^a' matches only 'abc'.
+    const r: any = await qr.execute("SELECT id FROM t WHERE x ~ '^a' ORDER BY id");
+    expect(r.rows.map((row: any) => row.id)).toEqual([1]);
+  });
+
+  it('rewrites ~* (case-insensitive regex) using regexp_isens', async () => {
+    const r: any = await qr.execute("SELECT id FROM t WHERE x ~* '^a' ORDER BY id");
+    expect(r.rows.map((row: any) => row.id)).toEqual([1, 3]);
+  });
+
+  it('rewrites !~ (regex non-match)', async () => {
+    const r: any = await qr.execute("SELECT id FROM t WHERE x !~ '^a' ORDER BY id");
+    expect(r.rows.map((row: any) => row.id)).toEqual([2, 3]);
+  });
+
+  it('rewrites !~* (case-insensitive regex non-match)', async () => {
+    const r: any = await qr.execute("SELECT id FROM t WHERE x !~* '^a' ORDER BY id");
+    expect(r.rows.map((row: any) => row.id)).toEqual([2]);
+  });
+
+  it('rewrites SIMILAR TO with alternation into REGEXP', async () => {
+    const r: any = await qr.execute("SELECT count(*) AS c FROM t WHERE x SIMILAR TO 'abc|ABC'");
+    expect(r.rows[0].c).toBe(2);
+  });
 });
