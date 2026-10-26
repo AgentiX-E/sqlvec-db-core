@@ -122,6 +122,18 @@ describe('EngineStep — write-state helpers (P1 three-level protection)', () =>
     expect(hasRecentWrite('sess-1', 5)).toBe(false);
   });
 
+  it('sweepRecentWriteEntries retains fresh session and shard entries', () => {
+    markRecentWrite('sess-fresh', 9);
+    // No time has elapsed, so both the session and shard entries are fresh
+    // and must survive the sweep (exercises the non-expiring branch of the
+    // per-map purge loops).
+    sweepRecentWriteEntries();
+    // The fresh session entry is still reported as a recent write.
+    expect(hasRecentWrite('sess-fresh', 9)).toBe(true);
+    // The fresh shard-level entry (shardId 9) also survives.
+    expect(hasRecentWrite('other-sess', 9)).toBe(true);
+  });
+
   it('resetWriteState clears all three levels', () => {
     markRecentWrite('sess-1', 5);
     expect(hasRecentWrite('sess-1', 5)).toBe(true);
@@ -214,6 +226,47 @@ describe('EngineStep.process() — routing branches', () => {
     expect(res.duckdbResult!.rows).toEqual([{ id: 1, name: 'a' }]);
     expect(res.duckdbResult!.rowCount).toBe(1);
     expect(res.duckdbResult!.fields.map(f => f.name)).toEqual(['id', 'name']);
+  });
+
+  it('populates empty fields when a routed DuckDB execution returns zero rows', async () => {
+    const step = makeStep({
+      decide: () => ({ target: QT.DUCKDB_OLAP, reason: 'agg', skipFallback: false }),
+      execute: async () => ({
+        rows: [],
+        rowCount: 0,
+        queryTimeMs: 10,
+        routed: true,
+        reason: 'ok',
+      }),
+    });
+    const res = await step.process('SELECT * FROM t', makeCtx({ sessionId: 'sess-empty' }));
+    expect(res.engine).toBe('duckdb');
+    expect(res.triggeredFallback).toBe(false);
+    expect(res.duckdbResult).toBeDefined();
+    expect(res.duckdbResult!.rows).toEqual([]);
+    expect(res.duckdbResult!.rowCount).toBe(0);
+    expect(res.duckdbResult!.fields).toEqual([]);
+  });
+
+  it('coalesces undefined rows and a zero queryTimeMs from DuckDB execution', async () => {
+    const step = makeStep({
+      decide: () => ({ target: QT.DUCKDB_OLAP, reason: 'agg', skipFallback: false }),
+      execute: async () => ({
+        // rows omitted/undefined and queryTimeMs 0 exercise the defensive
+        // `|| []` / `|| (performance.now() - start)` fallbacks.
+        rows: undefined as any,
+        rowCount: 0,
+        queryTimeMs: 0,
+        routed: true,
+        reason: 'ok',
+      }),
+    });
+    const res = await step.process('SELECT * FROM t', makeCtx({ sessionId: 'sess-coalesce' }));
+    expect(res.engine).toBe('duckdb');
+    expect(res.duckdbResult!.rows).toEqual([]);
+    expect(res.duckdbResult!.fields).toEqual([]);
+    // queryTimeMs falls back to a real elapsed-time value (>= 0).
+    expect(res.duckdbResult!.queryTimeMs).toBeGreaterThanOrEqual(0);
   });
 
   it('falls back to SQLite when DuckDB decides but does not route', async () => {
