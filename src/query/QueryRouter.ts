@@ -3052,14 +3052,27 @@ export class QueryRouter {
 
       // B4: Transaction support
       if (parsed.type === 'TRANSACTION') {
-        // ── Savepoint intercept: ROLLBACK TO SAVEPOINT / RELEASE ──
-        // parseStatement classifies ROLLBACK TO SAVEPOINT and RELEASE as
-        // TRANSACTION-type, but they need savepoint-level semantics rather
-        // than full transaction rollback/release.  Intercept them here,
+        // ── Savepoint intercept: SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE ──
+        // parseStatement classifies SAVEPOINT, ROLLBACK TO SAVEPOINT and
+        // RELEASE as TRANSACTION-type, but they need savepoint-level semantics
+        // rather than full transaction rollback/release.  Intercept them here,
         // before executeTransaction discards all pending changes.
         const txnSp = sessionId ? this.txCoord.getTransaction(sessionId) : undefined;
         if (txnSp) {
           const spUpper = postProcessSql.trim().toUpperCase();
+          // SAVEPOINT <name>
+          const spCreateMatch = spUpper.match(/^SAVEPOINT\s+(\S+)/);
+          if (spCreateMatch) {
+            const spName = spCreateMatch[1];
+            txnSp.savepointStack.push(spName);
+            txnSp.savepointIndexMap.set(spName, txnSp.pendingChanges.length);
+            return {
+              rows: [{ message: `SAVEPOINT ${spName}`, staged: txnSp.pendingChanges.length }],
+              rowCount: 1,
+              queryTimeMs: performance.now() - start,
+              engine: 'shard',
+            };
+          }
           // RELEASE [SAVEPOINT] <name>
           const releaseMatch = spUpper.match(/^RELEASE\s+(?:SAVEPOINT\s+)?(\S+)/);
           if (releaseMatch) {

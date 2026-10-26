@@ -122,10 +122,19 @@ export interface DDLStatement {
 export interface TransactionStatement {
   type: 'TRANSACTION';
   originalSql: string;
-  command: 'BEGIN' | 'COMMIT' | 'ROLLBACK' | 'SET TRANSACTION';
+  command:
+    | 'BEGIN'
+    | 'COMMIT'
+    | 'ROLLBACK'
+    | 'SET TRANSACTION'
+    | 'SAVEPOINT'
+    | 'RELEASE'
+    | 'ROLLBACK TO';
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
   accessMode?: 'READ WRITE' | 'READ ONLY';
   deferrable?: boolean;
+  /** Savepoint name for SAVEPOINT / RELEASE / ROLLBACK TO commands. */
+  savepointName?: string;
 }
 
 export interface UnknownStatement {
@@ -219,7 +228,36 @@ export function parseStatement(sql: string): ParsedStatement {
     return { type: 'TRANSACTION', originalSql: sql, command: 'COMMIT' };
   }
   if (upper.startsWith('ROLLBACK') || upper.startsWith('ABORT')) {
+    // ROLLBACK [WORK] TO [SAVEPOINT] name is a partial rollback, distinct from
+    // a full ROLLBACK that discards the entire transaction.
+    const rollbackToMatch = /^ROLLBACK\s+(?:WORK\s+)?TO\s+(?:SAVEPOINT\s+)?(\S+)/i.exec(trimmed);
+    if (rollbackToMatch) {
+      return {
+        type: 'TRANSACTION',
+        originalSql: sql,
+        command: 'ROLLBACK TO',
+        savepointName: rollbackToMatch[1].replace(/;?\s*$/, ''),
+      };
+    }
     return { type: 'TRANSACTION', originalSql: sql, command: 'ROLLBACK' };
+  }
+  if (/^SAVEPOINT\s+(\S+)/i.exec(trimmed)) {
+    const savepointMatch = /^SAVEPOINT\s+(\S+)/i.exec(trimmed);
+    return {
+      type: 'TRANSACTION',
+      originalSql: sql,
+      command: 'SAVEPOINT',
+      savepointName: savepointMatch![1].replace(/;?\s*$/, ''),
+    };
+  }
+  if (/^RELEASE\b/i.test(trimmed)) {
+    const releaseMatch = /^RELEASE\s+(?:SAVEPOINT\s+)?(\S+)/i.exec(trimmed);
+    return {
+      type: 'TRANSACTION',
+      originalSql: sql,
+      command: 'RELEASE',
+      savepointName: releaseMatch ? releaseMatch[1].replace(/;?\s*$/, '') : undefined,
+    };
   }
   if (/^SET\s+TRANSACTION/i.test(upper)) {
     return { type: 'TRANSACTION', originalSql: sql, command: 'SET TRANSACTION' };
