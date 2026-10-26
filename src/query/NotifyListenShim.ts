@@ -100,19 +100,33 @@ export const NOTIFY_LISTENERS_TABLE = '__notify_listeners';
  * Run these during initialization (e.g., on database creation).
  */
 export function getNotifyListenInitSql(): string[] {
+  // The MVCC layer (MvccSchemaShim) injects the _xmin/_xmax/_cmin/_cmax system
+  // columns into every INSERT at commit time, mirroring the physical columns it
+  // also injects into CREATE TABLE. These backing tables are created directly
+  // here (not through the MVCC CREATE-TABLE rewrite), so they must declare the
+  // same system columns or a NOTIFY/LISTEN INSERT will fail with "no column
+  // named _xmin".
   return [
     `CREATE TABLE IF NOT EXISTS ${NOTIFY_QUEUE_TABLE} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       channel TEXT NOT NULL,
       payload TEXT,
       pid INTEGER NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      _xmin INTEGER DEFAULT 0,
+      _xmax INTEGER DEFAULT 0,
+      _cmin INTEGER DEFAULT 0,
+      _cmax INTEGER DEFAULT 0
     )`,
     `CREATE TABLE IF NOT EXISTS ${NOTIFY_LISTENERS_TABLE} (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       channel TEXT NOT NULL,
       session_id TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      _xmin INTEGER DEFAULT 0,
+      _xmax INTEGER DEFAULT 0,
+      _cmin INTEGER DEFAULT 0,
+      _cmax INTEGER DEFAULT 0,
       UNIQUE(channel, session_id)
     )`,
   ];
@@ -134,7 +148,7 @@ export function getNotifyListenInitSql(): string[] {
  *   NOTIFY channel_name, 'payload text';
  *   NOTIFY "quoted-channel";
  */
-const NOTIFY_PATTERN = /^\s*NOTIFY\s+([A-Za-z_][A-Za-z0-9_]*|"[^"]+")(?:\s*,\s*('[^']*'|\$\$[^$]*\$\$|E'[^']*'))?\s*;?\s*$/i;
+const NOTIFY_PATTERN = /^\s*NOTIFY\s+([A-Za-z_][A-Za-z0-9_]*|"[^"]+")(?:\s*,\s*('[^']*'|\$\$[^$]*\$\$|E'[^']*'|__LIT_\d+__))?\s*;?\s*$/i;
 
 /**
  * Matches a top-level LISTEN statement.
@@ -294,11 +308,17 @@ export function handleNotifyListen(
     const rawChannel = notifyMatch[1];
     const channel = unquoteIdentifier(rawChannel);
     const rawPayload = notifyMatch[2] ?? undefined;
-    const payload = rawPayload ? _unquotePayload(rawPayload) : null;
+    const isPlaceholder = rawPayload != null && /^__LIT_\d+__$/.test(rawPayload.trim());
+    const payload = rawPayload ? (isPlaceholder ? rawPayload.trim() : _unquotePayload(rawPayload)) : null;
 
-    // Build INSERT for notify queue
+    // Build INSERT for notify queue. A literal-protection placeholder
+    // (`__LIT_N__`) is embedded verbatim (unquoted): it will be restored to the
+    // original quoted string by restoreSQL after all rewrites, so wrapping it
+    // in quotes here would double-quote the restored value.
     const notifySql = payload
-      ? `INSERT INTO ${NOTIFY_QUEUE_TABLE} (channel, payload, pid) VALUES ('${channel}', '${payload.replace(/'/g, "''")}', 0)`
+      ? isPlaceholder
+        ? `INSERT INTO ${NOTIFY_QUEUE_TABLE} (channel, payload, pid) VALUES ('${channel}', ${payload}, 0)`
+        : `INSERT INTO ${NOTIFY_QUEUE_TABLE} (channel, payload, pid) VALUES ('${channel}', '${payload.replace(/'/g, "''")}', 0)`
       : `INSERT INTO ${NOTIFY_QUEUE_TABLE} (channel, pid) VALUES ('${channel}', 0)`;
 
     logger.debug({ channel, payload }, 'NOTIFY rewritten as INSERT into queue');
