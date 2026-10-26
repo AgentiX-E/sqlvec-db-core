@@ -119,4 +119,28 @@ describe('FunctionRegistry variadic binding', () => {
       expect(f!.maxArgs, `${name} should be variadic`).toBe(Infinity);
     }
   });
+
+  it('registers fixed-range optional-arg functions (minArgs !== maxArgs)', () => {
+    const r = newRegistry();
+    // Optional-argument functions must be bound variadically too: their
+    // fn.length counts only required params, so a 2-arg PG call to
+    // regexp_matches('abc','b') would otherwise be rejected even though the
+    // declared range is 2..3.
+    const optionalArg = ['regexp_matches', 'regexp_replace', 'regexp_split_to_array', 'regexp_count'];
+    for (const name of optionalArg) {
+      const f = r.find(name);
+      expect(f, `missing ${name}`).toBeDefined();
+      expect(f!.minArgs, `${name} minArgs`).toBeLessThan(f!.maxArgs);
+    }
+  });
+
+  it('registers greatest/least as variadic comparison helpers', () => {
+    const r = newRegistry();
+    for (const name of ['greatest', 'least']) {
+      const f = r.find(name)!;
+      expect(f, `missing ${name}`).toBeDefined();
+      expect(f.maxArgs).toBe(Infinity);
+      expect(typeof f.fn).toBe('function');
+    }
+  });
 });

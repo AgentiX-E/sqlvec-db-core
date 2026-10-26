@@ -165,15 +165,18 @@ export function registerPgScalarFunctions(db: any): void {
       continue;
     }
     try {
-      // Variadic functions (maxArgs === Infinity, e.g. concat, format,
-      // json_build_object) must be bound with `varargs: true`; otherwise
-      // better-sqlite3 infers the arity from `fn.length`, which is 0 for
-      // `(...args) => …` and rejects every call with "wrong number of args".
-      const opts: any =
-        fn.maxArgs === Infinity
-          ? { deterministic: true, varargs: true }
-          : { deterministic: true };
-      db.function(name, opts, fn.fn);
+      // Any function whose accepted arity is not a single fixed value
+      // (minArgs !== maxArgs) must be bound variadically. better-sqlite3 would
+      // otherwise infer the arity from `fn.length`, which counts only required
+      // parameters — so `(a, b, c?) => …` (fn.length 3) rejects the 2-argument
+      // PG call `regexp_matches('abc','b')` with "wrong number of arguments".
+      // varargs:true hands the call args to us as a single array, so wrap the
+      // user fn to spread them back into its positional signature.
+      if (fn.minArgs !== fn.maxArgs) {
+        db.function(name, { deterministic: true, varargs: true }, (...args: any[]) => fn.fn(...args));
+      } else {
+        db.function(name, { deterministic: true }, fn.fn);
+      }
       registered++;
     } catch {
       // A name collision or binding incompatibility on one function must not

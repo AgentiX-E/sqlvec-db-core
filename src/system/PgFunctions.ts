@@ -190,6 +190,28 @@ export function buildPgFunctions(): PgFunctionMap {
   //  1. Math Functions (~30)
   // ════════════════════════════════════════
 
+  // greatest(VARIADIC any) → largest non-null argument (PG ignores NULLs,
+  // returns NULL only when every argument is NULL). Mixed types are compared
+  // numerically when all args are numeric, otherwise lexicographically.
+  reg('greatest', 1, Infinity, 'any', (...args: any[]) => {
+    const vals = args.filter((a) => !isNull(a));
+    if (vals.length === 0) return null;
+    if (vals.every((a) => toNumber(a) !== null && !isNaN(toNumber(a)))) {
+      return Math.max(...vals.map((a) => toNumber(a)));
+    }
+    return vals.map((a) => toString(a)).reduce((m, c) => (c > m ? c : m));
+  });
+
+  // least(VARIADIC any) → smallest non-null argument (mirror of greatest).
+  reg('least', 1, Infinity, 'any', (...args: any[]) => {
+    const vals = args.filter((a) => !isNull(a));
+    if (vals.length === 0) return null;
+    if (vals.every((a) => toNumber(a) !== null && !isNaN(toNumber(a)))) {
+      return Math.min(...vals.map((a) => toNumber(a)));
+    }
+    return vals.map((a) => toString(a)).reduce((m, c) => (c < m ? c : m));
+  });
+
   reg('abs', 1, 1, 'numeric', (v: any) => {
     if (isNull(v)) return null;
     const n = toNumber(v);
@@ -596,11 +618,14 @@ export function buildPgFunctions(): PgFunctionMap {
         while ((m = globalRe.exec(s)) !== null) {
           matches.push(m.slice(1).length > 0 ? m.slice(1) : [m[0]]);
         }
-        return matches.length > 0 ? matches : null;
+        // A scalar UDF must not hand better-sqlite3 a raw JS array; encode
+        // text[] as a JSON array string so the result is a valid SQL value.
+        return matches.length > 0 ? JSON.stringify(matches) : null;
       }
       const m = s.match(re);
       if (!m) return null;
-      return [m.slice(1).length > 0 ? m.slice(1) : [m[0]]];
+      const groups = m.slice(1).length > 0 ? m.slice(1) : [m[0]];
+      return JSON.stringify(groups);
     } catch {
       return null;
     }
@@ -633,7 +658,8 @@ export function buildPgFunctions(): PgFunctionMap {
     const f = flags !== undefined && flags !== null ? toString(flags) : '';
     try {
       const re = new RegExp(p, f);
-      return s.split(re);
+      // Encode text[] as a JSON array string (scalar UDFs cannot return arrays).
+      return JSON.stringify(s.split(re));
     } catch {
       return null;
     }
@@ -649,6 +675,23 @@ export function buildPgFunctions(): PgFunctionMap {
       return s.split(re);
     } catch {
       return [];
+    }
+  });
+
+  // regexp_count(str, pattern[, position[, flags]]) → int
+  reg('regexp_count', 2, 4, 'numeric', (str: any, pattern: any, position?: any, flags?: any) => {
+    if (isNull(str) || isNull(pattern)) return null;
+    const s = toString(str);
+    const p = toString(pattern);
+    const start = position !== undefined && position !== null ? Math.max(0, toInt(position) - 1) : 0;
+    const f = flags !== undefined && flags !== null ? toString(flags) : '';
+    try {
+      const global = f.includes('g') ? f : f + 'g';
+      const re = new RegExp(p, global);
+      const sliced = s.slice(start);
+      return (sliced.match(re) || []).length;
+    } catch {
+      return null;
     }
   });
 

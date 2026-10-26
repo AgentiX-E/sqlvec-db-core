@@ -256,4 +256,25 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     const r: any = await qr.execute('SELECT array_append(ARRAY[1, 2], 3) AS a');
     expect(JSON.parse(r.rows[0].a)).toEqual([1, 2, 3]);
   });
+
+  it('binds regexp_matches() with optional flags end-to-end', async () => {
+    const r: any = await qr.execute("SELECT regexp_matches('abc', 'b') AS m");
+    expect(JSON.parse(r.rows[0].m)).toEqual(['b']);
+  });
+
+  it('binds regexp_replace() with optional flags end-to-end', async () => {
+    const r: any = await qr.execute("SELECT regexp_replace('abc', 'b', 'X') AS r");
+    expect(r.rows[0].r).toBe('aXc');
+  });
+
+  it('binds regexp_count() end-to-end', async () => {
+    const r: any = await qr.execute("SELECT regexp_count('abcabc', 'a') AS c");
+    expect(r.rows[0].c).toBe(2);
+  });
+
+  it('binds greatest/least with NULL-skipping semantics end-to-end', async () => {
+    const r: any = await qr.execute('SELECT greatest(1, NULL, 3) AS g, least(1, 2, 3) AS l');
+    expect(r.rows[0].g).toBe(3);
+    expect(r.rows[0].l).toBe(1);
+  });
 });
