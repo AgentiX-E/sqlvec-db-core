@@ -157,4 +157,25 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     );
     expect(dec.rows[0].p).toBe('hello world');
   });
+
+  it('rewrites EXCLUDE window clauses into COALESCE-wrapped frames', async () => {
+    const r: any = await qr.execute(
+      'SELECT SUM(n) OVER (ORDER BY n ROWS BETWEEN 1 PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM t',
+    );
+    expect(r.rows).toHaveLength(3);
+  });
+
+  it('rewrites LATERAL subqueries so they execute', async () => {
+    const r: any = await qr.execute(
+      'SELECT * FROM t CROSS JOIN LATERAL (SELECT 1 AS one) s LIMIT 1',
+    );
+    expect(r.rows).toHaveLength(1);
+    expect(r.rows[0].one).toBe(1);
+  });
+
+  it('rewrites pg_buffercache catalog queries into VALUES rows', async () => {
+    const r: any = await qr.execute('SELECT * FROM pg_buffercache LIMIT 1');
+    expect(r.rows.length).toBeGreaterThan(0);
+    expect(r.rows[0]).toHaveProperty('bufferid');
+  });
 });
