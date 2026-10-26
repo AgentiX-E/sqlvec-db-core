@@ -1244,6 +1244,35 @@ export function buildPgFunctions(): PgFunctionMap {
     return JSON.stringify(obj);
   });
 
+  // to_jsonb(anyelement) → jsonb — alias of to_json (jsonb is rendered as json text)
+  reg('to_jsonb', 1, 1, 'text', (v: any) => {
+    if (v === null || v === undefined) return 'null';
+    if (typeof v === 'string') {
+      try { JSON.parse(v); return v; } catch { /* not json */ }
+      return JSON.stringify(v);
+    }
+    if (typeof v === 'object') {
+      try { return JSON.stringify(v); } catch { return String(v); }
+    }
+    return String(v);
+  });
+
+  // jsonb_build_object(VARIADIC any) → jsonb — alias of json_build_object
+  reg('jsonb_build_object', 0, Infinity, 'text', (...args: any[]) => {
+    const obj: Record<string, any> = {};
+    for (let i = 0; i < args.length - 1; i += 2) {
+      const key = args[i] !== null && args[i] !== undefined ? String(args[i]) : null;
+      if (key === null) continue;
+      obj[key] = args[i + 1] !== undefined ? args[i + 1] : null;
+    }
+    return JSON.stringify(obj);
+  });
+
+  // jsonb_build_array(VARIADIC any) → jsonb array
+  reg('jsonb_build_array', 0, Infinity, 'text', (...args: any[]) => {
+    return JSON.stringify(args.map((a) => (a === undefined ? null : a)));
+  });
+
   // to_json(anyelement) → json
   reg('to_json', 1, 1, 'text', (v: any) => {
     if (v === null || v === undefined) return 'null';

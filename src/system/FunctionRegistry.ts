@@ -156,8 +156,7 @@ export function registerPgScalarFunctions(db: any): void {
   }
 
   const registry = new FunctionRegistry();
-  const opts = { deterministic: true } as const;
-  let registered = 0;
+    let registered = 0;
   let skipped = 0;
 
   for (const [name, fn] of registry.getAll()) {
@@ -166,6 +165,14 @@ export function registerPgScalarFunctions(db: any): void {
       continue;
     }
     try {
+      // Variadic functions (maxArgs === Infinity, e.g. concat, format,
+      // json_build_object) must be bound with `varargs: true`; otherwise
+      // better-sqlite3 infers the arity from `fn.length`, which is 0 for
+      // `(...args) => …` and rejects every call with "wrong number of args".
+      const opts: any =
+        fn.maxArgs === Infinity
+          ? { deterministic: true, varargs: true }
+          : { deterministic: true };
       db.function(name, opts, fn.fn);
       registered++;
     } catch {
@@ -187,7 +194,7 @@ export function registerPgScalarFunctions(db: any): void {
     ['_pgp_sym_decrypt_sc', pgp_sym_decrypt],
   ] as const) {
     try {
-      db.function(name, opts, fn as any);
+      db.function(name, { deterministic: true }, fn as any);
       registered++;
     } catch {
       skipped++;

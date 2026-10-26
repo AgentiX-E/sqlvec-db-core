@@ -102,3 +102,21 @@ describe('FunctionRegistry.getAll', () => {
     expect(r.find('abs')).toBeDefined();
   });
 });
+
+describe('FunctionRegistry variadic binding', () => {
+  it('marks maxArgs===Infinity functions as variadic so varargs bind correctly', () => {
+    const r = newRegistry();
+    // These are registered with maxArgs === Infinity (rest-parameter impls).
+    // Without varargs:true the better-sqlite3 binding infers arity from
+    // fn.length (0 for `(...args)`, 1 for `(fmt, ...args)`), which is less
+    // than the actual call arity and rejects every call with "wrong number of
+    // arguments". The registry must carry maxArgs===Infinity so the binding
+    // layer can opt into varargs.
+    const variadic = ['concat', 'format', 'json_build_object', 'jsonb_build_object', 'jsonb_build_array'];
+    for (const name of variadic) {
+      const f = r.find(name);
+      expect(f, `missing ${name}`).toBeDefined();
+      expect(f!.maxArgs, `${name} should be variadic`).toBe(Infinity);
+    }
+  });
+});

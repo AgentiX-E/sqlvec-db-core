@@ -152,4 +152,14 @@ describe('executeInternal — DDL/DML-only PG-ism rewrites', () => {
     const row: any = db0.prepare("SELECT name FROM _sqlvec_sequences WHERE name='seq1'").get();
     expect(row).toBeUndefined();
   });
+
+  it('binds variadic jsonb_build_object so it runs end-to-end', async () => {
+    const r: any = await qr.execute("SELECT jsonb_build_object('a', 1) AS j");
+    expect(JSON.parse(r.rows[0].j)).toEqual({ a: 1 });
+  });
+
+  it('binds variadic json_build_array end-to-end', async () => {
+    const r: any = await qr.execute('SELECT jsonb_build_array(1, 2, 3) AS a');
+    expect(JSON.parse(r.rows[0].a)).toEqual([1, 2, 3]);
+  });
 });
