@@ -114,12 +114,14 @@ interface PatternRange {
   rhsEnd: number;
   /** RHS pattern string content, with surrounding quotes */
   rhsPattern: string;
-  /** RHS quote character used */
+  /** RHS quote character used (empty string when `isPlaceholder` is true) */
   rhsQuote: string;
   /** Optional ESCAPE clause (character, or empty string if absent) */
   escapeChar: string;
   /** Whether the operator was prefixed with the `NOT` keyword (`NOT ILIKE`) */
   negated: boolean;
+  /** Whether the RHS is a `__LIT_N__` placeholder (literal already protected) */
+  isPlaceholder?: boolean;
 }
 
 /**
@@ -275,6 +277,26 @@ function extractRangeAround(
   while (pos < sql.length && /\s/.test(sql[pos])) pos++;
 
   if (pos >= sql.length) return null;
+
+  // The LiteralProtectionLayer (`protectSQL`) runs *before* the pattern
+  // rewrite in the QueryRouter pipeline and replaces every string literal
+  // with a `__LIT_N__` placeholder. When that happens the RHS of a pattern
+  // operator is a placeholder token rather than a quoted literal, so we must
+  // recognise it here — otherwise `ILIKE`/`SIMILAR TO`/`~` operators silently
+  // survive to SQLite and fail with a syntax error.
+  const placeholderMatch = sql.substring(pos).match(/^__LIT_(\d+)__/);
+  if (placeholderMatch) {
+    const rhsStart = pos;
+    const rhsEnd = pos + placeholderMatch[0].length;
+    const rhsPattern = placeholderMatch[0];
+    const { escapeChar } = detectEscapeSuffix(sql, rhsEnd);
+    return {
+      tag, lhsStart, lhsExpr, opStart, opEnd,
+      rhsStart, rhsEnd, rhsPattern, rhsQuote: '', escapeChar, negated,
+      isPlaceholder: true,
+    };
+  }
+
   if (sql[pos] !== "'" && sql[pos] !== '"') {
     // RHS must be a string literal — not a column ref or subquery
     logger.debug({ tag, position: opStart }, 'Pattern operator not followed by string literal; skipping');
@@ -306,19 +328,25 @@ function extractRangeAround(
   const rhsEnd = pos;
   const rhsPattern = sql.substring(rhsStart, rhsEnd);
 
-  // ── Check for optional ESCAPE clause ─────────────────────────
-  let escapeChar = '';
+  const { escapeChar } = detectEscapeSuffix(sql, rhsEnd);
+
+  return { tag, lhsStart, lhsExpr, opStart, opEnd, rhsStart, rhsEnd, rhsPattern, rhsQuote: quote, escapeChar, negated, isPlaceholder: false };
+}
+
+/**
+ * Detect an optional `ESCAPE '<char>'` suffix immediately following the RHS
+ * pattern string, returning the escaped character (without surrounding
+ * quotes) so callers can re-quote it when building the replacement.
+ */
+function detectEscapeSuffix(sql: string, rhsEnd: number): { escapeChar: string } {
   const afterRhs = sql.substring(rhsEnd).trimStart();
-  // `ESCAPE '<char>'` or `ESCAPE '<char>'` — capture just the character
-  // (without the surrounding quotes) so callers can re-quote it correctly.
+  // `ESCAPE '<char>'` — capture just the character (without the surrounding
+  // quotes) so callers can re-quote it correctly.
   const escMatch = afterRhs.match(/^ESCAPE\s+'([^'])'\s*/i);
   if (escMatch) {
-    escapeChar = escMatch[1];
-    // Adjust rhsEnd to include ESCAPE clause
-    // (we'll handle this when building replacement)
+    return { escapeChar: escMatch[1] };
   }
-
-  return { tag, lhsStart, lhsExpr, opStart, opEnd, rhsStart, rhsEnd, rhsPattern, rhsQuote: quote, escapeChar, negated };
+  return { escapeChar: '' };
 }
 
 /**
@@ -534,10 +562,12 @@ function isSimpleSimilarToPattern(pattern: string, escapeChar: string): boolean 
  * Build a replacement SQL snippet for a pattern operator occurrence.
  */
 function buildReplacement(range: PatternRange): string {
-  const { tag, lhsExpr, rhsPattern, escapeChar, negated } = range;
+  const { tag, lhsExpr, rhsPattern, escapeChar, negated, isPlaceholder } = range;
 
-  // The RHS pattern content (without surrounding quotes)
-  const rawPattern = rhsPattern.substring(1, rhsPattern.length - 1);
+  // The RHS pattern content (without surrounding quotes). When the RHS is a
+  // `__LIT_N__` placeholder the literal is already protected, so the token
+  // itself is the pattern and must not be stripped.
+  const rawPattern = isPlaceholder ? rhsPattern : rhsPattern.substring(1, rhsPattern.length - 1);
 
   // Optional ESCAPE clause suffix
   const escSuffix = escapeChar ? ` ESCAPE '${escapeChar}'` : '';

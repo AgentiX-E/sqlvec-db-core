@@ -5268,6 +5268,15 @@ export class QueryRouter {
       const fr = rewriteFilter(out);
       if (fr.rewritten) out = fr.sql;
     }
+    // PG pattern-matching operators (`ILIKE`, `SIMILAR TO`, `~`, `~~`, …).
+    // The main executeInternal pipeline handles these via LiteralProtectionLayer
+    // placeholders, but the SELECT fast path forwards `out` verbatim to SQLite
+    // unless we replay the same transform here — otherwise a bare `ILIKE`
+    // survives to SQLite and fails with "near \"ILIKE\": syntax error".
+    if (detectPGPattern(out)) {
+      const pat = rewritePGPattern(out);
+      if (pat.rewritten) out = pat.sql;
+    }
     if (detectWindowExt(out)) {
       const we = rewriteWindowExt(out);
       if (we.rewritten) out = we.sql;
