@@ -507,11 +507,22 @@ function extractLimit(stmt: any): number | undefined {
 function extractOrderBy(stmt: any): string | undefined {
   if (!stmt.orderBy || stmt.orderBy.length === 0) return undefined;
 
-  // Convert ORDER BY AST back to string
+  // Convert ORDER BY AST back to string.
+  //
+  // For a bare column reference (`ORDER BY a.id`), pgsql-ast-parser's `toSql`
+  // renders `{ type: 'ref', table: { name: 'a' }, name: 'id' }` as `a .id` —
+  // with a spurious space between the qualifier and the column. Downstream
+  // consumers (`sortRowsByOrderBy`, the scatter/gather merge) use this string
+  // verbatim as the row key, so `a .id` never matches the `id` property on a
+  // result row and ORDER BY silently no-ops. Emit the bare column name for
+  // `ref` nodes and fall back to `toSql.expr` for expression keys.
   const parts = stmt.orderBy.map((ob: any) => {
     // pgsql-ast-parser v12 exposes { by: { name }, order: 'DESC' }.
     if (!ob.by) return '';
-    const expr = toSql.expr(ob.by);
+    const expr =
+      ob.by.type === 'ref' && typeof ob.by.name === 'string'
+        ? ob.by.name
+        : toSql.expr(ob.by);
     return ob.order === 'DESC' ? `${expr} DESC` : `${expr} ASC`;
   });
   return parts.join(', ');
