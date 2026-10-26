@@ -1538,8 +1538,13 @@ export class QueryRouter {
     // pure overhead (3-5ms per SQL = ~40% of pgbench transaction time).
     // parseStatement() is called anyway later; this early call adds no
     // net overhead while saving all the detect/rewrite steps.
+    // Exclude two-phase-commit statements (`COMMIT PREPARED 'gid'` /
+    // `ROLLBACK PREPARED 'gid'`) from this fast path: their COMMIT/ROLLBACK
+    // prefix would match and parseStatement classifies them as TRANSACTION,
+    // routing them to executeTransaction → `NO TRANSACTION` and dropping the
+    // prepared changes. Let them fall through to the 2PC handler instead.
     const isRollbackTo = /^\s*ROLLBACK\s+(?:WORK\s+)?TO\b/i.test(sql);
-    if (!isRollbackTo && /^\s*(BEGIN|COMMIT|ROLLBACK|END)\b/i.test(sql)) {
+    if (!isRollbackTo && !detectTwoPhase(sql) && /^\s*(BEGIN|COMMIT|ROLLBACK|END)\b/i.test(sql)) {
       const fastParsed = parseStatement(sql);
       if (fastParsed.type === 'TRANSACTION') {
         return this.executeTransaction(fastParsed as any, sessionId, start);
@@ -3014,6 +3019,19 @@ export class QueryRouter {
         return this.executeVectorQuery(sqlQuery, params, start);
       }
 
+      // P0-2: 2PC (two-phase commit) support — must run BEFORE the generic
+      // TRANSACTION branch. parseStatement classifies `COMMIT PREPARED 'gid'`
+      // and `ROLLBACK PREPARED 'gid'` as TRANSACTION statements (their
+      // COMMIT/ROLLBACK prefix matches), which would route them through
+      // executeTransaction and return `NO TRANSACTION` — silently discarding
+      // the prepared changes instead of committing/rolling them back.
+      {
+        const twoPhaseType = detectTwoPhase(postProcessSql);
+        if (twoPhaseType) {
+          return this.executeTwoPhase(twoPhaseType, postProcessSql, sessionId, start);
+        }
+      }
+
       // B4: Transaction support
       if (parsed.type === 'TRANSACTION') {
         // ── Savepoint intercept: ROLLBACK TO SAVEPOINT / RELEASE ──
@@ -3079,17 +3097,14 @@ export class QueryRouter {
         return this.executeTransaction(parsed as TransactionStatement, sessionId, start);
       }
 
-      // P0-2: 2PC (two-phase commit) support
-      {
-        const twoPhaseType = detectTwoPhase(postProcessSql);
-        if (twoPhaseType) {
-          return this.executeTwoPhase(twoPhaseType, postProcessSql, sessionId, start);
-        }
-      }
-
-      // If in a transaction, buffer changes
-      if (sessionId && this.txCoord.hasTransaction(sessionId)) {
-        const txn = this.txCoord.getTransaction(sessionId)!;
+      // If in a transaction, buffer changes.
+      // The transaction key defaults to 'default' when no explicit sessionId
+      // is supplied (see executeTransaction), so DML issued without a session
+      // id must still participate in the buffering for an active 'default'
+      // transaction — otherwise BEGIN/INSERT/COMMIT (no sid) would silently
+      // skip staging and PREPARE TRANSACTION would report `savedChanges: 0`.
+      if (this.txCoord.hasTransaction(sessionId || 'default')) {
+        const txn = this.txCoord.getTransaction(sessionId || 'default')!;
 
         // ── Savepoint handling inside transactions ─────────────
         // Intercept SAVEPOINT / ROLLBACK TO SAVEPOINT / RELEASE before
@@ -3354,8 +3369,31 @@ export class QueryRouter {
         const prep = this.txCoord.prepareCommit(sid);
         const pendingChanges = prep?.pendingChanges || [];
 
+        // Rewrite the buffered DML with physical MVCC columns BEFORE it is
+        // persisted, because COMMIT PREPARED may execute in a different
+        // session (or even a different process) and TwoPhaseCommitManager
+        // replays the stored SQL verbatim via db.exec — it has no access to
+        // mvccSchemaShim. Without this rewrite, replaying `INSERT INTO t
+        // VALUES (1,'a')` against a table with injected _xmin/_xmax/_cmin/
+        // _cmax columns fails with "table t has N columns but M values were
+        // supplied".
+        let preparedPending = pendingChanges.slice();
+        {
+          const txnMvcc = this.mvccExecutor?.getTransaction(sid);
+          const xid = txnMvcc?.xid ?? 0;
+          if (xid > 0) {
+            const rewritten: Array<{ sql: string; params?: any[] }> = [];
+            for (const p of preparedPending) {
+              for (const rw of this.mvccSchemaShim.rewriteWriteSql(p.sql, xid)) {
+                rewritten.push({ sql: rw, params: p.params });
+              }
+            }
+            preparedPending = rewritten;
+          }
+        }
+
         if (gid && this.twoPhaseManager) {
-          const result = this.twoPhaseManager.prepare(gid, pendingChanges, sid);
+          const result = this.twoPhaseManager.prepare(gid, preparedPending, sid);
           if (result.error) {
             throw new DatabaseError(result.error, SQLSTATE_INTERNAL_ERROR);
           }
@@ -4713,8 +4751,11 @@ export class QueryRouter {
       // Active transaction → buffer in pendingChanges (with inlined SQL,
       // no params needed). Like UPDATE/DELETE, the COMMIT handler
       // rewrites and executes the buffered SQL with MVCC columns.
-      if (sessionId && this.txCoord.hasTransaction(sessionId)) {
-        this.txCoord.addPendingChange(sessionId, inlineSql);
+      // Note: the transaction key defaults to 'default' when no explicit
+      // sessionId is supplied (see executeTransaction), so an omitted session
+      // id must still participate in buffering.
+      if (this.txCoord.hasTransaction(sessionId || 'default')) {
+        this.txCoord.addPendingChange(sessionId || 'default', inlineSql);
         return { rows: [{ affected: true, staged: true }], rowCount: 1, queryTimeMs: performance.now() - start, engine: 'shard' };
       }
       // DEBUG: log when INSERT bypasses transaction buffering
