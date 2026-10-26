@@ -332,6 +332,24 @@ import { planAndExecute, shouldUsePlanner } from './QueryPlannerIntegration';
 import { loadTableStats, clearStatsCache } from './StatsPlannerAdapter';
 const logger = PinoLogger.forComponent('QueryRouter');
 
+/**
+ * Determine whether a SQL statement returns rows, so it must be executed with
+ * `stmt.all()` (query) rather than `db.exec()` (side-effecting statement).
+ *
+ * Statements that reach `executeUnknown` have no recognized type and may be
+ * either. Rather than whitelisting every possible row-returning keyword, this
+ * predicate conservatively detects the known side-effecting statement families
+ * (transaction control and maintenance statements that SQLite rejects under
+ * `stmt.all()`). Everything else — SELECT, WITH, VALUES, SHOW, EXPLAIN, TABLE,
+ * PRAGMA reads, and any genuinely unknown statement — is treated as
+ * row-returning so it flows through `queryAll` (which surfaces real SQL errors
+ * rather than silently no-oping).
+ */
+export function isRowReturningStatement(sql: string): boolean {
+  const trimmed = sql.trim();
+  return !/^\s*(SAVEPOINT|RELEASE|ROLLBACK|VACUUM|ANALYZE)\b/i.test(trimmed);
+}
+
 export function generateMsgId(): string {
   return crypto.randomUUID();
 }
@@ -6936,14 +6954,34 @@ export class QueryRouter {
     params: any[] | undefined,
     start: number,
   ): Promise<QueryResult> {
-    // Fallback: try to execute as-is against all shards. If every shard rejects
-    // the statement (e.g. a malformed query that does not match any known
-    // statement type), propagate the error to the caller instead of silently
-    // returning an empty result set — swallowing it would hide real SQL errors.
-    const rows = await this.shardManager.queryAll((stmt as any).originalSql, params);
+    const sql = (stmt as any).originalSql || (stmt as any).sql || '';
+
+    // Fallback: run the statement as-is against all shards. Statements that
+    // reach here have no recognized type, which includes both row-returning
+    // queries (e.g. SHOW, VALUES, PRAGMA) and side-effecting statements that
+    // return no rows (e.g. VACUUM, SAVEPOINT, RELEASE SAVEPOINT, PRAGMA
+    // assignments). The two must be dispatched differently: `queryAll` uses
+    // `stmt.all()` (which throws "This statement does not return data" for
+    // side-effecting statements), whereas non-query statements need
+    // `execAll` (which uses `db.exec()`).
+    //
+    // If every shard rejects a row-returning query, propagate the error rather
+    // than silently returning an empty result set — swallowing it would hide
+    // real SQL errors.
+    if (isRowReturningStatement(sql)) {
+      const rows = await this.shardManager.queryAll(sql, params);
+      return {
+        rows,
+        rowCount: rows.length,
+        queryTimeMs: Date.now() - start,
+        engine: 'shard',
+      };
+    }
+
+    await this.shardManager.execAll(sql);
     return {
-      rows,
-      rowCount: rows.length,
+      rows: [],
+      rowCount: 0,
       queryTimeMs: Date.now() - start,
       engine: 'shard',
     };
