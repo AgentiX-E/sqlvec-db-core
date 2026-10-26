@@ -524,7 +524,7 @@ export class QueryRouter {
   /** PgStatStatements — pg_stat_statements-equivalent query statistics tracker */
   private pgStatStatements?: PgStatStatements;
 
-  /** SQL Profile Cache — 单趟分类 + LRU 缓存，避免 50+ detect() 重复扫描 */
+  /** SQL Profile Cache — single-pass classification + LRU cache, avoiding 50+ repeated detect() scans */
   private sqlProfileCache = new SqlProfileCache();
 
   // Step 1j: Autovacuum daemon for background maintenance
@@ -575,9 +575,9 @@ export class QueryRouter {
   /** WAL flush throttle: counter since last flush to avoid fsync-per-COMMIT */
   private _walFlushCounter = 0;
   /** 
-   * 跳过 DuckDB 路由标记 — 由 executeWithoutDuckDB() 设置。
-   * 当 Pipeline EngineStep 已尝试 DuckDB 并降级时，
-   * execSelectFast 不应再次尝试 DuckDB 路由。
+   * Skip-DuckDB-routing flag — set by executeWithoutDuckDB().
+   * When a Pipeline EngineStep has already tried DuckDB and degraded,
+   * execSelectFast must not retry DuckDB routing.
    */
   private _skipDuckDBRouting = false;
   private readonly _walFlushEveryN = 100; // flush WAL every 100 COMMITs in single-node mode
@@ -1203,14 +1203,14 @@ export class QueryRouter {
           }
         }
 
-        // ── SQL Profile Cache: 单趟分类，绕过 PG shim pipeline ──
+        // ── SQL Profile Cache: single-pass classification, bypassing the PG shim pipeline ──
         const profile = this.sqlProfileCache.getProfile(sql);
 
         if (profile.isStandardSQL) {
-          // 标准 SQL → 直接 fast path（支持多 shard 路由）
+          // standard SQL → direct fast path (supports multi-shard routing)
           let result: QueryResult;
           if (params && params.length > 0) {
-            // 部分 path 需要 inlined SQL
+            // some paths need inlined SQL
             result = await this.execStandardSQL(sql, params, start, sessionId, profile);
           } else {
             result = await this.execStandardSQL(sql, undefined, start, sessionId, profile);
@@ -2054,7 +2054,7 @@ export class QueryRouter {
       if (detectPgAnalyze(postProcessSql)) {
         const analyzeResult = rewriteAnalyze(postProcessSql);
         if (analyzeResult.rewritten) postProcessSql = analyzeResult.sql;
-        // E004: 执行真实 ANALYZE 统计收集
+        // E004: perform real ANALYZE statistics collection
         try {
           const shard0 = this.shardManager.getShard(0);
           if (shard0 && shard0.db) {
@@ -4605,17 +4605,17 @@ export class QueryRouter {
    */
 
   /**
-   * execStandardSQL — 标准 SQL 快速执行路径
+   * execStandardSQL — standard SQL fast execution path
    *
-   * 针对 SqlProfileCache 判定为 isStandardSQL=true 的查询。
-   * 跳过 24 个 PG 兼容性 detect/rewrite step（~50+ regex 调用），
-   * 直接按 SQL 类型路由到对应的处理逻辑：
+   * For queries classified by SqlProfileCache as isStandardSQL=true.
+   * Skips the 24 PG-compatibility detect/rewrite steps (~50+ regex calls),
+   * and routes by SQL type directly to the matching handler:
    *
    *   - SELECT  → MVCC visibility injection + queryShard
-   *   - INSERT  → execInsertFast（MVCC 默认值注入 + 直接执行）
-   *   - UPDATE/DELETE in txn → 直接缓冲到 pendingChanges（COMMIT 时统一 MVCC rewrite）
-   *   - BEGIN/COMMIT/ROLLBACK → 通过 executeInternal 路由到事务处理器
-   *   - DDL → executeInternal 安全路径
+   *   - INSERT  → execInsertFast (MVCC default-value injection + direct execution)
+   *   - UPDATE/DELETE in txn → buffer directly into pendingChanges (single MVCC rewrite at COMMIT)
+   *   - BEGIN/COMMIT/ROLLBACK → route through executeInternal to the transaction handler
+   *   - DDL → executeInternal safe path
    */
   private async execStandardSQL(
     sql: string,
@@ -5383,19 +5383,19 @@ export class QueryRouter {
           const routed = this.inferShardTargetFromSql(sql, shardCount);
           if (routed < 0) {
             // ── Multi-shard scatter-gather ──
-          // 非路由 SELECT（无 WHERE + shard key / 聚合 / ORDER BY + LIMIT 等）
-          // 需要跨所有分片执行并正确合并结果。
+          // non-routable SELECT (no WHERE + shard key / aggregate / ORDER BY + LIMIT, etc.)
+          // must run across all shards and merge results correctly.
           const allShards = this.shardManager.getAllShards();
           if (allShards.size <= 1) {
-            // 单分片 — 直接执行
+            // single shard — execute directly
             const singleShard = allShards.get(0)!;
             const singleAdjusted = this.injectAutoCommitMvccVisibility(sql, sessionId);
             const singleRows = singleShard.db.prepare(singleAdjusted).all() as Record<string, any>[];
             return { rows: singleRows, rowCount: singleRows.length, queryTimeMs: performance.now() - start, engine: 'shard' };
           }
 
-          // ── 多分片 scatter-gather ──
-          // 策略：并行在每个分片执行原始 SQL → 收集所有行 → 按类型合并
+          // ── multi-shard scatter-gather ──
+          // strategy: run the original SQL on each shard in parallel → collect all rows → merge by type
           const allCollectedRows: Record<string, any>[] = [];
           const shardEntries = [...allShards.entries()];
           const scatterResults = await Promise.all(
@@ -5417,22 +5417,22 @@ export class QueryRouter {
             return { rows: [], rowCount: 0, queryTimeMs: performance.now() - start, engine: 'shard' };
           }
 
-          // ── 检测聚合/排序查询 ──
+          // ── detect aggregate/ordered queries ──
           const hasAggOrOrder = /\b(COUNT|SUM|AVG|MIN|MAX)\s*\(|\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b/i.test(sql);
 
           if (hasAggOrOrder) {
-            // ── 简单聚合检测（无 GROUP BY，每个分片返回 1 行）──
-            // 适用: SELECT COUNT(*) AS cnt FROM t
-            // 不适: GROUP BY / ORDER BY / LIMIT / 多列聚合
+            // ── simple aggregate detection (no GROUP BY, one row per shard) ──
+            // applies to: SELECT COUNT(*) AS cnt FROM t
+            // not applicable to: GROUP BY / ORDER BY / LIMIT / multi-column aggregates
             const _colNames = Object.keys(allCollectedRows[0]);
             const _hasGroupBy = /\bGROUP\s+BY\b/i.test(sql);
             const hasSimpleAgg = _colNames.length > 0 && !_hasGroupBy &&
               !/\bORDER\s+BY\b/i.test(sql) && !/\bLIMIT\b/i.test(sql) &&
               allCollectedRows.length === allShards.size;
 
-            // ── 简单聚合：JS 重聚合 ──
-            // 不能直接 rerun 原始 SQL: SELECT COUNT(*) 在 temp 表上会
-            // 返回行数（分片数）而非数据总和。
+            // ── simple aggregates: JS re-aggregation ──
+            // cannot simply rerun the original SQL: SELECT COUNT(*) on a temp table would
+            // return the row count (number of shards) rather than the data total.
             if (hasSimpleAgg) {
               const colName = _colNames[0];
               if (allCollectedRows[0][colName] != null && colName) {
@@ -5440,7 +5440,7 @@ export class QueryRouter {
                 const sum = numerical.reduce((a, b) => a + b, 0);
                 const isAvg = /\bAVG\s*\(/i.test(sql);
                 if (isAvg) {
-                  // AVG 不能用 SUM(avg) — 回退到 temp 表路径
+                  // AVG cannot use SUM(avg) — fall back to the temp-table path
                   // (fall through to temp table block below)
                 } else {
                   return {
@@ -5453,21 +5453,21 @@ export class QueryRouter {
               }
             }
 
-          // ── GROUP BY / ORDER BY + LIMIT / AVG / 多列聚合 ──
-          // 使用内存 SQLite 重聚合
-            // 对 GROUP BY 查询：每个分片返回部分聚合结果 → temp table →
-            // 用 SUM(partial_agg) 重新聚合（COUNT 的 SUM = 总 COUNT）✓
-            // 对 ORDER BY + LIMIT：temp table → 重新排序 + 截断 ✓
-            // 对简单聚合（无 GROUP BY）：回退到 JS 数值重聚合
+          // ── GROUP BY / ORDER BY + LIMIT / AVG / multi-column aggregates ──
+          // re-aggregate using an in-memory SQLite database
+            // for GROUP BY queries: each shard returns a partial aggregate → temp table →
+            // re-aggregate with SUM(partial_agg) (SUM of COUNT = total COUNT) ✓
+            // for ORDER BY + LIMIT: temp table → re-sort + truncate ✓
+            // for simple aggregates (no GROUP BY): fall back to JS numeric re-aggregation
             try {
               const Database = require('better-sqlite3');
               const memDb = new Database(':memory:');
               try {
                 const colNames = Object.keys(allCollectedRows[0]);
-                // 推断数值列（数字开头）vs 字符串列
+                // infer numeric columns (digit-leading) vs string columns
                 const colDefLines: string[] = [];
                 for (const c of colNames) {
-                  // 从第一行判断值类型
+                  // determine the value type from the first row
                   const val = allCollectedRows[0][c];
                   let sqlType: string;
                   if (typeof val === 'number') {
@@ -5481,7 +5481,7 @@ export class QueryRouter {
                 }
                 memDb.exec(`CREATE TABLE _ms_scatter (${colDefLines.join(', ')})`);
 
-                // 批量 INSERT
+                // batch INSERT
                 const placeholders = colNames.map(() => '?').join(',');
                 const colQuoted = colNames.map((n: string) => `"${n.replace(/"/g, '""')}"`).join(',');
                 const insert = memDb.prepare(`INSERT INTO _ms_scatter (${colQuoted}) VALUES (${placeholders})`);
@@ -5494,7 +5494,7 @@ export class QueryRouter {
                 });
                 insertMany(allCollectedRows);
 
-                // ── 使用 _buildReaggregateSql 构建重聚合 SQL ──
+                // ── use _buildReaggregateSql to build the re-aggregation SQL ──
                 const tblMatch = sql.match(/FROM\s+(?:(?:\w+\.)?\s*"?(\w+)"?\s*)/i);
                 const tblName = tblMatch ? tblMatch[1] : null;
                 const reAggSql = tblName
@@ -5512,7 +5512,7 @@ export class QueryRouter {
                 try { memDb.close(); } catch { /* ok */ }
               }
             } catch (reAggErr: any) {
-              // 重聚合失败时降级：直接返回原始收集的行
+              // degrade on re-aggregation failure: return the originally collected rows directly
               logger.warn(
                 { err: reAggErr.message, sql: sql.substring(0, 100) },
                 'execSelectFast: scatter-gather re-aggregation failed, returning raw rows',
@@ -5526,7 +5526,7 @@ export class QueryRouter {
             }
           }
 
-          // ── 非聚合/排序查询 ──
+          // ── non-aggregate/non-ordered queries ──
           return {
             rows: allCollectedRows,
             rowCount: allCollectedRows.length,
@@ -7213,32 +7213,32 @@ export class QueryRouter {
   }
 
   /**
-   * 判断是否应该使用 QueryPlanner + PlanExecutor 来执行该 SQL。
+   * Decide whether the SQL should run through QueryPlanner + PlanExecutor.
    *
-   * 必须满足：
-   * 1. usePlanner 开启
-   * 2. 是 SELECT 查询
-   * 3. 没有 CTE / SELECT INTO
-   * 4. 子查询不复杂
+   * It must satisfy:
+   * 1. usePlanner enabled
+   * 2. it is a SELECT query
+   * 3. no CTE / SELECT INTO
+   * 4. the subqueries are not too complex
    *
-   * E001: Planner → Executor 集成
+   * E001: Planner → Executor integration
    */
   private shouldUseQueryPlanner(sql: string): boolean {
     if (!this.usePlanner) return false;
 
     const trimmed = sql.trim().toUpperCase();
 
-    // 必须是 SELECT
+    // must be a SELECT
     if (!trimmed.startsWith('SELECT')) return false;
 
-    // 排除 CTE（WITH 子句）
+    // exclude CTEs (WITH clause)
     if (/^\s*WITH\b/i.test(sql.trim())) return false;
 
-    // 排除 SELECT INTO
+    // exclude SELECT INTO
     if (/\bINTO\b/i.test(trimmed)) return false;
 
-    // 子查询太复杂（嵌套 IN / EXISTS 太多层）时跳过
-    // 简单启发：超过 3 层子查询嵌套时回退
+    // skip when subqueries are too complex (too many nested IN / EXISTS levels)
+    // simple heuristic: fall back when subquery nesting exceeds 3 levels
     const subqueryCount = (sql.match(/SELECT\s/gi) || []).length;
     if (subqueryCount > 3) return false;
 
@@ -7986,7 +7986,7 @@ export class QueryRouter {
     perShardCols: string[],
     tableName: string,
   ): string {
-    // 使用 [\s\S] 代替 . 以跨行匹配
+    // use [\s\S] instead of . to match across lines
     const selectMatch = sql.match(/SELECT\s+([\s\S]*?)\s+FROM\s/i);
     if (!selectMatch) {
       return this._replaceTableName(sql, tableName, '_ms_scatter');
@@ -7995,7 +7995,7 @@ export class QueryRouter {
     const selectClause = selectMatch[1];
     const tableNameEsc = tableName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-    // 提取 GROUP BY / ORDER BY / LIMIT / HAVING
+    // extract GROUP BY / ORDER BY / LIMIT / HAVING
     // Note: use lookahead terminators (`?= ... |\s*$`) rather than nesting `$`
     // inside the alternation group — the latter fails to match a trailing
     // clause ending at end-of-string (the `$` inside `(?:...|$)` cannot assert
@@ -8010,22 +8010,22 @@ export class QueryRouter {
     const groupKeys = groupByCols.map(c => c.replace(/"/g, '').trim());
     const hasCountCol = perShardCols.some(c => /^cnt|^count$/i.test(c) || c === 'COUNT(*)');
 
-    // 解析 SELECT 表达式（逗号分隔，跳过函数括号内的逗号）
+    // parse the SELECT expressions (comma-separated, skipping commas inside function parentheses)
     const exprs = this._splitTopLevelCommas(selectClause);
     const newExprs: string[] = [];
 
     for (const expr of exprs) {
       const trimmed = expr.trim();
 
-      // 检测模式: AGG_FUNC(args) [AS alias]
+      // detect pattern: AGG_FUNC(args) [AS alias]
       const aggMatch = trimmed.match(/^(COUNT|SUM|MIN|MAX|AVG)\s*\(\s*([\s\S]*?)\s*\)\s*(?:AS\s+(\w+))?$/i);
       if (aggMatch) {
         const funcName = aggMatch[1].toUpperCase();
         const argStr = aggMatch[2];
         const alias = aggMatch[3];
 
-        // 找匹配的 per-shard 列名:
-        // 1) AS 别名 2) 推断别名 3) 原始表达式文本
+        // find the matching per-shard column name:
+        // 1) AS alias 2) inferred alias 3) the raw expression text
         const matchCol = alias
           ? (perShardCols.includes(alias) ? alias : null)
           : perShardCols.find(c =>
@@ -8034,7 +8034,7 @@ export class QueryRouter {
             );
         const colName = matchCol || this._inferAggAlias(argStr, funcName);
 
-        // 引用列名（可能含特殊字符如 COUNT(*)/SUM(x)）
+        // quote the column name (which may contain special chars such as COUNT(*)/SUM(x))
         const q = (s: string) => `"${s.replace(/"/g, '""')}"`;
 
         if (matchCol || perShardCols.includes(colName)) {
@@ -8069,11 +8069,11 @@ export class QueryRouter {
         continue;
       }
 
-      // 非聚合列（GROUP BY 键、常量表达式等）
+      // non-aggregate columns (GROUP BY keys, constant expressions, etc.)
       newExprs.push(trimmed.replace(new RegExp(`\\b${tableNameEsc}\\b`, 'gi'), '_ms_scatter'));
     }
 
-    // 构建完整 SQL
+    // build the complete SQL
     const groupByClause = groupByMatch
       ? ` GROUP BY ${groupKeys.map(k => `_ms_scatter.${k}`).join(', ')}`
       : '';
