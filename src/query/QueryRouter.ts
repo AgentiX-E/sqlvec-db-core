@@ -203,6 +203,7 @@ import { detectPITR, rewritePITR } from './PITRShim';
 
 // Step 1t: array functions, backup checksum, pg_cron, window function extensions
 import { detectArrayFunc, rewriteArrayFunc } from './ArrayFuncShim';
+import { detectPgFuncSyntax, rewritePgFuncSyntax } from './PgFuncSyntaxShim';
 import { detectBackupChecksum, rewriteBackupChecksum } from './BackupChecksumShim';
 import { detectPgCron, rewritePgCron } from './PgCronShim';
 import { detectWindowExt, rewriteWindowExt } from './WindowFuncShim';
@@ -5271,6 +5272,13 @@ export class QueryRouter {
     if (detectArrayFunc(out)) {
       const af = rewriteArrayFunc(out);
       if (af.rewritten) out = af.sql;
+    }
+    // Keyword-style scalar calls: extract(x FROM y), substring(s FROM n FOR m),
+    // position(a IN b). SQLite UDFs are comma-separated, so rewrite the keyword
+    // separators before the statement reaches SQLite.
+    if (detectPgFuncSyntax(out)) {
+      const fs = rewritePgFuncSyntax(out);
+      if (fs.rewritten) out = fs.sql;
     }
     if (detectRangeOperator(out)) {
       const ro = expandRangeOperators(out);

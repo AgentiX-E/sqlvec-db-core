@@ -277,4 +277,29 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     expect(r.rows[0].g).toBe(3);
     expect(r.rows[0].l).toBe(1);
   });
+
+  it('rewrites extract(x FROM y) keyword syntax', async () => {
+    const r: any = await qr.execute("SELECT extract(year FROM '2020-06-15') AS y");
+    expect(r.rows[0].y).toBe(2020);
+  });
+
+  it('rewrites substring(s FROM n) keyword syntax', async () => {
+    const r: any = await qr.execute("SELECT substring('abcdef' FROM 2) AS s");
+    expect(r.rows[0].s).toBe('bcdef');
+  });
+
+  it('rewrites substring(s FROM n FOR m) keyword syntax', async () => {
+    const r: any = await qr.execute("SELECT substring('abcdef' FROM 2 FOR 3) AS s");
+    expect(r.rows[0].s).toBe('bcd');
+  });
+
+  it('rewrites position(a IN b) keyword syntax', async () => {
+    const r: any = await qr.execute("SELECT position('b' IN 'abc') AS p");
+    expect(r.rows[0].p).toBe(2);
+  });
+
+  it('does not touch a real WHERE x IN (...) clause', async () => {
+    const r: any = await qr.execute('SELECT count(*) AS c FROM t WHERE n IN (10, 20)');
+    expect(r.rows[0].c).toBe(2);
+  });
 });
