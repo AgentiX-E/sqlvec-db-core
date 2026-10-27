@@ -273,6 +273,12 @@ const LITERAL_PREFIX_TYPES = [
   'REAL',
   'TEXT',
   'INT',
+  'NUMERIC',
+  'DECIMAL',
+  'JSON',
+  'JSONB',
+  'INET',
+  'CIDR',
 ];
 
 /**
@@ -441,6 +447,19 @@ function renderLiteralPrefix(typeName: string, literal: string): string {
     case 'VARCHAR':
     case 'INTERVAL':
       // Pass through as a string literal.
+      return `'${literal.replace(/'/g, "''")}'`;
+    case 'NUMERIC':
+    case 'DECIMAL':
+      return `CAST('${literal.replace(/'/g, "''")}' AS REAL)`;
+    case 'JSON':
+    case 'JSONB':
+      // JSON literal → the JSON text itself (JSONB is stored as TEXT).
+      return `'${literal.replace(/'/g, "''")}'`;
+    case 'INET':
+    case 'CIDR':
+      // inet/cidr have no native SQLite type; the value is stored/consumed as
+      // TEXT. Emit a plain string literal so downstream inet functions receive
+      // the exact literal (InetShim parses strings, not a synthetic type).
       return `'${literal.replace(/'/g, "''")}'`;
     default:
       return `'${literal.replace(/'/g, "''")}'`;

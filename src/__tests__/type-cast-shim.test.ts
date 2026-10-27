@@ -193,6 +193,29 @@ describe('rewriteTypeCast', () => {
     expect(rewriteTypeCast("SELECT DOUBLE PRECISION '1.5'").sql).toBe("SELECT CAST('1.5' AS REAL)");
   });
 
+  it('rewrites literal prefix NUMERIC / DECIMAL', () => {
+    expect(rewriteTypeCast("SELECT NUMERIC '12.34'").sql).toBe("SELECT CAST('12.34' AS REAL)");
+    expect(rewriteTypeCast("SELECT DECIMAL '0.5'").sql).toBe("SELECT CAST('0.5' AS REAL)");
+  });
+
+  it('rewrites literal prefix JSON / JSONB to text', () => {
+    expect(rewriteTypeCast("SELECT JSON '{\"a\":1}'").sql).toBe("SELECT '{\"a\":1}'");
+    expect(rewriteTypeCast("SELECT JSONB '{\"b\":2}'").sql).toBe("SELECT '{\"b\":2}'");
+  });
+
+  it('rewrites literal prefix INET / CIDR to text', () => {
+    expect(rewriteTypeCast("SELECT INET '192.168.1.1'").sql).toBe("SELECT '192.168.1.1'");
+    expect(rewriteTypeCast("SELECT CIDR '192.168.0.0/24'").sql).toBe("SELECT '192.168.0.0/24'");
+  });
+
+  it('detects literal prefix for INET / CIDR / NUMERIC / JSON', () => {
+    expect(detectLiteralPrefix("SELECT INET '10.0.0.1'")).toBe(true);
+    expect(detectLiteralPrefix("SELECT CIDR '10.0.0.0/8'")).toBe(true);
+    expect(detectLiteralPrefix("SELECT NUMERIC '1.2'")).toBe(true);
+    expect(detectLiteralPrefix("SELECT JSON '{}'")).toBe(true);
+    expect(detectLiteralPrefix("SELECT JSONB '[]'")).toBe(true);
+  });
+
   it('handles a string-literal left operand for ::', () => {
     expect(rewriteTypeCast("SELECT 'abc'::text FROM t").sql).toBe("SELECT CAST('abc' AS TEXT) FROM t");
   });
