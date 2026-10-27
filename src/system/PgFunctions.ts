@@ -16,6 +16,7 @@ import * as crypto from 'node:crypto';
 import { GucSystem } from '../core/GucSystem';
 import type { RowLockManager } from '../consensus/RowLockManager';
 import { getCurrentDbRef } from './SystemFunctions';
+import { parseIp } from '../query/InetShim';
 
 /** Global lock manager for pg_blocking_pids */
 let blockingPidsLockMgr: RowLockManager | null = null;
@@ -1581,6 +1582,51 @@ export function buildPgFunctions(): PgFunctionMap {
       }
     } catch { /* fallthrough */ }
     return 0;
+  });
+
+  // ════════════════════════════════════════
+  //  17. Network / inet / cidr Functions
+  // ════════════════════════════════════════
+
+  // host(inet|cidr) → text — the address portion without the /suffix.
+  reg('host', 1, 1, 'text', (inetVal: any) => {
+    if (isNull(inetVal)) return null;
+    const parsed = parseIp(toString(inetVal));
+    return parsed.isValid ? parsed.address : toString(inetVal);
+  });
+
+  // masklen(inet|cidr) → integer — the prefix length (32/128 when unspecified).
+  reg('masklen', 1, 1, 'integer', (inetVal: any) => {
+    if (isNull(inetVal)) return null;
+    return parseIp(toString(inetVal)).prefixLength;
+  });
+
+  // family(inet|cidr) → integer — 4 for IPv4, 6 for IPv6.
+  reg('family', 1, 1, 'integer', (inetVal: any) => {
+    if (isNull(inetVal)) return null;
+    return parseIp(toString(inetVal)).version;
+  });
+
+  // text(inet|cidr) → text — the canonical address[/suffix] form.
+  reg('text', 1, 1, 'text', (inetVal: any) => {
+    if (isNull(inetVal)) return null;
+    const parsed = parseIp(toString(inetVal));
+    if (!parsed.isValid) return toString(inetVal);
+    const full = parsed.version === 4 ? 32 : 128;
+    return parsed.prefixLength < full
+      ? `${parsed.address}/${parsed.prefixLength}`
+      : parsed.address;
+  });
+
+  // abbrev(inet) → text — abbreviated display form (same canonical text here).
+  reg('abbrev', 1, 1, 'text', (inetVal: any) => {
+    if (isNull(inetVal)) return null;
+    const parsed = parseIp(toString(inetVal));
+    if (!parsed.isValid) return toString(inetVal);
+    const full = parsed.version === 4 ? 32 : 128;
+    return parsed.prefixLength < full
+      ? `${parsed.address}/${parsed.prefixLength}`
+      : parsed.address;
   });
 
   return map;
