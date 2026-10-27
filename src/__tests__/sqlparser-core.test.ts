@@ -16,6 +16,12 @@ describe('SqlParser.parseStatement — empty & transaction fast paths', () => {
     expect((r as any).command).toBe('BEGIN');
   });
 
+  it('parses START TRANSACTION (and START) as TRANSACTION BEGIN', () => {
+    expect((parseStatement('START TRANSACTION') as any).command).toBe('BEGIN');
+    expect((parseStatement('START TRANSACTION READ ONLY') as any).command).toBe('BEGIN');
+    expect((parseStatement('START') as any).command).toBe('BEGIN');
+  });
+
   it('parses COMMIT and END as TRANSACTION COMMIT', () => {
     expect((parseStatement('COMMIT') as any).command).toBe('COMMIT');
     expect((parseStatement('END') as any).command).toBe('COMMIT');

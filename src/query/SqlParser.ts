@@ -221,7 +221,8 @@ export function parseStatement(sql: string): ParsedStatement {
 
   // Fast path: transaction statements are simple
   const upper = trimmed.toUpperCase().replace(/\s+/g, ' ');
-  if (upper.startsWith('BEGIN')) {
+  if (upper.startsWith('BEGIN') || upper.startsWith('START TRANSACTION') || upper === 'START') {
+    // `START TRANSACTION` / `START` are SQL-standard spellings of `BEGIN`.
     return { type: 'TRANSACTION', originalSql: sql, command: 'BEGIN' };
   }
   if (upper.startsWith('COMMIT') || upper.startsWith('END')) {

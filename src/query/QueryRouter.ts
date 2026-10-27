@@ -1565,7 +1565,10 @@ export class QueryRouter {
     // routing them to executeTransaction → `NO TRANSACTION` and dropping the
     // prepared changes. Let them fall through to the 2PC handler instead.
     const isRollbackTo = /^\s*ROLLBACK\s+(?:WORK\s+)?TO\b/i.test(sql);
-    if (!isRollbackTo && !detectTwoPhase(sql) && /^\s*(BEGIN|COMMIT|ROLLBACK|END)\b/i.test(sql)) {
+    // `START TRANSACTION` is the SQL-standard spelling of `BEGIN` (PG accepts
+    // it); include it in the transaction fast path so it does not fall through
+    // to SQLite, which rejects it with `near "START": syntax error`.
+    if (!isRollbackTo && !detectTwoPhase(sql) && /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|END)\b/i.test(sql)) {
       const fastParsed = parseStatement(sql);
       if (fastParsed.type === 'TRANSACTION') {
         return this.executeTransaction(fastParsed as any, sessionId, start);
