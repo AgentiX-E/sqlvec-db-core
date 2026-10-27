@@ -247,6 +247,17 @@ function stripExcludeClauses(sql: string): string {
       ? clauseStart - beforeClauseTrim[0].length
       : clauseStart;
 
+    // If the EXCLUDE clause arrived via `ALTER TABLE … ADD [CONSTRAINT …]
+    // EXCLUDE`, dropping the constraint leaves a dangling `ADD` (e.g.
+    // `ALTER TABLE t ADD`). Remove the trailing `ADD` keyword (and its leading
+    // whitespace) BEFORE the comma cleanup below, so that a comma which only
+    // separated this ADD clause from a preceding one becomes visible again.
+    const addMatch = result.slice(0, trimStart).match(/\bADD\s*$/i);
+    if (addMatch !== null) {
+      trimStart -= addMatch[0].length;
+      trimStart = result.slice(0, trimStart).replace(/\s+$/, '').length;
+    }
+
     // When the EXCLUDE clause is the *last* element of a comma-separated list
     // (no trailing comma was consumed), the comma that preceded it is left
     // dangling and would produce invalid SQL like `..., x,)`. Remove that

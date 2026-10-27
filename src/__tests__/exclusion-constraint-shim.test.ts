@@ -243,4 +243,20 @@ describe('rewriteExclusionConstraint', () => {
     expect(rewriteExclusionConstraint('EXCLUDE (a WITH =) WITH (fillfactor').rewritten).toBe(true);
     expect(rewriteExclusionConstraint('EXCLUDE (a WITH =) WHERE (active').rewritten).toBe(true);
   });
+
+  it('drops the dangling ADD from ALTER TABLE ... ADD CONSTRAINT ... EXCLUDE', () => {
+    expect(rewriteExclusionConstraint('ALTER TABLE t ADD CONSTRAINT e EXCLUDE USING gist (x WITH =)')).toEqual({
+      sql: 'ALTER TABLE t',
+      rewritten: true,
+    });
+  });
+
+  it('drops ADD and its preceding comma when EXCLUDE follows another ADD clause', () => {
+    expect(
+      rewriteExclusionConstraint('ALTER TABLE t ADD COLUMN y INT, ADD CONSTRAINT e EXCLUDE USING gist (a WITH =)'),
+    ).toEqual({
+      sql: 'ALTER TABLE t ADD COLUMN y INT',
+      rewritten: true,
+    });
+  });
 });

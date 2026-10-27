@@ -304,4 +304,14 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     const r: any = await qr.execute('SELECT count(*) AS c FROM t WHERE n IN (10, 20)');
     expect(r.rows[0].c).toBe(2);
   });
+
+  it('rewrites json_extract_path_text to json_extract', async () => {
+    const r: any = await qr.execute("SELECT json_extract_path_text('{\"a\":{\"b\":42}}', 'a', 'b') AS v");
+    expect(r.rows[0].v).toBe(42);
+  });
+
+  it('rewrites jsonb_extract_path with a numeric index element', async () => {
+    const r: any = await qr.execute("SELECT jsonb_extract_path_text('{\"a\":[10,20]}', 'a', 0) AS v");
+    expect(r.rows[0].v).toBe(10);
+  });
 });

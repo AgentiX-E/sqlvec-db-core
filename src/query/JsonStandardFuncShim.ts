@@ -79,7 +79,9 @@ export function detectJsonStdFunc(sql: string): boolean {
   // Constructors (JSON_OBJECT / JSON_ARRAY).
   return (
     findNextConstructorCall(sql, 'JSON_OBJECT', 0) !== null ||
-    findNextConstructorCall(sql, 'JSON_ARRAY', 0) !== null
+    findNextConstructorCall(sql, 'JSON_ARRAY', 0) !== null ||
+    // PG variadic json_extract_path / json_extract_path_text.
+    /\bjsonb?_extract_path(?:_text)?\s*\(/i.test(sql)
   );
 }
 
@@ -92,6 +94,8 @@ export function detectJsonStdFunc(sql: string): boolean {
  *   JSON_QUERY(json, path)   → json_extract(json, path)
  *   JSON_SCALAR(json)        → CASE WHEN json_type(json) IN ('array','object') THEN json ELSE json_extract('{"val":'||json||'}','$.val') END
  *   JSON_SERIALIZE(json)     → CAST(json AS TEXT)
+ *   json_extract_path(json, VARIADIC elems) → json_extract(json, '$.a.b[0]')
+ *   json_extract_path_text(json, VARIADIC elems) → json_extract(json, '$.a.b[0]')
  *   JSON_OBJECT(...)         → json_object(key, val, ...)
  *   JSON_ARRAY(...)          → json_array(...)
  */
@@ -116,6 +120,9 @@ export function rewriteJsonStdFunc(sql: string): string {
 
   // Phase 3: JSON_ARRAY(...) → json_array(...)
   result = rewriteJsonArrayCalls(result);
+
+  // Phase 4: PG variadic json_extract_path / json_extract_path_text.
+  result = rewriteJsonExtractPathCalls(result);
 
   return result;
 }
@@ -489,4 +496,59 @@ function findNextConstructorCall(
     i++;
   }
   return null;
+}
+
+/**
+ * Rewrite PG's variadic `json_extract_path` / `json_extract_path_text` (and
+ * their jsonb spellings) into SQLite `json_extract` with the path elements
+ * joined into a single `$.a.b[0]` JSON path.
+ *
+ *   json_extract_path(json, 'a', 'b')      → json_extract(json, '$.a.b')
+ *   json_extract_path_text(json, 'a', 0)   → json_extract(json, '$.a[0]')
+ *
+ * The first argument is the JSON document; every remaining argument is a path
+ * element. Elements are joined with `.`, numeric elements become `[n]`, and the
+ * whole path is prefixed with `$`.
+ */
+function rewriteJsonExtractPathCalls(sql: string): string {
+  let result = sql;
+  // Match `json_extract_path`, `jsonb_extract_path`, `json_extract_path_text`,
+  // `jsonb_extract_path_text` case-insensitively, followed by `(`.
+  const re = /\bjsonb?_extract_path(?:_text)?\s*\(/gi;
+
+  let m: RegExpExecArray | null;
+  // Collect edits and apply right-to-left (indices stay stable).
+  const edits: Array<{ start: number; end: number; text: string }> = [];
+  while ((m = re.exec(result)) !== null) {
+    const openIdx = m.index + m[0].length - 1;
+    const closeIdx = findMatchingParen(result, openIdx);
+    if (closeIdx === -1) continue;
+
+    const content = result.slice(openIdx + 1, closeIdx);
+    const args = splitTopLevelCommas(content);
+    if (args.length < 2) continue;
+
+    const doc = args[0];
+    const elems = args.slice(1);
+    const path = '$' + elems.map((e) => {
+      const t = e.trim();
+      // Numeric element → [n]; otherwise a dot-separated key (strip quotes).
+      if (/^-?\d+$/.test(t)) return `[${t}]`;
+      const unquoted = t.replace(/^'(.*)'$/, '$1').replace(/^"(.*)"$/, '$1');
+      return `.${unquoted}`;
+    }).join('');
+
+    edits.push({
+      start: m.index,
+      end: closeIdx + 1,
+      text: `json_extract(${doc}, '${path.replace(/'/g, "''")}')`,
+    });
+  }
+
+  if (edits.length === 0) return result;
+  edits.sort((a, b) => b.start - a.start);
+  for (const e of edits) {
+    result = result.slice(0, e.start) + e.text + result.slice(e.end);
+  }
+  return result;
 }
