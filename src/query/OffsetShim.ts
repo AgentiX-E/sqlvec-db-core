@@ -28,7 +28,13 @@ import { protectSQL, restoreSQL } from './LiteralProtectionLayer';
 // `?` placeholder. The trailing bound uses `(?!\w)` rather than `\b` because a
 // `?` placeholder is a non-word character — `\b` would fail between `?` and the
 // following non-word/end-of-input, silently missing `OFFSET ?`.
-const OFFSET_RE = /\bOFFSET\s+(?:\$?\d+|\?)(?!\w)/i;
+//
+// The SQL-standard `OFFSET n ROWS` / `OFFSET n ROW` spelling (optionally
+// followed by `FETCH …`) is *not* a bare OFFSET — it is handled separately by
+// FetchFirstShim. Exclude it here so `OFFSET 1 ROW FETCH NEXT 2 ROWS ONLY`
+// does not get a spurious `LIMIT -1` injected (which would later collide with
+// FetchFirstShim's `LIMIT n` and produce a double-LIMIT error, BUG #23).
+const OFFSET_RE = /\bOFFSET\s+(?:\$?\d+|\?)(?!\s*ROWS?\b)/i;
 
 /**
  * Check if the SQL has a bare OFFSET clause (no preceding LIMIT at the same level).

@@ -33,6 +33,16 @@ describe('OffsetShim', () => {
       expect(hasBareOffset("SELECT 'OFFSET 5'")).toBe(false);
       expect(hasBareOffset('SELECT 1 -- OFFSET 5')).toBe(false);
     });
+
+    // BUG #23 regression: `OFFSET n ROWS` / `OFFSET n ROW` (standard spelling,
+    // optionally followed by FETCH) is NOT a bare OFFSET — FetchFirstShim owns
+    // it. Reporting it here would inject a spurious `LIMIT -1` and later
+    // collide with FetchFirstShim's `LIMIT n` (double LIMIT syntax error).
+    it('does not report SQL-standard OFFSET n ROWS/ROW', () => {
+      expect(hasBareOffset('SELECT * FROM t OFFSET 5 ROWS')).toBe(false);
+      expect(hasBareOffset('SELECT * FROM t OFFSET 1 ROW FETCH NEXT 2 ROWS ONLY')).toBe(false);
+      expect(hasBareOffset('SELECT * FROM t OFFSET 2 ROWS FETCH FIRST 1 ROW ONLY')).toBe(false);
+    });
   });
 
   describe('fixBareOffset', () => {

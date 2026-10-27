@@ -204,6 +204,7 @@ import { detectPITR, rewritePITR } from './PITRShim';
 // Step 1t: array functions, backup checksum, pg_cron, window function extensions
 import { detectArrayFunc, rewriteArrayFunc } from './ArrayFuncShim';
 import { detectPgFuncSyntax, rewritePgFuncSyntax } from './PgFuncSyntaxShim';
+import { detectFetchFirst, rewriteFetchFirst } from './FetchFirstShim';
 import { detectBackupChecksum, rewriteBackupChecksum } from './BackupChecksumShim';
 import { detectPgCron, rewritePgCron } from './PgCronShim';
 import { detectWindowExt, rewriteWindowExt } from './WindowFuncShim';
@@ -5282,6 +5283,11 @@ export class QueryRouter {
     if (detectPgFuncSyntax(out)) {
       const fs = rewritePgFuncSyntax(out);
       if (fs.rewritten) out = fs.sql;
+    }
+    // SQL-standard row limiting: OFFSET n ROWS / FETCH FIRST n ROWS ONLY.
+    if (detectFetchFirst(out)) {
+      const ff = rewriteFetchFirst(out);
+      if (ff.rewritten) out = ff.sql;
     }
     if (detectRangeOperator(out)) {
       const ro = expandRangeOperators(out);
