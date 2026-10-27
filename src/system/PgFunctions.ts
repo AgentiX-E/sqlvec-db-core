@@ -16,7 +16,16 @@ import * as crypto from 'node:crypto';
 import { GucSystem } from '../core/GucSystem';
 import type { RowLockManager } from '../consensus/RowLockManager';
 import { getCurrentDbRef } from './SystemFunctions';
-import { parseIp } from '../query/InetShim';
+import {
+  parseIp,
+  setMasklen,
+  inetMerge,
+  inetSameFamily,
+  inetClientAddr,
+  inetClientPort,
+  inetServerAddr,
+  inetServerPort,
+} from '../query/InetShim';
 
 /** Global lock manager for pg_blocking_pids */
 let blockingPidsLockMgr: RowLockManager | null = null;
@@ -1628,6 +1637,36 @@ export function buildPgFunctions(): PgFunctionMap {
       ? `${parsed.address}/${parsed.prefixLength}`
       : parsed.address;
   });
+
+  // set_masklen(inet, int) → inet — set the prefix length of an address.
+  reg('set_masklen', 2, 2, 'inet', (inetVal: any, prefixlen: any) => {
+    if (isNull(inetVal) || isNull(prefixlen)) return null;
+    return setMasklen(toString(inetVal), Number(prefixlen));
+  });
+
+  // inet_merge(inet, inet) → cidr — smallest network containing both addresses.
+  reg('inet_merge', 2, 2, 'cidr', (inet1: any, inet2: any) => {
+    if (isNull(inet1) || isNull(inet2)) return null;
+    return inetMerge(toString(inet1), toString(inet2));
+  });
+
+  // inet_same_family(inet, inet) → boolean — whether both share an IP family.
+  reg('inet_same_family', 2, 2, 'boolean', (inet1: any, inet2: any) => {
+    if (isNull(inet1) || isNull(inet2)) return null;
+    return inetSameFamily(toString(inet1), toString(inet2));
+  });
+
+  // inet_client_addr() → inet — the client address of the current connection.
+  reg('inet_client_addr', 0, 0, 'inet', () => inetClientAddr());
+
+  // inet_client_port() → integer — the client TCP port of the current connection.
+  reg('inet_client_port', 0, 0, 'integer', () => inetClientPort());
+
+  // inet_server_addr() → inet — the server address of the current connection.
+  reg('inet_server_addr', 0, 0, 'inet', () => inetServerAddr());
+
+  // inet_server_port() → integer — the server TCP port of the current connection.
+  reg('inet_server_port', 0, 0, 'integer', () => inetServerPort());
 
   return map;
 }

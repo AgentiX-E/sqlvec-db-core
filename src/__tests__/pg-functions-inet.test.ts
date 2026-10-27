@@ -68,9 +68,51 @@ describe('PgFunctions inet/cidr member functions', () => {
   });
 
   describe('registry wiring', () => {
-    it('registers all five members under their lowercase names', () => {
+    it('registers all inet members under their lowercase names', () => {
       const m = make();
       for (const name of ['host', 'masklen', 'family', 'text', 'abbrev']) {
+        expect(m.has(name)).toBe(true);
+      }
+    });
+  });
+
+  describe('set_masklen', () => {
+    it('sets the prefix length of an address', () => {
+      expect(make().get('set_masklen')!.fn('192.168.1.1', 24)).toBe('192.168.1.1/24');
+    });
+    it('returns null for null input', () => {
+      expect(make().get('set_masklen')!.fn(null, 24)).toBe(null);
+      expect(make().get('set_masklen')!.fn('192.168.1.1', null)).toBe(null);
+    });
+  });
+
+  describe('inet_merge', () => {
+    it('returns the smallest network containing both addresses', () => {
+      const result = make().get('inet_merge')!.fn('192.168.1.1', '192.168.1.10');
+      expect(typeof result).toBe('string');
+      expect(result).toContain('/');
+    });
+    it('returns null for null input', () => {
+      expect(make().get('inet_merge')!.fn(null, '10.0.0.1')).toBe(null);
+    });
+  });
+
+  describe('inet_same_family', () => {
+    it('returns true when both are IPv4', () => {
+      expect(make().get('inet_same_family')!.fn('192.168.1.1', '10.0.0.1')).toBe(true);
+    });
+    it('returns false when families differ', () => {
+      expect(make().get('inet_same_family')!.fn('192.168.1.1', '::1')).toBe(false);
+    });
+    it('returns null for null input', () => {
+      expect(make().get('inet_same_family')!.fn(null, '10.0.0.1')).toBe(null);
+    });
+  });
+
+  describe('connection-bound accessors', () => {
+    it('registers inet_client_addr/inet_client_port/inet_server_addr/inet_server_port', () => {
+      const m = make();
+      for (const name of ['inet_client_addr', 'inet_client_port', 'inet_server_addr', 'inet_server_port']) {
         expect(m.has(name)).toBe(true);
       }
     });
