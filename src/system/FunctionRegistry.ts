@@ -172,12 +172,16 @@ export function registerPgScalarFunctions(db: any): void {
       // uses a rest parameter (length 0). varargs still passes each argument
       // positionally, so spread them into the user fn.
       //
-      // SQLite scalar UDFs cannot return raw JS arrays (better-sqlite3 rejects
-      // them with "returned an invalid value"), so functions that return a PG
-      // text[]/array encode it as a JSON array string here.
+      // SQLite scalar UDFs cannot return raw JS arrays or booleans
+      // (better-sqlite3 rejects them with "returned an invalid value"), so:
+      //   - text[]/array results are encoded as a JSON array string, and
+      //   - boolean results are coerced to the SQLite integer 0/1.
+      // Null/undefined pass through unchanged so NULL semantics are preserved.
       db.function(name, { deterministic: true, varargs: true }, (...args: any[]) => {
         const result = fn.fn(...args);
-        return Array.isArray(result) ? JSON.stringify(result) : result;
+        if (Array.isArray(result)) return JSON.stringify(result);
+        if (typeof result === 'boolean') return result ? 1 : 0;
+        return result;
       });
       registered++;
     } catch {
