@@ -314,4 +314,14 @@ describe('applyPgSelectRewrites — SELECT fast-path PG-ism rewrites', () => {
     const r: any = await qr.execute("SELECT jsonb_extract_path_text('{\"a\":[10,20]}', 'a', 0) AS v");
     expect(r.rows[0].v).toBe(10);
   });
+
+  it('simplifies int4range(a, b) constructor in a SELECT expression', async () => {
+    const r: any = await qr.execute('SELECT int4range(1, 10) AS r');
+    expect(r.rows[0].r).toBe('[1,10)');
+  });
+
+  it('simplifies a three-argument range constructor with explicit bounds', async () => {
+    const r: any = await qr.execute("SELECT int8range(1, 10, '[]') AS r");
+    expect(r.rows[0].r).toBe('[1,10]');
+  });
 });

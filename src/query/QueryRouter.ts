@@ -149,7 +149,7 @@ import { detectAdvisoryLock, rewriteAdvisoryLock } from './AdvisoryLockShim';
 // Step 1m: PG type compatibility (MACADDR/UUID/RANGE/ARRAY)
 import { detectNetType, rewriteNetType } from './MacAddrShim';
 import { detectUuidUsage, rewriteUuidSql } from './UuidShim';
-import { detectRangeType, rewriteRangeType, detectRangeOperator, expandRangeOperators, detectRangeFunc, rewriteRangeFunc } from './RangeTypeShim';
+import { detectRangeType, rewriteRangeType, detectRangeOperator, expandRangeOperators, detectRangeFunc, rewriteRangeFunc, simplifyRangeExpr } from './RangeTypeShim';
 // Step 1m: intarray extension (icount, sort_asc, uniq, idx, subarray, array operators)
 import { detectIntarray, rewriteIntarray, registerIntarrayFunctions } from './IntarrayShim';
 import { detectTypeCast, rewriteTypeCast } from './TypeCastShim';
@@ -5283,6 +5283,13 @@ export class QueryRouter {
     if (detectRangeOperator(out)) {
       const ro = expandRangeOperators(out);
       if (ro.rewritten) out = ro.sql;
+    }
+    // Simplify range constructor calls (int4range(a,b), …) into their textual
+    // `[a,b)` form in SELECT expressions; these previously fell through to
+    // SQLite as "no such function: int4range".
+    {
+      const sr = simplifyRangeExpr(out);
+      if (sr.rewritten) out = sr.sql;
     }
     if (detectRangeFunc(out)) {
       const rr = rewriteRangeFunc(out);
