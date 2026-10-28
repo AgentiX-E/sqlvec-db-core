@@ -1380,4 +1380,72 @@ describe('PlPgSqlEngine', () => {
       expect(r.returnValue).toBe(1);
     });
   });
+
+  // ── SELECT INTO / RAISE / Exception handler edge branches ────
+  describe('parser edge: SELECT INTO with commas and keyword boundaries', () => {
+    it('parses SELECT INTO with multiple comma-separated targets', async () => {
+      const e = createPlPgSqlEngine();
+      e.setQueryCallback(async () => [{ a: 1, b: 2 }]);
+      const r = await e.execute(`DO $$ DECLARE a INT; b INT; BEGIN SELECT 1, 2 INTO a, b; RETURN a + b; END; $$`);
+      expect(r.returnValue).toBe(3);
+    });
+
+    it('parses SELECT INTO with trailing comma before variable', async () => {
+      // Exercises `targetIdent.value !== ','` in the comma-skipping loop.
+      const e = createPlPgSqlEngine();
+      e.setQueryCallback(async () => [{ c: 7 }]);
+      const r = await e.execute(`DO $$ DECLARE c INT; BEGIN SELECT 1 INTO c; RETURN c; END; $$`);
+      expect(r.returnValue).toBe(7);
+    });
+
+    it('parses SELECT without INTO as a PERFORM-like no-op', async () => {
+      // Exercises `targets.length > 0` false branch.
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN SELECT 1; RETURN 42; END; $$`);
+      expect(r.returnValue).toBe(42);
+    });
+  });
+
+  describe('RAISE statement variants', () => {
+    it('executes RAISE NOTICE', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN RAISE NOTICE 'hello %', 'world'; RETURN 1; END; $$`);
+      expect(r.returnValue).toBe(1);
+    });
+
+    it('executes RAISE WARNING', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN RAISE WARNING 'oops'; RETURN 2; END; $$`);
+      expect(r.returnValue).toBe(2);
+    });
+
+    it('executes RAISE EXCEPTION', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN RAISE EXCEPTION 'boom'; RETURN 3; END; $$`);
+      expect(r.success).toBe(false);
+      expect(r.error).toBe('boom');
+    });
+
+    it('executes RAISE with no severity (default EXCEPTION)', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN RAISE 'plain message'; RETURN 4; END; $$`);
+      expect(r.success).toBe(true);
+      expect(r.returnValue).toBe(4);
+    });
+  });
+
+  describe('EXCEPTION handler matching', () => {
+    it('matches WHEN OTHERS handler (wildcard)', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN RAISE EXCEPTION 'x'; EXCEPTION WHEN OTHERS THEN RETURN 99; END; $$`);
+      expect(r.returnValue).toBe(99);
+    });
+
+    it('falls through WHEN conditions that do not match', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ BEGIN RAISE EXCEPTION 'e'; EXCEPTION WHEN division_by_zero THEN RETURN 1; END; $$`);
+      expect(r.success).toBe(false);
+      expect(r.error).toBe('e');
+    });
+  });
 });
