@@ -57,6 +57,19 @@ describe('parseIp', () => {
     expect(r.isValid).toBe(false);
     expect(r.error).toContain('Invalid IP address');
   });
+
+  it('rejects addresses rejected by ip-address isCorrect() (leading zeros)', () => {
+    // ip-address constructs these without throwing but reports isCorrect()
+    // false because the canonical form differs from the input. The parser
+    // falls through both version branches and reports invalid.
+    expect(parseIp('192.168.001.001').isValid).toBe(false);
+    expect(parseIp('010.000.000.001').isValid).toBe(false);
+  });
+
+  it('rejects IPv6 rejected by isCorrect() (non-canonical expansion)', () => {
+    expect(parseIp('2001:0db8:0000:0000:0000:0000:0000:0001').isValid).toBe(false);
+    expect(parseIp('::ffff:192.0.2.1').isValid).toBe(false);
+  });
 });
 
 describe('ipToInt / intToIp', () => {
@@ -144,6 +157,13 @@ describe('inetToCidr / inetNetwork', () => {
     expect(inetToCidr('2001:db8::1/32')).toBe('2001:db8::/32');
   });
 
+  it('normalizes IPv6 with surrounding whitespace (regression)', () => {
+    // The raw input with whitespace must still be normalized; previously the
+    // whitespace made Address6 throw and the function returned the input
+    // verbatim instead of the network address.
+    expect(inetToCidr(' 2001:db8::1/32 ')).toBe('2001:db8::/32');
+  });
+
   it('returns original for invalid / empty input', () => {
     expect(inetToCidr('not-an-ip')).toBe('not-an-ip');
     expect(inetToCidr('')).toBe('');
@@ -213,6 +233,10 @@ describe('inetBroadcast', () => {
     expect(inetBroadcast('2001:db8::1/128')).toBe('2001:0db8:0000:0000:0000:0000:0000:0001');
   });
 
+  it('normalizes IPv6 broadcast with surrounding whitespace (regression)', () => {
+    expect(inetBroadcast(' 2001:db8::1/126 ')).toBe('2001:0db8:0000:0000:0000:0000:0000:0003');
+  });
+
   it('returns original for invalid input', () => {
     expect(inetBroadcast('bad')).toBe('bad');
   });
@@ -231,6 +255,10 @@ describe('inetHostmask', () => {
     expect(inetHostmask('2001:db8::1/128')).toBe('::');
   });
 
+  it('normalizes IPv6 hostmask with surrounding whitespace (regression)', () => {
+    expect(inetHostmask(' 2001:db8::1/64 ')).toBe('::ffff:ffff:ffff:ffff');
+  });
+
   it('returns original for invalid input', () => {
     expect(inetHostmask('bad')).toBe('bad');
   });
@@ -247,6 +275,10 @@ describe('inetNetmask', () => {
 
   it('handles IPv6 zero prefix (netbits 0)', () => {
     expect(inetNetmask('2001:db8::1/0')).toBe('::');
+  });
+
+  it('normalizes IPv6 netmask with surrounding whitespace (regression)', () => {
+    expect(inetNetmask(' 2001:db8::1/64 ')).toBe('ffff:ffff:ffff:ffff::');
   });
 
   it('returns original for invalid input', () => {

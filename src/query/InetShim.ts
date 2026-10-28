@@ -245,19 +245,16 @@ export function inetToCidr(ip: string): string {
   }
 
   if (parsed.version === 6) {
-    try {
-      const addr6 = new Address6(ip);
-      if (addr6.isCorrect()) {
-        const startAddr = addr6.startAddress();
-        // Use correctForm() (compressed) rather than addressMinusSuffix
-        // (fully-expanded) — an expanded address with a `/prefix` suffix is
-        // not re-parseable by the ip-address library.
-        return `${startAddr.correctForm()}/${parsed.prefixLength}`;
-      }
-    } catch {
-      // Fall through
-    }
-    return ip;
+    // Reconstruct from the parser's normalized, suffix-stripped address (rather
+    // than the raw `ip`, which may carry surrounding whitespace that makes
+    // Address6 throw) and re-apply the prefix length so startAddress() computes
+    // the correct network.
+    const addr6 = new Address6(parsed.address);
+    addr6.subnetMask = parsed.prefixLength;
+    // Use correctForm() (compressed) rather than addressMinusSuffix
+    // (fully-expanded) — an expanded address with a `/prefix` suffix is
+    // not re-parseable by the ip-address library.
+    return `${addr6.startAddress().correctForm()}/${parsed.prefixLength}`;
   }
 
   // IPv4: apply mask to zero out host bits
@@ -378,16 +375,12 @@ export function inetBroadcast(address: string): string {
   }
 
   if (parsed.version === 6) {
-    try {
-      const addr6 = new Address6(address);
-      if (addr6.isCorrect()) {
-        const endAddr = addr6.endAddress();
-        return endAddr.addressMinusSuffix;
-      }
-    } catch {
-      // Fall through
-    }
-    return address;
+    // Use the parser's normalized, suffix-stripped address (rather than the raw
+    // `address`, which may carry surrounding whitespace) and re-apply the prefix
+    // so endAddress() computes the correct broadcast end.
+    const addr6 = new Address6(parsed.address);
+    addr6.subnetMask = parsed.prefixLength;
+    return addr6.endAddress().addressMinusSuffix;
   }
 
   const addrInt = ipToInt(parsed.address);
@@ -416,21 +409,13 @@ export function inetHostmask(address: string): string {
   }
 
   if (parsed.version === 6) {
-    try {
-      const addr6 = new Address6(address);
-      if (addr6.isCorrect()) {
-        const hostBits = 128 - parsed.prefixLength;
-        if (hostBits <= 0) return '::';
-        // Build hostmask hex string
-        const hostMaskStr = '1'.repeat(hostBits).padStart(128, '0');
-        const hostMaskBigInt = BigInt('0b' + hostMaskStr);
-        const result = Address6.fromBigInt(hostMaskBigInt);
-        return result.correctForm();
-      }
-    } catch {
-      // Fall through
-    }
-    return address;
+    const hostBits = 128 - parsed.prefixLength;
+    if (hostBits <= 0) return '::';
+    // Build hostmask hex string
+    const hostMaskStr = '1'.repeat(hostBits).padStart(128, '0');
+    const hostMaskBigInt = BigInt('0b' + hostMaskStr);
+    const result = Address6.fromBigInt(hostMaskBigInt);
+    return result.correctForm();
   }
 
   const mask = cidrToMask(parsed.prefixLength);
@@ -454,21 +439,13 @@ export function inetNetmask(address: string): string {
   }
 
   if (parsed.version === 6) {
-    try {
-      const addr6 = new Address6(address);
-      if (addr6.isCorrect()) {
-        // Build netmask from prefix length
-        const netBits = parsed.prefixLength;
-        if (netBits <= 0) return '::';
-        const maskStr = '1'.repeat(netBits).padEnd(128, '0');
-        const maskBigInt = BigInt('0b' + maskStr);
-        const result = Address6.fromBigInt(maskBigInt);
-        return result.correctForm();
-      }
-    } catch {
-      // Fall through
-    }
-    return address;
+    // Build netmask from prefix length
+    const netBits = parsed.prefixLength;
+    if (netBits <= 0) return '::';
+    const maskStr = '1'.repeat(netBits).padEnd(128, '0');
+    const maskBigInt = BigInt('0b' + maskStr);
+    const result = Address6.fromBigInt(maskBigInt);
+    return result.correctForm();
   }
 
   const mask = cidrToMask(parsed.prefixLength);
@@ -676,10 +653,11 @@ export function rewriteInetOperator(sql: string): string {
       continue;
     }
     const rhs = sql.slice(rhsStart, rhsEnd).trim();
-    if (!rhs) {
-      i = opEnd;
-      continue;
-    }
+    // An empty RHS is already impossible here: `scanForwardWord` skips leading
+    // whitespace (so `rhsStart` points at a non-whitespace character), and a
+    // quoted literal slice always contains its surrounding quote characters,
+    // so the trimmed slice can never be empty. The `rhsStart === rhsEnd`
+    // guard above is the only empty-RHS path.
 
     // Build the function-call replacement. The `swap` variant places the RHS
     // as the network argument, per PostgreSQL operator semantics.
@@ -773,8 +751,11 @@ function scanForwardWord(sql: string, pos: number): { start: number; end: number
   while (j < n && /\s/.test(sql[j])) j++;
   const start = j;
   if (j < n && (sql[j] === "'" || sql[j] === '"' || sql[j] === '`')) {
-    const skip = skipSqlLiteral(sql, j);
-    return { start, end: skip === -1 ? n : skip };
+    // skipSqlLiteral never returns -1 for a quote character: the `'`, `"`, and
+    // `` ` `` branches above always return the closing position (or sql.length
+    // for an unterminated literal). The -1 sentinel is only produced for a
+    // bare `$` or a non-literal character, neither of which can appear here.
+    return { start, end: skipSqlLiteral(sql, j) };
   }
   while (j < n && /[a-zA-Z0-9_.$]/.test(sql[j])) j++;
   return { start, end: j };
