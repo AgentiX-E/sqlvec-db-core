@@ -192,6 +192,14 @@ describe('inetContains (<<=)', () => {
   it('handles IPv6', () => {
     expect(inetContains('::1', '::/0')).toBe(true);
   });
+
+  it('normalizes IPv6 with surrounding whitespace (regression)', () => {
+    // Whitespace-padded operands must not make Address6 throw and yield a
+    // false negative.
+    expect(inetContains(' 2001:db8::5 ', ' 2001:db8::/32 ')).toBe(true);
+    expect(inetContains(' 2001:db8:: ', ' 2001:db8::/32 ')).toBe(true);
+    expect(inetContains(' 2001:db9::5 ', ' 2001:db8::/32 ')).toBe(false);
+  });
 });
 
 describe('inetContainedBy (<< strict)', () => {
@@ -210,6 +218,11 @@ describe('inetContainedBy (<< strict)', () => {
 
   it('returns false for IPv6 strict containment on network address itself', () => {
     expect(inetContainedBy('2001:db8::', '2001:db8::/32')).toBe(false);
+  });
+
+  it('normalizes IPv6 with surrounding whitespace (regression)', () => {
+    expect(inetContainedBy(' 2001:db8::1 ', ' 2001:db8::/32 ')).toBe(true);
+    expect(inetContainedBy(' 2001:db8:: ', ' 2001:db8::/32 ')).toBe(false);
   });
 
   it('returns false for invalid / cross-version', () => {
@@ -326,6 +339,12 @@ describe('inetMerge', () => {
 
   it('handles IPv6 identical addresses', () => {
     expect(inetMerge('2001:db8::1', '2001:db8::1')).toBe('2001:db8::1/128');
+  });
+
+  it('normalizes IPv6 with surrounding whitespace (regression)', () => {
+    // Whitespace-padded operands must not make Address6 throw and fall through
+    // to '::/0'.
+    expect(inetMerge(' 2001:db8::1 ', ' 2001:db8::f ')).toBe('2001:db8::/124');
   });
 
   it('returns /0 for invalid input', () => {

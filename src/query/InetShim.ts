@@ -284,15 +284,15 @@ export function inetContains(addr: string, network: string): boolean {
 
   if (addrParsed.version !== netParsed.version) return false;
 
-  // For IPv6, use the ip-address library's isInSubnet
+  // For IPv6, use the ip-address library's isInSubnet. Rebuild both operands
+  // from the parser's normalized addresses (rather than the raw inputs, which
+  // may carry surrounding whitespace that makes Address6 throw) and re-apply
+  // the network prefix so isInSubnet compares against the correct subnet.
   if (addrParsed.version === 6) {
-    try {
-      const addr6 = new Address6(addr);
-      const net6 = new Address6(network);
-      return addr6.isInSubnet(net6);
-    } catch {
-      return false;
-    }
+    const addr6 = new Address6(addrParsed.address);
+    const net6 = new Address6(netParsed.address);
+    net6.subnetMask = netParsed.prefixLength;
+    return addr6.isInSubnet(net6);
   }
 
   // IPv4: bitwise comparison
@@ -322,18 +322,15 @@ export function inetContainedBy(addr: string, network: string): boolean {
   if (addrParsed.version !== netParsed.version) return false;
 
   if (addrParsed.version === 6) {
-    try {
-      const addr6 = new Address6(addr);
-      const net6 = new Address6(network);
-      // Strict containment: must be within but not equal to the network
-      // address itself. Compare as big-int values so compressed vs expanded
-      // representations cannot diverge.
-      const netAddr = new Address6(inetToCidr(network));
-      const isNetworkAddr = netAddr.isCorrect() && addr6.bigInt() === netAddr.bigInt();
-      return addr6.isInSubnet(net6) && !isNetworkAddr;
-    } catch {
-      return false;
-    }
+    // Rebuild from the parser's normalized addresses (avoiding raw-input
+    // whitespace that makes Address6 throw) and re-apply the prefix. Strict
+    // containment compares the address against the network's own start address
+    // as big-int values so compressed vs expanded representations cannot diverge.
+    const addr6 = new Address6(addrParsed.address);
+    const net6 = new Address6(netParsed.address);
+    net6.subnetMask = netParsed.prefixLength;
+    const isNetworkAddr = addr6.bigInt() === net6.startAddress().bigInt();
+    return addr6.isInSubnet(net6) && !isNetworkAddr;
   }
 
   // IPv4: strict containment check
@@ -485,26 +482,25 @@ export function inetMerge(ip1: string, ip2: string): string {
   }
 
   if (p1.version === 6) {
-    try {
-      const a1 = new Address6(ip1);
-      const a2 = new Address6(ip2);
-      const a1Int = a1.bigInt();
-      const a2Int = a2.bigInt();
-      const xorResult = a1Int ^ a2Int;
-      // Find the leftmost set bit position
-      let commonBits = 128;
-      if (xorResult > BigInt(0)) {
-        commonBits = xorResult.toString(2).length;
-        commonBits = 128 - commonBits;
-      }
-      // Build the merged network address
-      const mask = BigInt(2) ** BigInt(128) - BigInt(2) ** BigInt(128 - commonBits);
-      const networkInt = a1Int & mask;
-      const merged = Address6.fromBigInt(networkInt);
-      return `${merged.correctForm()}/${commonBits}`;
-    } catch {
-      return '::/0';
+    // Rebuild from the parser's normalized, suffix-stripped addresses rather
+    // than the raw inputs (which may carry surrounding whitespace that makes
+    // Address6 throw and fall through to '::/0').
+    const a1 = new Address6(p1.address);
+    const a2 = new Address6(p2.address);
+    const a1Int = a1.bigInt();
+    const a2Int = a2.bigInt();
+    const xorResult = a1Int ^ a2Int;
+    // Find the leftmost set bit position
+    let commonBits = 128;
+    if (xorResult > BigInt(0)) {
+      commonBits = xorResult.toString(2).length;
+      commonBits = 128 - commonBits;
     }
+    // Build the merged network address
+    const mask = BigInt(2) ** BigInt(128) - BigInt(2) ** BigInt(128 - commonBits);
+    const networkInt = a1Int & mask;
+    const merged = Address6.fromBigInt(networkInt);
+    return `${merged.correctForm()}/${commonBits}`;
   }
 
   // IPv4: find common prefix bits
