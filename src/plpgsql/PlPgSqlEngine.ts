@@ -1166,8 +1166,8 @@ class PlPgSqlEvaluator {
     'btrim':      (s: any, chars?: any) => chars === undefined ? String(s).trim() : String(s).replace(new RegExp(`^[${chars}]+|[${chars}]+$`, 'g'), ''),
     'ltrim':      (s: any, chars?: any) => chars === undefined ? String(s).trimStart() : String(s).replace(new RegExp(`^[${chars}]+`, 'g'), ''),
     'rtrim':      (s: any, chars?: any) => chars === undefined ? String(s).trimEnd() : String(s).replace(new RegExp(`[${chars}]+$`, 'g'), ''),
-    'substr':     (s: any, start: any, count?: any) => String(s).substring(Number(start) - 1, count ? Number(start) - 1 + Number(count) : undefined),
-    'substring':  (s: any, from: any, count?: any) => String(s).substring(Number(from) - 1, count ? Number(from) - 1 + Number(count) : undefined),
+    'substr':     (s: any, start: any, count?: any) => String(s).substring(Number(start) - 1, count === undefined ? undefined : Number(start) - 1 + Number(count)),
+    'substring':  (s: any, from: any, count?: any) => String(s).substring(Number(from) - 1, count === undefined ? undefined : Number(from) - 1 + Number(count)),
     'concat':     (...args: any[]) => args.map(String).join(''),
     'position':   (sub: any, str: any) => String(str).indexOf(String(sub)) + 1,
     'replace':    (s: any, from: any, to: any) => String(s).split(String(from)).join(String(to)),
@@ -1208,10 +1208,11 @@ class PlPgSqlEvaluator {
     },
   };
 
-  /** Split comma-separated function arguments respecting nested parens. */
+  /** Split comma-separated function arguments respecting nested parens and brackets. */
   private static splitArgs(argsStr: string): string[] {
     const result: string[] = [];
-    let depth = 0;
+    let depth = 0;      // paren depth — a comma inside (...) is not a separator
+    let bracketDepth = 0; // bracket depth — a comma inside ARRAY[...] is not a separator
     let inString = false;
     let current = '';
     for (let i = 0; i < argsStr.length; i++) {
@@ -1229,9 +1230,11 @@ class PlPgSqlEvaluator {
         continue;
       }
 
-      if (ch === '(') { depth++; current += ch; }
+      if (ch === '[') { bracketDepth++; current += ch; }
+      else if (ch === ']') { bracketDepth--; current += ch; }
+      else if (ch === '(') { depth++; current += ch; }
       else if (ch === ')') { depth--; current += ch; }
-      else if (ch === ',' && depth === 0) {
+      else if (ch === ',' && depth === 0 && bracketDepth === 0) {
         result.push(current.trim());
         current = '';
       } else {
@@ -1302,22 +1305,14 @@ class PlPgSqlEvaluator {
       const argsStr = fullExpr.substring(fullExpr.indexOf('(') + 1, fullExpr.length - 1).trim();
       const rawArgs = argsStr === '' ? [] : PlPgSqlEvaluator.splitArgs(argsStr);
       try {
-        const resolved: any[] = rawArgs.map((a) => {
-          let trimmed = a.trim();
-          // The tokenizer emits a leading unary minus as a separate OPERATOR
-          // token, so a negative literal arrives here as "- 5" (minus, space,
-          // digits). Normalize that spacing so the numeric-parse branch below
-          // (and JS Math.* coercion) can treat it as a single negative number.
-          trimmed = trimmed.replace(/^-\s+(?=\d)/, '-');
-          if (trimmed === 'null') return null;
-          if (trimmed === 'true') return true;
-          if (trimmed === 'false') return false;
-          if (/^-?\d+(\.\d+)?$/.test(trimmed)) return trimmed.includes('.') ? parseFloat(trimmed) : parseInt(trimmed, 10);
-          if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) return trimmed.slice(1, -1);
-          // Resolve variable references ($N or named variables) from context
-          if (this.variables && trimmed in this.variables) return this.variables[trimmed];
-          return a;
-        });
+        // Resolve each argument through evaluateExpression (not a local literal
+        // parse) so nested constructs — ARRAY[...] literals, subscript access,
+        // nested function calls, and variables — are evaluated consistently
+        // with the rest of the engine.
+        const resolved: any[] = [];
+        for (const raw of rawArgs) {
+          resolved.push(await this.evaluateExpression(raw));
+        }
         const val = fn(...resolved);
         if (val === null) calls.push({ full: fullExpr, replacement: 'null' });
         else if (typeof val === 'string') calls.push({ full: fullExpr, replacement: `'${val}'` });

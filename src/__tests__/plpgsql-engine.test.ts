@@ -176,10 +176,13 @@ describe('PlPgSqlEngine', () => {
       [`x := trim('  x  ')`, 'x'],
       [`x := btrim('  x  ')`, 'x'],
       [`x := btrim('xxhixx', 'x')`, 'hi'],
-      [`x := ltrim('  x  ')`, 'x  '],
-      [`x := rtrim('  x  ')`, '  x'],
+      [`x := ltrim('xxhixx', 'x')`, 'hixx'],
+      [`x := rtrim('xxhixx', 'x')`, 'xxhi'],
       [`x := substr('hello', 2, 3)`, 'ell'],
+      [`x := substr('hello', 2, 0)`, ''],
+      [`x := substr('hello', 2)`, 'ello'],
       [`x := substring('hello', 1, 2)`, 'he'],
+      [`x := substring('hello', 2, 0)`, ''],
       [`x := concat('a', 'b', 'c')`, 'abc'],
       [`x := position('l', 'hello')`, 3],
       [`x := replace('abc', 'b', 'X')`, 'aXc'],
@@ -350,6 +353,23 @@ describe('PlPgSqlEngine', () => {
       const e = createPlPgSqlEngine();
       const r = await e.execute(`DO $$ DECLARE a INT[] := ARRAY[1,2,3]; x INT[]; BEGIN x := array_replace(a, 2, 9); RETURN x[2]; END; $$`);
       expect(r.returnValue).toBe(9);
+    });
+
+    it('handles ARRAY literals as direct builtin arguments (regression)', async () => {
+      // splitArgs previously did not track bracket depth, so a comma inside
+      // ARRAY[1,2,3] split the literal into separate arguments and every
+      // array builtin received a non-array.
+      const e = createPlPgSqlEngine();
+      let r = await e.execute(`DO $$ DECLARE x INT; BEGIN x := cardinality(ARRAY[1,2,3]); RETURN x; END; $$`);
+      expect(r.returnValue).toBe(3);
+      r = await e.execute(`DO $$ DECLARE x INT; BEGIN x := array_length(ARRAY[1,2,3], 1); RETURN x; END; $$`);
+      expect(r.returnValue).toBe(3);
+    });
+
+    it('handles ARRAY literal arguments to array_cat (regression)', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute(`DO $$ DECLARE x INT[]; BEGIN x := array_cat(ARRAY[1,2], ARRAY[3]); RETURN x[3]; END; $$`);
+      expect(r.returnValue).toBe(3);
     });
   });
 
