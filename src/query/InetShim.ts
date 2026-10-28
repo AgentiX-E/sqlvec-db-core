@@ -80,7 +80,13 @@ export function parseIp(ipStr: string): InetParseResult {
     const addr4 = new Address4(trimmed);
     if (addr4.isCorrect()) {
       return {
+        // For a correctly-constructed Address4, `addressMinusSuffix` is always
+        // a non-null string and `subnetMask` is always a number; the `?? ''`
+        // and `: 32` fallbacks are defensive only (guarding against a future
+        // ip-address API change) and cannot be reached through valid input.
+        /* v8 ignore next */
         address: addr4.addressMinusSuffix ?? '',
+        /* v8 ignore next */
         prefixLength: typeof addr4.subnetMask === 'number' ? addr4.subnetMask : 32,
         version: 4,
         isValid: true,
@@ -213,6 +219,10 @@ function scanForInetToken(sql: string): boolean {
         const after = j >= n ? '' : sql[j];
         const beforeOk = !/[a-zA-Z0-9_]/.test(before);
         const afterOk = !/[a-zA-Z0-9_]/.test(after);
+        // The word scan above stops exactly at a non-alphanumeric boundary, so
+        // both `before` and `after` are guaranteed non-alphanumeric; the
+        // conjuncts are always true and the else direction is unreachable.
+        /* v8 ignore next */
         if (beforeOk && afterOk) return true;
       }
       i = j;
