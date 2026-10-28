@@ -158,6 +158,8 @@ describe('isBatchableInsert', () => {
     ['non-string number', 42 as any],
     ['null', null as any],
     ['undefined', undefined as any],
+    ['non-INSERT string', 'SELECT 1'],
+    ['UPDATE string', 'UPDATE t SET a = 1'],
     ['RETURNING clause', 'INSERT INTO t VALUES (1) RETURNING id'],
     ['ON CONFLICT', 'INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING'],
     ['INSERT ... SELECT', 'INSERT INTO t SELECT * FROM s'],
