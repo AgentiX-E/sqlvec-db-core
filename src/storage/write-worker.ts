@@ -127,7 +127,7 @@ export class GroupCommit {
 //  Worker bootstrap (runs only inside a worker thread)
 // ─────────────────────────────────────────────────────────────
 
-function parseWriteMessage(raw: any): { sqls: string[] } | { error: string } {
+export function parseWriteMessage(raw: any): { sqls: string[] } | { error: string } {
   if (!raw || typeof raw.taskId !== 'number') {
     return { error: 'Missing taskId' };
   }
