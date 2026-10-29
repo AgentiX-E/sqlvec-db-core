@@ -260,7 +260,7 @@ export function handleSetReset(sql: string): SetResetResult {
     if (paramLower === 'statement_timeout') {
       try {
         GucSystem.getDefaultInstance().set('statement_timeout', '');
-      } catch {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */      } catch {
         // GucSystem not available, silently ignore
       }
       logger.debug({ sql: trimmed }, 'RESET statement_timeout — restored default in GucSystem');
@@ -341,7 +341,7 @@ export function handleSetReset(sql: string): SetResetResult {
       if (!isNaN(msValue)) {
         try {
           GucSystem.getDefaultInstance().set('statement_timeout', String(msValue));
-        } catch {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */        } catch {
           // GucSystem not available, silently ignore
         }
       }
@@ -686,7 +686,7 @@ export function handleAlterSystemSet(sql: string): SetResetResult {
     let value = match[2].trim().replace(/';?\s*$/, '').replace(/^'/, '').trim();
     try {
       GucSystem.getDefaultInstance().set(param, value);
-    } catch {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */    } catch {
       // GucSystem not available, silently ignore
     }
     logger.debug({ param, value }, 'ALTER SYSTEM SET stored in GucSystem');

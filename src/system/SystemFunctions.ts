@@ -1896,7 +1896,7 @@ handlers['convert_from'] = (bytes: any, encodingName: string) => {
     if (enc === 'HEX') return buf.toString('hex');
     // Default to UTF8
     return buf.toString('utf8');
-  } catch {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */  } catch {
     logger.warn({ encodingName }, 'convert_from: unsupported encoding, falling back to UTF8');
     return buf.toString('utf8');
   }

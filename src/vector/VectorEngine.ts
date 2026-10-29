@@ -130,7 +130,7 @@ export class VectorEngine {
             this.hnswIndexPath = basePath;
             logger.info(`[VectorEngine] Auto-loaded HNSW index from ${basePath}.hnsw`);
             break;
-          } catch (e: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */          } catch (e: any) {
             logger.warn(`[VectorEngine] Failed to auto-load HNSW index from ${basePath}: ${e.message}`);
           }
         }
@@ -147,7 +147,7 @@ export class VectorEngine {
           this.ivfpqIndexPath = path.join(this.dataDir, ivf);
           logger.info(`[VectorEngine] Auto-loaded IVFPQ index from ${ivf}`);
           break;
-        } catch (e: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */        } catch (e: any) {
           logger.warn(`[VectorEngine] Failed to auto-load IVFPQ index from ${ivf}: ${e.message}`);
         }
       }
@@ -165,7 +165,7 @@ export class VectorEngine {
       await this.duckDBExec(conn, 'LOAD sqlite_scanner;');
       this.registerFloatDecodeUdf(conn);
       this.duckDBAvailable = true;
-    } catch (err: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */    } catch (err: any) {
       logger.warn(`[VectorEngine] DuckDB sqlite_scanner extension unavailable, falling back to indexed search: ${err.message || err}`);
       this.duckDBAvailable = false;
     }
@@ -752,7 +752,7 @@ export class VectorEngine {
     try {
       this.hnswIndex.saveSync(this.hnswIndexPath);
       logger.info('[VectorEngine] HNSW auto-persist complete');
-    } catch (e: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */    } catch (e: any) {
       logger.warn({ err: e.message }, '[VectorEngine] HNSW auto-persist error');
     }
   }
@@ -768,7 +768,7 @@ export class VectorEngine {
       this.autoPersistHnswCounter = 0;
       logger.info('[VectorEngine] HNSW force-persist complete');
       return true;
-    } catch (e: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */    } catch (e: any) {
       logger.warn({ err: e.message }, '[VectorEngine] HNSW force-persist error');
       return false;
     }

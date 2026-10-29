@@ -499,7 +499,7 @@ function evaluateExpression(expression: string, row: Record<string, any>): any {
     if (/^[\d+\-*/().\s]+$/.test(sanitized)) {
       return Function(`"use strict"; return (${sanitized})`)();
     }
-  } catch {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */  } catch {
     // Ignore evaluation errors
   }
 

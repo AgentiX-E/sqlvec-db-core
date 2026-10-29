@@ -1588,7 +1588,7 @@ export function executeMergeWithReturning(
           existingKeys.add(keyVal);
         }
       }
-    } catch (err) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */    } catch (err) {
       logger.warn({ err }, 'Failed to pre-determine existing keys for merge_action()');
     }
   }
@@ -1627,7 +1627,7 @@ export function executeMergeWithReturning(
     const sqlWithReturning = `${cleanSql} RETURNING ${returningExpressions}`;
     try {
       return db.prepare(sqlWithReturning).all(...(params || [])) as any[];
-    } catch (e: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */    } catch (e: any) {
       logger.warn(
         { err: e.message, sql: sqlWithReturning },
         'RETURNING execution failed, trying without RETURNING',

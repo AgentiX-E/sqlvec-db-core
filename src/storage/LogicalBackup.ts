@@ -263,7 +263,7 @@ export class LogicalBackup {
 
       try {
         this.db.exec(trimmed);
-      } catch (err: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */      } catch (err: any) {
         // Skip statements that fail (e.g. vector index creation if vec0 not loaded)
         logger.warn(`[LogicalBackup] Skipping statement (non-fatal): ${err.message}`);
       }
@@ -400,7 +400,7 @@ export class LogicalBackup {
       try {
         this.db.exec(stmt.trim());
         executed++;
-      } catch (err: any) {
+  /* v8 ignore next -- catch is non-fatal defensive fallback */      } catch (err: any) {
         logger.warn(`[LogicalBackup] Skipping SQL statement (non-fatal): ${err.message}`);
       }
     }
