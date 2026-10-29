@@ -177,6 +177,13 @@ describe('QueryRouter — execute() rewrite pipeline (auto-generated detectors)'
     { fn: 'detectWindowExt', sql: 'SELECT SUM(x) OVER (ORDER BY y GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t' },
     { fn: 'detectXmlExtendedFunc', sql: 'SELECT table_to_xml(\'t\', true, false, \'\')' },
     { fn: 'detectXmlFunc', sql: 'SELECT xmlelement(name foo, bar)' },
+    // ── newly added detect paths (2026-10-29) ──
+    { fn: 'detectSequenceNextval', sql: 'SELECT nextval(\'seq_t_id\')' },
+    { fn: 'detectDcl', sql: 'GRANT SELECT ON t TO alice' },
+    { fn: 'detectFetchFirst', sql: 'SELECT * FROM t FETCH FIRST 5 ROWS ONLY' },
+    { fn: 'detectGIN', sql: 'SET gin_pending_list_limit = 4096' },
+    { fn: 'detectPgFuncSyntax', sql: "SELECT extract(year FROM '2026-01-01'::date)" },
+    { fn: 'detectPGPattern', sql: "SELECT 'hello' ILIKE 'HELLO'" },
   ];
 
   it.each(CASES)('$fn fires detect→rewrite and settles', async ({ sql }) => {
