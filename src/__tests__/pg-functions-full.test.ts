@@ -112,4 +112,60 @@ describe('PgFunctions — remaining executable branches (full coverage)', () => 
     // substring with regex-like from and no match → ''
     expect(fn('substring', 'hello', 'zz')).toBe('');
   });
+
+  // ── regexp_match / regexp_replace boundary tests ──
+  it('regexp_match returns null when str is null', () => {
+    expect(fn('regexp_match', null, 'a')).toBeNull();
+  });
+
+  it('regexp_match returns null when pattern is null', () => {
+    expect(fn('regexp_match', 'a', null)).toBeNull();
+  });
+
+  it('regexp_match: no matches returns null', () => {
+    expect(fn('regexp_match', 'hello', 'z')).toBeNull();
+  });
+
+  // ── jsonb_build_object / jsonb_build_array boundaries ──
+  it('jsonb_build_object with null key skips that entry', () => {
+    const r = fn('jsonb_build_object', 'a', 1, null, 2, 'c', 3);
+    expect(JSON.parse(r)).toEqual({ a: 1, c: 3 });
+  });
+
+  it('jsonb_build_object with undefined value → null', () => {
+    const r = fn('jsonb_build_object', 'a', undefined);
+    expect(JSON.parse(r)).toEqual({ a: null });
+  });
+
+  it('jsonb_build_array maps undefined args to null', () => {
+    const r = fn('jsonb_build_array', 1, undefined, 3);
+    expect(JSON.parse(r)).toEqual([1, null, 3]);
+  });
+
+  // ── greatest / least edge cases ──
+  it('greatest with empty args returns null', () => {
+    expect(fn('greatest')).toBeNull();
+  });
+
+  it('least with empty args returns null', () => {
+    expect(fn('least')).toBeNull();
+  });
+
+  it('greatest with string args does lexical comparison', () => {
+    expect(fn('greatest', 'apple', 'banana', 'apricot')).toBe('banana');
+  });
+
+  it('least with string args does lexical comparison', () => {
+    expect(fn('least', 'banana', 'apple')).toBe('apple');
+  });
+
+  // ── pg_size_pretty zero edge ──
+  it('pg_size_pretty with zero returns 0 bytes', () => {
+    expect(fn('pg_size_pretty', 0)).toBe('0 bytes');
+  });
+
+  // ── regexp_replace with flags ──
+  it('regexp_replace with global flag replaces all occurrences', () => {
+    expect(fn('regexp_replace', 'abab', 'a', 'X', 'g')).toBe('XbXb');
+  });
 });
