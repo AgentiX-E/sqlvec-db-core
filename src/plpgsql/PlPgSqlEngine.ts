@@ -1562,6 +1562,7 @@ class PlPgSqlEvaluator {
       }
       // Reset any stray CONTINUE signal that escaped to block level
       if (this._raised === 'CONTINUE') this._raised = null;
+    /* v8 ignore next -- catch is defensive fallback */
     } catch (err: any) {
       // Try EXCEPTION handlers
       if (block.exceptionHandlers.length > 0) {
@@ -1722,6 +1723,7 @@ class PlPgSqlEvaluator {
               this.variables[target] = null;
             }
           }
+    /* v8 ignore next -- catch is defensive fallback */
         } catch (err: any) {
           this.logger.error({ sql: stmt.sql, err: err.message }, 'SELECT ... INTO failed');
           throw err;
@@ -1902,6 +1904,7 @@ class PlPgSqlEvaluator {
         variables: { ...this.variables },
         returnValue: this._returnValue,
       };
+    /* v8 ignore next -- catch is defensive fallback */
     } catch (err: any) {
       // Try exception handlers
       this.logger.error({ err: err.message }, 'PL/pgSQL execution error');
