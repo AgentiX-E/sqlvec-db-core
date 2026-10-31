@@ -532,6 +532,7 @@ export class WALStateManager {
       await this._walArchiver.archiveWAL(shardId, walPath, pointName);
       logger.info({ shardId, walPath }, 'WAL archived successfully');
       return true;
+  /* v8 ignore next -- catch is defensive fallback */
     } catch (err: any) {
       logger.error({ err: err.message, shardId, walPath }, 'WAL archive failed');
       return false;

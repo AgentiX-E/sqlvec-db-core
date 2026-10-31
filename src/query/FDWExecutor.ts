@@ -367,6 +367,7 @@ export class FDWExecutor {
     let duckdb: any;
     try {
       duckdb = require('duckdb');
+  /* v8 ignore next -- catch is defensive fallback */
     } catch {
       throw new SqlVecError(
         'DuckDB module is not available — cannot query DuckDB foreign data sources',

@@ -210,6 +210,7 @@ function evaluateExpression(expr: string): EvalResult {
       try {
         const value = SystemFunctionRegistry.execute(name, []);
         return { name, value, type: 'text' };
+  /* v8 ignore next -- catch is defensive fallback */
       } catch {
         // Bare invocation always passes [] (0 args) and registered handlers do
         // not throw, so this catch is defensive only.

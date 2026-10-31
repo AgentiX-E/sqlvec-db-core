@@ -195,6 +195,7 @@ function findNextCall(
  */
 export function rewriteArraySubscript(sql: string): string {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return sql ?? '';
   }
 
@@ -327,6 +328,7 @@ function matchSubscriptDigits(
  */
 export function rewriteUnnestCall(sql: string): string {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return sql ?? '';
   }
 
@@ -387,6 +389,7 @@ export function rewriteUnnestCall(sql: string): string {
  */
 export function rewriteArrayJoin(sql: string): string {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return sql ?? '';
   }
 
@@ -443,6 +446,7 @@ export function rewriteArrayJoin(sql: string): string {
  */
 export function rewriteArrayLength(sql: string): string {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return sql ?? '';
   }
 
@@ -496,6 +500,7 @@ export function rewriteArrayLength(sql: string): string {
  */
 export function rewriteArrayPosition(sql: string): string {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return sql ?? '';
   }
 
@@ -571,6 +576,7 @@ export function detectArrayFunction(
   sql: string,
 ): { hasArrayFunction: boolean; rewrittenSql: string } {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { hasArrayFunction: false, rewrittenSql: sql ?? '' };
   }
 

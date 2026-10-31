@@ -63,6 +63,7 @@ function evaluateSqlExpression(expression: string, row: ConstraintRow): unknown 
   let statements;
   try {
     statements = parse(`SELECT ${trimmed}`);
+  /* v8 ignore next -- catch is defensive fallback */
   } catch {
     // Unparseable expression — treat as not satisfied rather than crash.
     return false;

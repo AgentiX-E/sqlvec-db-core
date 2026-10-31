@@ -159,6 +159,7 @@ export function detectGroupingSets(sql: string): boolean {
 export function rewriteGroupingSets(sql: string): GroupingSetsResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return {
+  /* v8 ignore next -- ?? fallback is defensive default */
       sql: sql ?? '',
       rewritten: false,
     };

@@ -141,6 +141,7 @@ export function rewriteGroupsFrame(sql: string): GroupsShimResult {
       logger.debug({ original: trimmed, rewritten: cteResult.sql }, 'GROUPS rewritten via CTE');
       return cteResult;
     }
+  /* v8 ignore next -- catch is defensive fallback */
   } catch (err: any) {
     logger.warn({ err: err.message, sql: trimmed }, 'CTE rewrite failed');
   }

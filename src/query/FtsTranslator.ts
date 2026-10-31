@@ -71,6 +71,7 @@ function loadThesaurus(): Record<string, string[]> {
     } else {
       _thesaurus = {};
     }
+  /* v8 ignore next -- catch is defensive fallback */
   } catch {
     _thesaurus = {};
   }

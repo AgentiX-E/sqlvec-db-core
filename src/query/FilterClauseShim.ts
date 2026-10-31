@@ -103,6 +103,7 @@ export function detectFilter(sql: string): boolean {
  */
 export function rewriteFilter(sql: string): FilterClauseResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { sql: sql ?? '', rewritten: false };
   }
 

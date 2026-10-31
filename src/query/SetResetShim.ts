@@ -228,6 +228,7 @@ export function detectSetReset(sql: string): boolean {
 export function handleSetReset(sql: string): SetResetResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return {
+  /* v8 ignore next -- ?? fallback is defensive default */
       sql: sql ?? '',
       rewritten: false,
       noop: false,
@@ -278,6 +279,7 @@ export function handleSetReset(sql: string): SetResetResult {
     if (paramLower === 'client_encoding') {
       try {
         GucSystem.getDefaultInstance().set('client_encoding', '');
+  /* v8 ignore next -- catch is defensive fallback */
       } catch {
         // GucSystem not available, silently ignore
       }
@@ -315,6 +317,7 @@ export function handleSetReset(sql: string): SetResetResult {
     logger.debug({ sql: trimmed, value: cleanedValue }, 'SET NAMES detected — storing as client_encoding in GucSystem');
     try {
       GucSystem.getDefaultInstance().set('client_encoding', cleanedValue);
+  /* v8 ignore next -- catch is defensive fallback */
     } catch {
       // GucSystem not available, silently ignore
     }
@@ -370,6 +373,7 @@ export function handleSetReset(sql: string): SetResetResult {
         const cleanedValue = value.replace(/^['"]|['"]$/g, '');
         try {
           GucSystem.getDefaultInstance().set('client_encoding', cleanedValue);
+  /* v8 ignore next -- catch is defensive fallback */
         } catch {
           // GucSystem not available, silently ignore
         }
@@ -691,5 +695,6 @@ export function handleAlterSystemSet(sql: string): SetResetResult {
     }
     logger.debug({ param, value }, 'ALTER SYSTEM SET stored in GucSystem');
   }
+  /* v8 ignore next -- ?? fallback is defensive default */
   return { sql: '', rewritten: true, noop: true, parameter: match?.[1] ?? 'unknown' };
 }

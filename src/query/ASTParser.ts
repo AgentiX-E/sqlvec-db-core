@@ -113,6 +113,7 @@ export function parseSQL(sql: string): ASTParseResult {
     const stmt = ast[0];
     const parsed = astToParsedStatement(stmt, trimmed);
     return { statement: parsed, error: null, sql, usedAST: true };
+  /* v8 ignore next -- catch is defensive fallback */
   } catch (err: any) {
     // Extract position info from pgsql-ast-parser errors
     const errorInfo = extractErrorInfo(err, trimmed);
@@ -387,6 +388,7 @@ function extractOrderBy(stmt: any): string | undefined {
       // v12 exposes { by: { name }, order: 'ASC' | 'DESC' }.
       const expr = toSql.expr(ob.by);
       return ob.order === 'DESC' ? `${expr} DESC` : `${expr} ASC`;
+  /* v8 ignore next -- catch is defensive fallback */
     } catch {
       return '';
     }

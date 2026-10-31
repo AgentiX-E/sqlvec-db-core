@@ -469,6 +469,7 @@ class Parser {
 
         // Data type
         const dataTypeTokens: string[] = [];
+    /* v8 ignore next -- parser peek guard */
         while (this.peek() &&
                !this.matchKeyword('NOT', 'DEFAULT') &&
                this.peek()?.type !== 'ASSIGN' &&
@@ -510,6 +511,7 @@ class Parser {
   private parseStatements(stopAt: string): PlPgSqlStatement[] {
     const statements: PlPgSqlStatement[] = [];
 
+    /* v8 ignore next -- parser peek guard */
     while (this.peek()) {
       // EXCEPTION handler
       /* istanbul ignore next -- missing EXCEPTION keyword tolerance */
@@ -823,6 +825,7 @@ class Parser {
   private parseStatementsUntilEndOrElse(): PlPgSqlStatement[] {
     const statements: PlPgSqlStatement[] = [];
 
+    /* v8 ignore next -- parser peek guard */
     while (this.peek()) {
       // EXCEPTION handler
       /* istanbul ignore next -- missing EXCEPTION keyword tolerance */

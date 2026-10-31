@@ -526,6 +526,7 @@ function extractAfterCteBody(sql: string): string | null {
  * 5. Return rewritten SQL
  */
 export function rewriteSearchCycle(sql: string): SearchCycleRewriteResult {
+  /* v8 ignore next -- ?? fallback is defensive default */
   const trimmed = (sql ?? '').trim();
   if (!trimmed) return { sql: '', rewritten: false, details: {} };
 

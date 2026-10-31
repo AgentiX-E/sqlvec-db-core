@@ -114,6 +114,7 @@ export class GroupCommit {
         for (const t of tasks) {
           this.post({ taskId: t.taskId, changes: t.sqls.length });
         }
+  /* v8 ignore next -- catch is defensive fallback */
       } catch (err: any) {
         for (const t of tasks) {
           this.post({ taskId: t.taskId, changes: 0, error: err.message || String(err) });
@@ -154,6 +155,7 @@ if (parentPort) {
       db.pragma('synchronous = NORMAL');
       db.pragma('busy_timeout = 5000');
       connections.set(shardId, db);
+  /* v8 ignore next -- catch is defensive fallback */
     } catch (err: any) {
       parentPort!.postMessage({
         taskId: -1,

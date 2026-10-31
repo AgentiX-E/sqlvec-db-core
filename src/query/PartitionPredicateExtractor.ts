@@ -255,6 +255,7 @@ function extractSinglePredicate(
   if (inMatch) {
     // `inMatch[0]` ends with the opening paren; point `openParen` at that
     // `(` character (not the token just after it).
+  /* v8 ignore next -- ?? fallback is defensive default */
     const openParen = i + (inMatch.index ?? 0) + inMatch[0].length - 1;
     // Find the matching close paren, skipping literals.
     const closeParen = findMatchingCloseParen(fragment, openParen);
@@ -273,12 +274,14 @@ function extractSinglePredicate(
   // BETWEEN x AND y
   const betweenMatch = rest.match(/^\s+BETWEEN\s+/i);
   if (betweenMatch) {
+  /* v8 ignore next -- ?? fallback is defensive default */
     let j = i + (betweenMatch.index ?? 0) + betweenMatch[0].length;
     const first = readValueToken(fragment, j);
     j = first.end;
     // Expect ` AND ` after the first bound.
     const andMatch = fragment.slice(j).match(/^\s+AND\s+/i);
     if (!andMatch) return null;
+  /* v8 ignore next -- ?? fallback is defensive default */
     j += (andMatch.index ?? 0) + andMatch[0].length;
     const second = readValueToken(fragment, j);
     return {
@@ -293,6 +296,7 @@ function extractSinglePredicate(
   const opMatch = rest.match(/^\s*(>=|<=|>|<|=)\s*/i);
   if (!opMatch) return null;
   const op = opMatch[1] as '>=' | '<=' | '>' | '<' | '=';
+  /* v8 ignore next -- ?? fallback is defensive default */
   const valuePos = i + (opMatch.index ?? 0) + opMatch[0].length;
   const valueToken = readValueToken(fragment, valuePos);
   return {

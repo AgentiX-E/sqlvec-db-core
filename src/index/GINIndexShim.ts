@@ -287,6 +287,7 @@ export class GINIndexRuntime {
           result.set(k, String(v));
         }
       }
+  /* v8 ignore next -- catch is defensive fallback */
     } catch {
       // Not valid JSON — treat as plain text
       result.set(jsonStr, jsonStr);

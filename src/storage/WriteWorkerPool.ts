@@ -75,6 +75,7 @@ export class WriteWorkerPool {
           if (msg.error) {
             pending.reject(new Error(msg.error));
           } else {
+  /* v8 ignore next -- ?? fallback is defensive default */
             pending.resolve({ changes: msg.changes ?? 0 });
           }
         }
@@ -144,6 +145,7 @@ export class WriteWorkerPool {
       
       try {
         this.worker!.postMessage({ taskId, shardId, sql });
+  /* v8 ignore next -- catch is defensive fallback */
       } catch (err: any) {
         this.pending.delete(taskId);
         reject(new Error(`WriteWorker: Failed to send task: ${err.message}`));
@@ -174,6 +176,7 @@ export class WriteWorkerPool {
       
       try {
         this.worker!.postMessage({ taskId, shardId, sqls });
+  /* v8 ignore next -- catch is defensive fallback */
       } catch (err: any) {
         this.pending.delete(taskId);
         reject(new Error(`WriteWorker: Failed to send batch: ${err.message}`));

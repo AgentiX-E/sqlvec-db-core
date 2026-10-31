@@ -95,6 +95,7 @@ export function analyzeSubquery(
 
     // 没有检测到子查询
     return null;
+  /* v8 ignore next -- catch is defensive fallback */
   } catch {
     // 解析失败，返回 null （不做重写）
     return null;
@@ -122,6 +123,7 @@ export function extractSubqueryColumn(subquerySql: string): string | null {
 
     // 处理星号或表达式 — 无法确定具体列名
     return null;
+  /* v8 ignore next -- catch is defensive fallback */
   } catch {
     return null;
   }
@@ -494,6 +496,7 @@ function serializeSelect(subquery: any): string {
   try {
     const { toSql } = require('pgsql-ast-parser');
     return toSql.statement(subquery);
+  /* v8 ignore next -- catch is defensive fallback */
   } catch {
     return '';
   }

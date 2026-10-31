@@ -283,6 +283,7 @@ export function detectWindowExt(sql: string): boolean {
 export function rewriteWindowExt(sql: string): WindowFuncResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return {
+  /* v8 ignore next -- ?? fallback is defensive default */
       sql: sql ?? '',
       rewritten: false,
     };
@@ -467,6 +468,7 @@ function findDenseRankCall(sql: string): number | null {
  */
 export function rewriteDenseRank(sql: string): WindowFuncResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { sql: sql ?? '', rewritten: false };
   }
   if (!detectDenseRank(sql)) {

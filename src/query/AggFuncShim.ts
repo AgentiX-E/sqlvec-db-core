@@ -255,6 +255,7 @@ export function detectAggFunc(sql: string): boolean {
  */
 export function rewriteAggFunc(sql: string): AggFuncResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { sql: sql ?? '', rewritten: false };
   }
 

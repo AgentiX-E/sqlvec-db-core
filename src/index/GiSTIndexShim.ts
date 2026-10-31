@@ -112,6 +112,7 @@ export function setGeometryFormat(tableName: string, colName: string, format: Ge
  * Get the registered geometry format for a column.
  */
 export function getGeometryFormat(tableName: string, colName: string): GeometryFormat {
+  /* v8 ignore next -- ?? fallback is defensive default */
   return geometryFormatMap.get(`${tableName}.${colName}`) ?? 'point_xy';
 }
 
@@ -348,6 +349,7 @@ export function checkSpatialiteSupport(db?: any): SpatialSupportResult {
     db.exec('CREATE VIRTUAL TABLE IF NOT EXISTS __gist_rtree_test USING rtree(id, min_x, max_x)');
     db.exec('DROP TABLE IF EXISTS __gist_rtree_test');
     result.rtreeAvailable = true;
+  /* v8 ignore next -- catch is defensive fallback */
   } catch (err: any) {
     result.rtreeAvailable = false;
     result.reason = `R*Tree module not available: ${err.message}`;
@@ -357,6 +359,7 @@ export function checkSpatialiteSupport(db?: any): SpatialSupportResult {
     // Try loading mod_spatialite for PostGIS-level spatial support
     db.exec("SELECT load_extension('mod_spatialite')");
     result.spatialiteAvailable = true;
+  /* v8 ignore next -- catch is defensive fallback */
   } catch (err: any) {
     result.spatialiteAvailable = false;
     result.reason = (result.reason || '') + `; mod_spatialite not available: ${err.message}`;

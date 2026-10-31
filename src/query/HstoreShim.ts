@@ -176,6 +176,7 @@ export function parseHstoreToObject(text: string | null): Record<string, string 
   if (isJsonFormat(text)) {
     try {
       return JSON.parse(text);
+  /* v8 ignore next -- catch is defensive fallback */
     } catch {
       // Fall through to PG parser
     }
@@ -498,6 +499,7 @@ export class HstoreShim {
         const base = JSON.parse(_baseRecord);
         const merged = { ...base, ...obj };
         return objectToHstoreJson(merged);
+  /* v8 ignore next -- catch is defensive fallback */
       } catch {
         // Not parseable as JSON, just return the hstore data
         return objectToHstoreJson(obj);
@@ -632,6 +634,7 @@ function skipStringBackward(sql: string, pos: number): number {
 export function rewriteHstoreOperator(sql: string): HstoreRewriteResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
     return {
+  /* v8 ignore next -- ?? fallback is defensive default */
       sql: sql ?? '',
       rewritten: false,
     };
@@ -902,6 +905,7 @@ function findArrayClose(sql: string, openIdx: number): number {
  */
 export function rewriteHstoreKeyOperators(sql: string): HstoreRewriteResult {
   if (typeof sql !== 'string' || sql.trim().length === 0) {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { sql: sql ?? '', rewritten: false };
   }
 

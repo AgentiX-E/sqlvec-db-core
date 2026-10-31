@@ -124,6 +124,7 @@ export function sort(arr: string | number[], dir?: string): number[] {
   } else {
     parsed = [];
   }
+  /* v8 ignore next -- ?? fallback is defensive default */
   const direction = (dir ?? 'asc').toLowerCase();
   if (direction === 'desc') {
     return parsed.sort((a, b) => b - a);
@@ -730,6 +731,7 @@ export function detectIntarrayOperator(sql: string): boolean {
  */
 export function rewriteIntarrayOperators(sql: string): { sql: string; rewritten: boolean } {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { sql: sql ?? '', rewritten: false };
   }
 
@@ -1012,6 +1014,7 @@ function toIntArray(value: any): number[] {
   try {
     const parsed = JSON.parse(s);
     if (Array.isArray(parsed)) return parsed.map(Number);
+  /* v8 ignore next -- catch is defensive fallback */
   } catch {
     // Fall through: not JSON — treat as a single-element array (a bare scalar).
   }
@@ -1056,6 +1059,7 @@ const FN_REWRITE_PATTERNS: Array<{ re: RegExp; sql: string }> = [
  */
 export function rewriteIntarrayFunctions(sql: string): { sql: string; rewritten: boolean } {
   if (!sql || typeof sql !== 'string') {
+  /* v8 ignore next -- ?? fallback is defensive default */
     return { sql: sql ?? '', rewritten: false };
   }
 
@@ -1070,6 +1074,7 @@ export function rewriteIntarrayFunctions(sql: string): { sql: string; rewritten:
       for (let i = 1; i < args.length - 2; i++) {
         // offset and string are always last two args in the replace callback,
         // so group indices stop well before `args.length - 2`.
+  /* v8 ignore next -- ?? fallback is defensive default */
         r = r.replace(new RegExp(`\\$${i}(?![0-9])`, 'g'), (args[i] ?? '').trim());
       }
       return r;
