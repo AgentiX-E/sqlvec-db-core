@@ -184,6 +184,15 @@ describe('QueryRouter — execute() rewrite pipeline (auto-generated detectors)'
     { fn: 'detectGIN', sql: 'SET gin_pending_list_limit = 4096' },
     { fn: 'detectPgFuncSyntax', sql: "SELECT extract(year FROM '2026-01-01'::date)" },
     { fn: 'detectPGPattern', sql: "SELECT 'hello' ILIKE 'HELLO'" },
+    // ── DDL/DML executor path triggers ──
+    { fn: 'execSelectSimple', sql: 'SELECT 1' },
+    { fn: 'execInsertFast', sql: 'INSERT INTO t (x) VALUES (\'a\')' },
+    { fn: 'execUpdateStmt', sql: 'UPDATE t SET x = \'b\' WHERE id = 1' },
+    { fn: 'execDeleteStmt', sql: 'DELETE FROM t WHERE id = 1' },
+    { fn: 'execCreateTable', sql: 'CREATE TABLE u2 (id INTEGER PRIMARY KEY)' },
+    { fn: 'execDropTable', sql: 'DROP TABLE IF EXISTS u2' },
+    { fn: 'execBeginRollback', sql: 'BEGIN' },
+    { fn: 'execCommit', sql: 'COMMIT' },
   ];
 
   it.each(CASES)('$fn fires detect→rewrite and settles', async ({ sql }) => {
