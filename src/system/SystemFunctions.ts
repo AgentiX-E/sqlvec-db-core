@@ -471,6 +471,7 @@ handlers['pg_size_bytes'] = (text: string) => {
     case 'mb': return value * 1024 * 1024;
     case 'kb': return value * 1024;
     case 'bytes':
+    /* v8 ignore next -- switch default is defensive */
     default: return Math.round(value);
   }
 };

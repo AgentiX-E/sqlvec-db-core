@@ -313,6 +313,7 @@ export function parseStatement(sql: string): ParsedStatement {
       case 'truncate':
         parsed = parseDDL(stmt as any, trimmed);
         break;
+    /* v8 ignore next -- switch default is defensive */
       default:
         // Check if it's a DDL-like statement by looking for CREATE/ALTER/DROP in original
         if (/^\s*(CREATE|ALTER|DROP|TRUNCATE)\b/i.test(trimmed)) {

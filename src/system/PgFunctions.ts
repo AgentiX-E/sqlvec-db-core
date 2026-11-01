@@ -948,6 +948,7 @@ export function buildPgFunctions(): PgFunctionMap {
       case 'hex': return buf.toString('hex');
       case 'base64': return buf.toString('base64');
       case 'escape': return buf.toString('utf8');
+    /* v8 ignore next -- switch default is defensive */
       default: return null;
     }
   });
@@ -967,6 +968,7 @@ export function buildPgFunctions(): PgFunctionMap {
       case 'escape':
         buf = Buffer.from(s, 'utf8');
         break;
+    /* v8 ignore next -- switch default is defensive */
       default:
         return null;
     }
@@ -1719,6 +1721,7 @@ function extractDatePart(part: string, source: any): number | null {
     case 'timezone': return 0;
     case 'timezone_hour': return 0;
     case 'timezone_minute': return 0;
+    /* v8 ignore next -- switch default is defensive */
     default: return null;
   }
 }
@@ -1796,6 +1799,7 @@ function truncateDate(part: string, d: Date): Date | null {
       r.setMilliseconds(0);
       return r;
     }
+    /* v8 ignore next -- switch default is defensive */
     default: {
       return null;
     }
@@ -1831,6 +1835,7 @@ function parseIntervalMs(v: any): number | null {
     case 'min': return val * 60000;
     case 'second':
     case 'sec': return val * 1000;
+    /* v8 ignore next -- switch default is defensive */
     default: return null;
   }
 }

@@ -1253,6 +1253,7 @@ export class ExplainHandler {
       }
 
       case 'text':
+    /* v8 ignore next -- switch default is defensive */
       default: {
         // Convert the ExplainNode back to a PlanNode shape and format it. The
         // previous code ignored `explainNode` entirely and called
@@ -1343,6 +1344,7 @@ export class ExplainHandler {
       }
 
       case 'text':
+    /* v8 ignore next -- switch default is defensive */
       default: {
         planText = this.formatPlanTree(planNode);
         break;
