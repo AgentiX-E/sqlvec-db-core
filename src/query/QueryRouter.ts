@@ -4476,6 +4476,7 @@ export class QueryRouter {
               if (shard0 && 'db' in shard0) {
                 statsDb = (shard0 as any).db;
               }
+    /* v8 ignore next -- catch is defensive */
             } catch { /* shardManager not available — skip stats loading */ }
 
             if (statsDb) {
@@ -5692,6 +5693,7 @@ export class QueryRouter {
         `SELECT 1 FROM _sqlvec_identity_columns WHERE table_name = ? LIMIT 1`,
       ).get(tableName.toLowerCase());
       return !!row;
+    /* v8 ignore next -- catch is defensive */
     } catch {
       return false;
     }

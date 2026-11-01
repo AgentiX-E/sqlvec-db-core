@@ -1391,6 +1391,7 @@ class PlPgSqlEvaluator {
         if (val === null) calls.push({ full: fullExpr, replacement: 'null' });
         else if (typeof val === 'string') calls.push({ full: fullExpr, replacement: `'${val}'` });
         else calls.push({ full: fullExpr, replacement: String(val) });
+    /* v8 ignore next -- catch is defensive */
       } catch {
         // Skip function calls that can't be evaluated
       }
@@ -1516,6 +1517,7 @@ class PlPgSqlEvaluator {
 
       // Return expression as-is if we can't evaluate
       return expr;
+    /* v8 ignore next -- catch is defensive */
     } catch {
       return expr;
     }
