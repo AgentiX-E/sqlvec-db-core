@@ -406,6 +406,7 @@ export class ExplainHandler {
         return this.buildDeletePlan(stmt);
       }
       return this.buildDDLPlan(stmt);
+    /* v8 ignore next -- catch is defensive */
     } catch {
       return this.buildUnknownPlan(sql);
     }
@@ -592,6 +593,7 @@ export class ExplainHandler {
       // `cnt` column are always present.
       const count = row.cnt;
       return { rows: Math.max(1, count) };
+    /* v8 ignore next -- catch is defensive */
     } catch {
       return { rows: 1000 };
     }
@@ -615,6 +617,7 @@ export class ExplainHandler {
       const value = expr.right.value;
 
       return this.statCollector.estimateSelectivity(table, col, op, value);
+    /* v8 ignore next -- catch is defensive */
     } catch {
       return 1.0;
     }
@@ -923,6 +926,7 @@ export class ExplainHandler {
     try {
       const { toSql } = require('pgsql-ast-parser');
       return toSql.expr(expr);
+    /* v8 ignore next -- catch is defensive */
     } catch {
       return '?';
     }

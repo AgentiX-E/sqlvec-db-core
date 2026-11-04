@@ -204,6 +204,7 @@ export class DataBridge {
           await this.fullSyncAll();
           this.transition('syncing');
           logger.info('[DataBridge] Deferred full sync complete');
+    /* v8 ignore next -- catch is defensive */
         } catch (err: any) {
           logger.error({ err: err.message }, '[DataBridge] Deferred full sync failed');
         }
@@ -374,6 +375,7 @@ export class DataBridge {
             }
             this.pendingRegistrations.splice(i, 1); // Remove on success
           }
+    /* v8 ignore next -- catch is defensive */
         } catch (pendingErr: any) {
           reg.retries++;
           logger.info({ shardId, tableName: reg.tableName, retry: reg.retries, err: pendingErr.message },

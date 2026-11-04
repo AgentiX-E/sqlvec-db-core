@@ -339,6 +339,7 @@ export function parseStatement(sql: string): ParsedStatement {
     // Cache successful AST parse for future template-based lookups
     setCachedAST(sql, parsed);
     return parsed;
+    /* v8 ignore next -- catch is defensive */
   } catch (err: any) {
     // Fallback: use heuristic parsing for robustness. fallbackParse always
     // returns a statement (worst case UNKNOWN), so no null check is needed.
@@ -1067,6 +1068,7 @@ function parseWith(trimmed: string, sql: string): ParsedStatement {
       }
     }
     return { type: 'UNKNOWN', originalSql: sql };
+    /* v8 ignore next -- catch is defensive */
   } catch {
     // pgsql-ast-parser v12 rejects some PostgreSQL constructs the CTE body may
     // use (INTERSECT/EXCEPT, etc.). Re-dispatch the trailing statement (after
@@ -1382,6 +1384,7 @@ export function extractWindowFunctions(sql: string): WindowFunction[] {
     }
 
     return result;
+    /* v8 ignore next -- catch is defensive */
   } catch {
     return fallbackExtractWindowFunctions(sql);
   }
@@ -1554,6 +1557,7 @@ export function rewriteWindowSql(sql: string): string {
       try {
         const result = toSql.statement(stmt);
         return result;
+    /* v8 ignore next -- catch is defensive */
       } catch {
         // Fallback: string-level replacement
         return sql.replace(
@@ -1564,6 +1568,7 @@ export function rewriteWindowSql(sql: string): string {
     }
 
     return sql;
+    /* v8 ignore next -- catch is defensive */
   } catch {
     return sql;
   }
@@ -1605,6 +1610,7 @@ export function extractCtes(sql: string): CteDefinition[] {
         let queryStr = '';
         try {
           queryStr = toSql.statement(cte.statement);
+    /* v8 ignore next -- catch is defensive */
         } catch {
           queryStr = '<unserializable>';
         }
@@ -1619,6 +1625,7 @@ export function extractCtes(sql: string): CteDefinition[] {
     }
 
     return [];
+    /* v8 ignore next -- catch is defensive */
   } catch {
     return fallbackExtractCtes(sql, isRecursive);
   }

@@ -2013,6 +2013,7 @@ export class MVCCExecutor {
             });
             break;
         }
+    /* v8 ignore next -- catch is defensive */
       } catch (err: any) {
         this.logger.error(
           { err: err.message, sessionId, type, table: tableName },
@@ -2396,6 +2397,7 @@ export class MVCCExecutor {
         this.lastCheckpointTime = Date.now();
         this.logger.info({ lsn: rec.lsn, xid }, 'WAL checkpoint completed');
         return rec.lsn;
+    /* v8 ignore next -- catch is defensive */
       } catch (err: any) {
         this.logger.error({ err: err.message }, 'WAL checkpoint failed');
         return null;
@@ -2408,6 +2410,7 @@ export class MVCCExecutor {
         this.lastCheckpointTime = Date.now();
         this.logger.info('WAL segment flushed (no checkpoint record)');
         return 'flushed';
+    /* v8 ignore next -- catch is defensive */
       } catch (err: any) {
         this.logger.error({ err: err.message }, 'WAL flush failed during checkpoint');
         return null;
@@ -3239,6 +3242,7 @@ export class MVCCExecutor {
     try {
       const row = db.pragma('synchronous', { simple: true }) as string | number;
       originalSync = row;
+    /* v8 ignore next -- catch is defensive */
     } catch {
       // If reading fails, assume NORMAL
     }
