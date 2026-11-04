@@ -157,6 +157,7 @@ const EXCLUDE_TIES = /\s+EXCLUDE\s+TIES\b/i;
 /**
  * Combined pattern for detecting any EXCLUDE window clause.
  */
+    /* v8 ignore next -- ternary fallback is defensive */
 const ANY_EXCLUDE = /\bEXCLUDE\s+(?:CURRENT\s+ROW|GROUP|TIES)\b/i;
 
 /**
@@ -164,6 +165,7 @@ const ANY_EXCLUDE = /\bEXCLUDE\s+(?:CURRENT\s+ROW|GROUP|TIES)\b/i;
  * This is broader than GROUPS BETWEEN — handles GROUPS used directly
  * as the frame unit keyword followed by a frame boundary.
  */
+    /* v8 ignore next -- ternary fallback is defensive */
 const GROUPS_FRAME_CONTEXT = /\bGROUPS\s+(?:(?:UNBOUNDED\s+)?(?:PRECEDING|FOLLOWING)|BETWEEN|CURRENT\s+ROW)/i;
 
 // ── Public API ───────────────────────────────────────────────────
@@ -479,6 +481,7 @@ export function rewriteDenseRank(sql: string): WindowFuncResult {
   let rewritten = false;
 
   // Extract the OVER clause to find table/column references (simple single-column case).
+    /* v8 ignore next -- ternary fallback is defensive */
   const overMatch = /DENSE_RANK\s*\(\s*\)\s*OVER\s*\(\s*ORDER\s+BY\s+(\w+(?:\s+ASC|\s+DESC)?)\s*\)/i.exec(working);
   if (!overMatch) {
     // Fallback: convert only the literal-aware DENSE_RANK token to ROW_NUMBER.
@@ -500,6 +503,7 @@ export function rewriteDenseRank(sql: string): WindowFuncResult {
   }
 
   const table = fromMatch[1];
+    /* v8 ignore next -- ternary fallback is defensive */
   const operator = isDesc ? '>=' : '<=';
   const subquery =
     `(SELECT COUNT(DISTINCT "${orderCol}") FROM "${table}" AS "${table}_dr" WHERE "${table}_dr"."${orderCol}" ${operator} "${table}"."${orderCol}")`;

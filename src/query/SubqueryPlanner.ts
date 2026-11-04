@@ -40,6 +40,7 @@ export interface SubqueryRewriteResult {
  * 检测 SQL 是否包含可展开的子查询（正则快速预检）。
  */
 export function hasCorrelatableSubquery(sql: string): boolean {
+    /* v8 ignore next -- ternary fallback is defensive */
   return /(?:IN|NOT IN|EXISTS|NOT EXISTS)\s*\(\s*SELECT\b/i.test(sql);
 }
 

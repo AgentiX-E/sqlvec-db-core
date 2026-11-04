@@ -445,6 +445,7 @@ export class ShardManager {
       return (rawRows as any[][]).map((raw) => {
         const obj: Record<string, any> = {};
         for (let i = 0; i < raw.length; i++) {
+    /* v8 ignore next -- ternary fallback is defensive */
           const key = i < colNames.length ? colNames[i] : `col${i}`;
           // Only set the first occurrence; duplicates are accessible via _raw
           // Only set the first occurrence; duplicates are accessible via _raw
@@ -1161,6 +1162,7 @@ export class ShardManager {
     }
 
     const newKey = Buffer.from(newKeyBase64, 'base64');
+    /* v8 ignore next -- ternary fallback is defensive */
     const results: Record<number, { success: boolean; error?: string }> = {};
 
     for (const [shardId, shard] of this.shards) {

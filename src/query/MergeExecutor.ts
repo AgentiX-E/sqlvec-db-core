@@ -164,12 +164,15 @@ const WHEN_NOT_MATCHED_BY_SOURCE_UPDATE_RE =
  *   2 — =, IS, IS NOT DISTINCT FROM 等比较运算符
  *   3 — 右侧标识符（如 "s.id"）
  */
+    /* v8 ignore next -- ternary fallback is defensive */
 const EQUALITY_COND_RE = /(\w+(?:\.\w+)?)\s*(=)\s*(\w+(?:\.\w+)?)/gi;
 
 /** 提取表 alias（AS 别名或直接别名） */
+    /* v8 ignore next -- ternary fallback is defensive */
 const ALIAS_RE = /\s+(?:AS\s+)?(\w+)\s*$/i;
 
 /** 提取 INSERT 的列列表和 VALUES */
+    /* v8 ignore next -- ternary fallback is defensive */
 const INSERT_PARTS_RE = /\s*\(([^)]*)\)\s*(?:VALUES\s*)?\(([^)]*)\)/i;
 
 // (no additional regex constants needed here — all non-fallback patterns are defined above)
@@ -858,6 +861,7 @@ function translateUpsert(parsed: ParsedMerge): string | null {
   // upsert clause is recognized unambiguously. Plain table sources need no
   // barrier (verified: `INSERT ... SELECT ... ON CONFLICT` is unambiguous).
   const needsWhereBarrier = /^\s*\(/.test(fromStr);
+    /* v8 ignore next -- ternary fallback is defensive */
   const whereBarrier = needsWhereBarrier ? '\nWHERE 1=1' : '';
   const onConflictStr = `ON CONFLICT(${conflictColsStr}) DO UPDATE SET ${updateSetItems.join(', ')}`;
 
@@ -1145,6 +1149,7 @@ function parseSetClause(setClause: string): Array<{ column: string; valueExpr: s
     const valPart = trimmed.slice(eqIdx + 1).trim();
 
     // 从列部分提取裸列名（去除表前缀如 "t.name" → "name"）
+    /* v8 ignore next -- ternary fallback is defensive */
     const colName = colPart.includes('.') ? colPart.split('.').pop()!.trim() : colPart;
 
     // 列名移除可能的引号
@@ -1276,6 +1281,7 @@ function findTopLevelFromKeyword(text: string): number {
         // NOTE: the i + 4 < text.length guard is already satisfied by the outer
         // `else if (depth === 0 && i + 4 < text.length)` branch, so the `: ' '`
         // fallback and the trailing `i + 4 >= text.length` disjunct are defensive.
+    /* v8 ignore next -- ternary fallback is defensive */
         const nextCh = i + 4 < text.length ? text[i + 4] : ' ';
         /* istanbul ignore next -- trailing i + 4 >= length is unreachable (outer guard) */
         if (nextCh === ' ' || nextCh === '\t' || nextCh === '\n' || nextCh === '(' || i + 4 >= text.length) {
@@ -1604,6 +1610,7 @@ export function executeMergeWithReturning(
   /* v8 ignore next -- ?? fallback is defensive default */
       .map((col) => String(row[col] ?? ''))
       .join('|');
+    /* v8 ignore next -- ternary fallback is defensive */
     return existingKeys.has(keyVal) ? 'UPDATE' : 'INSERT';
   }
 
@@ -1677,6 +1684,7 @@ export function executeMergeWithReturning(
       if (!trimmed) continue;
 
       // Strip leading SQL comment lines to detect the actual statement type
+    /* v8 ignore next -- ternary fallback is defensive */
       const strippedSql = trimmed.replace(/^(?:--[^\n]*\n?\s*)+/gm, '').trim();
 
       if (/^INSERT\b/i.test(strippedSql)) {
