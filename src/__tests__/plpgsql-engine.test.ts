@@ -1448,4 +1448,32 @@ describe('PlPgSqlEngine', () => {
       expect(r.error).toBe('e');
     });
   });
+
+
+  // ── evaluateFunctionCall / splitArgs / resolveOnePass paths ──
+  describe('function-call expression evaluation', () => {
+    it('calls substr via IF condition through evaluateFunctionCall', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ BEGIN IF substr('hello',1,3) = 'hel' THEN RETURN 1; END IF; END; $$");
+      expect(r.returnValue).toBe(1);
+    });
+
+    it('calls replace via RETURN expression (resolveOnePass)', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ BEGIN RETURN replace('abc','b','X'); END; $$");
+      expect(r.returnValue).toBe('aXc');
+    });
+
+    it('calls repeat via RETURN expression', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ BEGIN RETURN repeat('ab',3); END; $$");
+      expect(r.returnValue).toBe('ababab');
+    });
+
+    it('calls nullif with unequal args via RETURN', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ BEGIN RETURN nullif(1, 2); END; $$");
+      expect(r.returnValue).toBe(1);
+    });
+  });
 });
