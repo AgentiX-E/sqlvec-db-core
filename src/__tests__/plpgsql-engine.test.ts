@@ -1476,4 +1476,32 @@ describe('PlPgSqlEngine', () => {
       expect(r.returnValue).toBe(1);
     });
   });
+
+
+  // ── splitArgs / evaluateFunctionCall / resolveOnePass trigger paths ──
+  describe('evaluateFunctionCall and splitArgs paths', () => {
+    it('function with variable reference triggers splitArgs', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE s TEXT := 'hello'; x TEXT; BEGIN x := substr(s, 1, 3); RETURN x; END; $$");
+      expect(r.returnValue).toBe('hel');
+    });
+
+    it('nested abs(round()) triggers resolveEvalFunctionCalls', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE x INT; BEGIN x := abs(round(1.7)); RETURN x; END; $$");
+      expect(r.returnValue).toBe(2);
+    });
+
+    it('comparison in IF with function triggers evaluateCondition', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE s TEXT := 'HELLO'; BEGIN IF lower(s) = 'hello' THEN RETURN 1; END IF; END; $$");
+      expect(r.returnValue).toBe(1);
+    });
+
+    it('nullif with variables triggers evaluateFunctionCall', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE a INT := 1; b INT := 2; x INT; BEGIN x := nullif(a, b); RETURN x; END; $$");
+      expect(r.returnValue).toBe(1);
+    });
+  });
 });
