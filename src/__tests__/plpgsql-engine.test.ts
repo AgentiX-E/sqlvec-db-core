@@ -1504,4 +1504,44 @@ describe('PlPgSqlEngine', () => {
       expect(r.returnValue).toBe(1);
     });
   });
+
+
+  // ── remaining all-zero branches: loops, exception handler, conditions ──
+  describe('remaining all-zero branch coverage', () => {
+    it('WHILE loop with IF break triggers condition->handler path', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE i INT := 0; s INT := 0; BEGIN WHILE true LOOP i := i + 1; s := s + i; IF i >= 5 THEN EXIT; END IF; END LOOP; RETURN s; END; $$");
+      expect(r.returnValue).toBe(15);
+    });
+
+    it('WHILE loop with CONTINUE', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE i INT := 0; s INT := 0; BEGIN WHILE i < 5 LOOP i := i + 1; IF i = 3 THEN CONTINUE; END IF; s := s + i; END LOOP; RETURN s; END; $$");
+      expect(r.returnValue).toBe(12);
+    });
+
+    it('exception handler with specific SQLSTATE', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ BEGIN RAISE EXCEPTION SQLSTATE '22012' USING MESSAGE = 'division by zero'; EXCEPTION WHEN SQLSTATE '22012' THEN RETURN 99; END; $$");
+      expect(r.returnValue).toBe(99);
+    });
+
+    it('exception handler OTHERS fallthrough', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ BEGIN RAISE EXCEPTION 'random_error'; EXCEPTION WHEN OTHERS THEN RETURN 42; END; $$");
+      expect(r.returnValue).toBe(42);
+    });
+
+    it('declare with default expression triggers evaluateExpression', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE x INT := 40 + 2; BEGIN RETURN x; END; $$");
+      expect(r.returnValue).toBe(42);
+    });
+
+    it('varray concatenation triggers Array.isArray path', async () => {
+      const e = createPlPgSqlEngine();
+      const r = await e.execute("DO $$ DECLARE a INT[] := ARRAY[1,2]; b INT[] := ARRAY[3]; x INT[]; BEGIN x := a || b; RETURN x[3]; END; $$");
+      expect(r.returnValue).toBe(3);
+    });
+  });
 });
